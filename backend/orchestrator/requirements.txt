@@ -1,0 +1,31 @@
+# Core
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+python-dotenv==1.0.1
+
+# Database
+sqlalchemy==2.0.25
+asyncpg==0.29.0
+pgvector==0.2.5
+
+# Cache & Queue
+redis==5.0.1
+celery==5.3.6
+
+# AI/ML
+sentence-transformers==2.2.2
+groq==0.4.2
+
+# HTTP
+httpx==0.26.0
+
+# GitHub
+pygithub==2.3.0
+
+# Slack
+slack-bolt==1.18.0
+
+# Utils
+loguru==0.7.2
