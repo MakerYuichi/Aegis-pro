@@ -1,0 +1,57 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: aegis-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: aegis
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: aegis-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  orchestrator:
+    build: ./backend/orchestrator
+    container_name: aegis-orchestrator
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/aegis
+      - REDIS_URL=redis://redis:6379
+    env_file:
+      - backend/orchestrator/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/orchestrator:/app
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
