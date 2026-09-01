@@ -1,44 +1,52 @@
 from sqlalchemy import text
 from src.database import get_db
 from loguru import logger
-import numpy as np
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import json
 
 class RAGService:
     def __init__(self):
         self.model = None
         self.use_embeddings = False
+        self.executor = ThreadPoolExecutor(max_workers=1)
         
-        # Try to load sentence-transformers with proper error handling
         try:
             from sentence_transformers import SentenceTransformer
-            # Use a lightweight but powerful model
+            logger.info("🔄 Loading sentence-transformers model...")
             self.model = SentenceTransformer('all-MiniLM-L6-v2')
             self.use_embeddings = True
-            logger.info("✅ RAG service initialized with sentence-transformers (embeddings enabled)")
-        except ImportError as e:
-            logger.warning(f"⚠️ sentence-transformers not installed: {e}")
-            logger.info("✅ RAG service initialized in fallback mode (text-based search)")
+            logger.info("✅ RAG service initialized with sentence-transformers")
         except Exception as e:
             logger.warning(f"⚠️ Could not load embedding model: {e}")
-            logger.info("✅ RAG service initialized in fallback mode")
+            logger.info("✅ RAG service initialized in text-search mode")
     
     async def store_incident(self, incident_data: dict):
         """Store incident with embedding for future retrieval"""
         if self.use_embeddings and self.model:
             try:
-                # Create text for embedding
+                loop = asyncio.get_event_loop()
                 text_to_embed = f"{incident_data.get('title', '')} {incident_data.get('description', '')} {incident_data.get('stack_trace', '')}"
-                embedding = self.model.encode(text_to_embed).tolist()
+                embedding = await loop.run_in_executor(
+                    self.executor,
+                    self.model.encode,
+                    text_to_embed
+                )
                 
-                async with get_db() as session:
+                # Convert to list and then to string for PostgreSQL vector
+                embedding_list = embedding.tolist()
+                embedding_str = '[' + ','.join(str(x) for x in embedding_list) + ']'
+                
+                session = await get_db()
+                async with session:
                     await session.execute(
                         text("""
                             UPDATE incidents 
-                            SET embedding = :embedding::vector 
+                            SET embedding = :embedding 
                             WHERE incident_id = :incident_id
                         """),
                         {
-                            "embedding": embedding,
+                            "embedding": embedding_str,
                             "incident_id": incident_data['incident_id']
                         }
                     )
@@ -47,61 +55,74 @@ class RAGService:
             except Exception as e:
                 logger.error(f"Error storing embedding: {e}")
         else:
-            logger.info(f"📝 Incident {incident_data.get('incident_id', 'unknown')} stored (text-search mode)")
+            logger.info(f"📝 Incident {incident_data.get('incident_id', 'unknown')} stored")
     
     async def search_similar(self, query: str, limit: int = 3) -> list:
-        """Search for similar past incidents using embeddings or text search"""
+        """Search for similar past incidents"""
         try:
-            async with get_db() as session:
-                if self.use_embeddings and self.model:
-                    # Vector similarity search
-                    query_embedding = self.model.encode(query).tolist()
-                    result = await session.execute(
-                        text("""
-                            SELECT 
-                                incident_id,
-                                title,
-                                description,
-                                root_cause,
-                                suggested_fix,
-                                rollback_command,
-                                severity,
-                                1 - (embedding <=> :query_embedding::vector) as similarity
-                            FROM incidents
-                            WHERE embedding IS NOT NULL
-                            ORDER BY embedding <=> :query_embedding::vector
-                            LIMIT :limit
-                        """),
-                        {
-                            "query_embedding": query_embedding,
-                            "limit": limit
-                        }
+            if self.use_embeddings and self.model:
+                try:
+                    loop = asyncio.get_event_loop()
+                    query_embedding = await loop.run_in_executor(
+                        self.executor,
+                        self.model.encode,
+                        query
                     )
                     
-                    rows = result.fetchall()
-                    similar = [
-                        {
-                            "incident_id": row[0],
-                            "title": row[1],
-                            "description": row[2][:200] + "..." if row[2] and len(row[2]) > 200 else row[2],
-                            "root_cause": row[3],
-                            "suggested_fix": row[4],
-                            "rollback_command": row[5],
-                            "severity": row[6],
-                            "similarity": float(row[7]) if row[7] else 0
-                        }
-                        for row in rows
-                    ]
+                    # Convert to list and then to string for PostgreSQL vector
+                    embedding_list = query_embedding.tolist()
+                    embedding_str = '[' + ','.join(str(x) for x in embedding_list) + ']'
                     
-                    if similar:
-                        logger.info(f"Found {len(similar)} similar incidents via embeddings (best: {similar[0]['similarity']:.2f})")
-                    return similar
-                else:
-                    # Fallback: text-based search
+                    session = await get_db()
+                    async with session:
+                        result = await session.execute(
+                            text("""
+                                SELECT 
+                                    incident_id,
+                                    title,
+                                    description,
+                                    root_cause,
+                                    suggested_fix,
+                                    rollback_command,
+                                    severity,
+                                    1 - (embedding <=> :embedding) as similarity
+                                FROM incidents
+                                WHERE embedding IS NOT NULL
+                                ORDER BY embedding <=> :embedding
+                                LIMIT :limit
+                            """),
+                            {
+                                "embedding": embedding_str,
+                                "limit": limit
+                            }
+                        )
+                        
+                        rows = result.fetchall()
+                        similar = [
+                            {
+                                "incident_id": row[0],
+                                "title": row[1],
+                                "description": row[2][:200] + "..." if row[2] and len(row[2]) > 200 else row[2],
+                                "root_cause": row[3],
+                                "suggested_fix": row[4],
+                                "rollback_command": row[5],
+                                "severity": row[6],
+                                "similarity": float(row[7]) if row[7] else 0
+                            }
+                            for row in rows
+                        ]
+                        
+                        if similar:
+                            logger.info(f"Found {len(similar)} similar incidents via embeddings")
+                        return similar
+                except Exception as e:
+                    logger.error(f"Embedding search failed: {e}")
                     return await self._text_search(query, limit)
+            else:
+                return await self._text_search(query, limit)
                 
         except Exception as e:
-            logger.error(f"Error searching similar incidents: {e}")
+            logger.error(f"Error searching: {e}")
             return await self._text_search(query, limit)
     
     async def _text_search(self, query: str, limit: int = 3) -> list:
@@ -123,7 +144,8 @@ class RAGService:
             where_clause = " OR ".join(conditions)
             params["limit"] = limit
             
-            async with get_db() as session:
+            session = await get_db()
+            async with session:
                 result = await session.execute(
                     text(f"""
                         SELECT 
@@ -144,7 +166,7 @@ class RAGService:
                 )
                 
                 rows = result.fetchall()
-                similar = [
+                return [
                     {
                         "incident_id": row[0],
                         "title": row[1],
@@ -157,11 +179,6 @@ class RAGService:
                     }
                     for row in rows
                 ]
-                
-                if similar:
-                    logger.info(f"Found {len(similar)} similar incidents via text search (fallback)")
-                return similar
-                
         except Exception as e:
             logger.error(f"Error in text search: {e}")
             return []
