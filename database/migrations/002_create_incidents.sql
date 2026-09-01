@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS incidents (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     
-    metadata JSONB DEFAULT '{}'::jsonb,
+    extra_metadata JSONB DEFAULT '{}'::jsonb,
     affected_services JSONB DEFAULT '[]'::jsonb,
     resolution_steps JSONB DEFAULT '[]'::jsonb
 );
@@ -45,6 +45,6 @@ CREATE INDEX idx_incidents_severity ON incidents(severity);
 CREATE INDEX idx_incidents_declared_at ON incidents(declared_at);
 CREATE INDEX idx_incidents_embedding ON incidents USING ivfflat (embedding vector_cosine_ops);
 
--- Comments for documentation
 COMMENT ON TABLE incidents IS 'Stores all incidents with embeddings for RAG';
+COMMENT ON COLUMN incidents.extra_metadata IS 'Additional incident metadata';
 COMMENT ON COLUMN incidents.embedding IS '384-dim vector from sentence-transformers for similarity search';
