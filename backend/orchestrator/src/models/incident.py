@@ -29,6 +29,7 @@ class Incident(Base):
     rollback_command = Column(Text)
     confidence_score = Column(Float, default=0.0)
     
+    # Vector embedding for RAG (384 dimensions from sentence-transformers)
     embedding = Column(Vector(384))
     
     declared_at = Column(DateTime(timezone=True))
@@ -36,7 +37,6 @@ class Incident(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # Changed from 'metadata' to 'extra_metadata' to avoid SQLAlchemy conflict
     extra_metadata = Column(JSON, default=dict)
     affected_services = Column(JSON, default=list)
     resolution_steps = Column(JSON, default=list)

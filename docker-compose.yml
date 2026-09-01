@@ -46,7 +46,10 @@ services:
       redis:
         condition: service_healthy
     volumes:
+      # Mount the entire code directory - NO REBUILD NEEDED!
       - ./backend/orchestrator:/app
+      # Prevent overwriting installed packages
+      - /app/__pycache__
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
 

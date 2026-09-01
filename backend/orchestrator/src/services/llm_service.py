@@ -10,11 +10,10 @@ class LLMService:
         if settings.GROQ_API_KEY and settings.GROQ_API_KEY != "":
             try:
                 self.client = Groq(api_key=settings.GROQ_API_KEY)
-                # Working models from the API response
                 self.models = [
-                    "openai/gpt-oss-20b",        # Fast, good quality
-                    "groq/compound",              # Groq's own model
-                    "qwen/qwen3.6-27b",           # Alibaba's model
+                    "openai/gpt-oss-20b",
+                    "groq/compound",
+                    "qwen/qwen3.6-27b",
                 ]
                 logger.info(f"✅ Groq LLM initialized with {len(self.models)} models")
             except Exception as e:
@@ -28,14 +27,15 @@ class LLMService:
         service_name: str,
         message: str,
         stack_analysis: dict,
-        blast_radius: dict
+        blast_radius: dict,
+        rag_context: str = ""  # NEW: RAG context
     ) -> dict:
         """Analyze incident using Groq LLM or intelligent mock"""
         
         # Try Groq first if available
         if self.client:
             result = await self._try_llm_analysis(
-                service_name, message, stack_analysis, blast_radius
+                service_name, message, stack_analysis, blast_radius, rag_context
             )
             if result:
                 return result
@@ -43,9 +43,9 @@ class LLMService:
         # Fallback to intelligent mock
         return self._intelligent_mock(service_name, message, stack_analysis, blast_radius)
     
-    async def _try_llm_analysis(self, service_name, message, stack_analysis, blast_radius):
+    async def _try_llm_analysis(self, service_name, message, stack_analysis, blast_radius, rag_context):
         """Try LLM analysis with fallback models"""
-        prompt = self._build_prompt(service_name, message, stack_analysis, blast_radius)
+        prompt = self._build_prompt(service_name, message, stack_analysis, blast_radius, rag_context)
         
         for model in self.models:
             try:
@@ -55,7 +55,7 @@ class LLMService:
                     messages=[
                         {
                             "role": "system",
-                            "content": """You are an expert SRE. Respond with ONLY valid JSON:
+                            "content": """You are an expert SRE. Use the provided context (similar past incidents) to respond with ONLY valid JSON:
 {
     "severity": "P0" or "P1" or "P2",
     "title": "Short title",
@@ -84,7 +84,8 @@ class LLMService:
         
         return None
     
-    def _build_prompt(self, service_name, message, stack_analysis, blast_radius):
+    def _build_prompt(self, service_name, message, stack_analysis, blast_radius, rag_context):
+        """Build prompt for LLM with RAG context"""
         prompt = f"Service: {service_name}\nMessage: {message}\n"
         
         if stack_analysis:
@@ -92,6 +93,10 @@ class LLMService:
         
         if blast_radius:
             prompt += f"Affected Services: {', '.join(blast_radius.get('affected', []))}\nCount: {blast_radius.get('count', 0)}\n"
+        
+        # Add RAG context if available
+        if rag_context:
+            prompt += f"\n{rag_context}\n"
         
         return prompt
     
@@ -103,31 +108,19 @@ class LLMService:
         suggested_fix = f"Rollback {service_name} deployment"
         confidence = 0.65
         
-        # Parse NullPointerException
-        if "NullPointerException" in message or "null" in message.lower():
+        if "NullPointerException" in message:
             severity = "P0"
             title = f"Critical NullPointerException in {service_name}"
             root_cause = "Null check missing in code. Check the file and line from the stack trace."
             suggested_fix = "Add null checks and proper error handling. If urgent, rollback the latest change."
             confidence = 0.85
-        
-        # Parse Timeout
-        elif "Timeout" in message or "timeout" in message.lower():
+        elif "Timeout" in message:
             severity = "P1"
             title = f"Timeout issues in {service_name}"
             root_cause = "External service or database is responding slowly"
-            suggested_fix = "Increase timeout values or optimize queries. Check downstream dependencies."
+            suggested_fix = "Increase timeout values or optimize queries"
             confidence = 0.75
         
-        # Parse SQL errors
-        elif "SQLException" in message or "sql" in message.lower():
-            severity = "P1"
-            title = f"Database error in {service_name}"
-            root_cause = "SQL query failed or database connection issue"
-            suggested_fix = "Check database connection pool and recent schema changes"
-            confidence = 0.78
-        
-        # High blast radius
         if blast_radius and blast_radius.get("count", 0) > 3:
             severity = "P0" if severity == "P1" else severity
             root_cause += f" - Affects {blast_radius.get('count', 0)} services"

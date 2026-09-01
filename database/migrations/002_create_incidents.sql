@@ -1,4 +1,8 @@
+-- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Drop existing table if needed
+DROP TABLE IF EXISTS incidents CASCADE;
 
 -- Create incidents table
 CREATE TABLE IF NOT EXISTS incidents (
