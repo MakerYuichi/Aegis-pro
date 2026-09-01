@@ -115,22 +115,43 @@ class IncidentService:
             return self._mock_service(service_name)
     
     async def list_services(self) -> list:
-        """List all services"""
+        """List all services with full details"""
         try:
             session = await get_db()
             async with session:
-                result = await session.execute(text("SELECT name FROM services ORDER BY name"))
-                return [row[0] for row in result.fetchall()]
+                result = await session.execute(
+                    text("""
+                        SELECT 
+                            name, 
+                            description, 
+                            on_call, 
+                            dependencies, 
+                            is_critical 
+                        FROM services 
+                        ORDER BY name
+                    """)
+                )
+                rows = result.fetchall()
+                return [
+                    {
+                        "name": row[0],
+                        "description": row[1],
+                        "on_call": row[2] if row[2] else [],
+                        "dependencies": row[3] if row[3] else [],
+                        "is_critical": row[4] if row[4] else False
+                    }
+                    for row in rows
+                ]
         except Exception as e:
             logger.error(f"Error listing services: {e}")
-            return ["payment-api", "auth", "ledger", "refund", "fraud", "notification", "user", "database"]
+            # Return mock services as fallback
+            return self._mock_services_list()
     
     async def save_incident(self, incident_data: dict):
         """Save incident to database"""
         try:
             session = await get_db()
             async with session:
-                # Use the JSON strings directly - PostgreSQL will handle them as text
                 await session.execute(
                     text("""
                         INSERT INTO incidents (
@@ -163,21 +184,38 @@ class IncidentService:
                 )
                 row = result.fetchone()
                 if row:
-                    return dict(row._mapping)
+                    data = dict(row._mapping)
+                    # Parse JSONB fields back to Python objects
+                    if data.get('extra_metadata') and isinstance(data['extra_metadata'], str):
+                        data['extra_metadata'] = json.loads(data['extra_metadata'])
+                    if data.get('affected_services') and isinstance(data['affected_services'], str):
+                        data['affected_services'] = json.loads(data['affected_services'])
+                    return data
                 return None
         except Exception as e:
             logger.error(f"Error getting incident: {e}")
             return None
     
     async def get_all_incidents(self, limit: int = 50) -> list:
-        """Get all incidents"""
+        """Get all incidents with proper parsing"""
         try:
             session = await get_db()
             async with session:
                 result = await session.execute(
                     text("""
-                        SELECT incident_id, service_name, severity, status, title, 
-                               root_cause, suggested_fix, confidence_score, declared_at
+                        SELECT 
+                            incident_id, 
+                            service_name, 
+                            severity, 
+                            status, 
+                            title,
+                            description,
+                            root_cause,
+                            suggested_fix,
+                            rollback_command,
+                            confidence_score,
+                            affected_services,
+                            declared_at
                         FROM incidents 
                         ORDER BY declared_at DESC 
                         LIMIT :limit
@@ -185,7 +223,23 @@ class IncidentService:
                     {"limit": limit}
                 )
                 rows = result.fetchall()
-                return [dict(row._mapping) for row in rows]
+                return [
+                    {
+                        "incident_id": row[0],
+                        "service_name": row[1],
+                        "severity": row[2],
+                        "status": row[3],
+                        "title": row[4],
+                        "description": row[5],
+                        "root_cause": row[6],
+                        "suggested_fix": row[7],
+                        "rollback_command": row[8],
+                        "confidence_score": row[9],
+                        "affected_services": json.loads(row[10]) if row[10] else [],
+                        "declared_at": row[11]
+                    }
+                    for row in rows
+                ]
         except Exception as e:
             logger.error(f"Error getting incidents: {e}")
             return []
@@ -317,3 +371,16 @@ class IncidentService:
             "database": {"name": "database", "on_call": ["@shreya"], "dependencies": []}
         }
         return services.get(service_name, {"name": service_name, "on_call": [], "dependencies": []})
+    
+    def _mock_services_list(self) -> list:
+        """Mock full service list when DB not available"""
+        return [
+            {"name": "payment-api", "description": "Payment processing", "on_call": ["@rahul", "@priya"], "dependencies": ["auth", "ledger"], "is_critical": True},
+            {"name": "auth", "description": "Authentication", "on_call": ["@amit"], "dependencies": [], "is_critical": True},
+            {"name": "ledger", "description": "Transaction ledger", "on_call": ["@sneha"], "dependencies": ["database"], "is_critical": True},
+            {"name": "refund", "description": "Refund processing", "on_call": ["@ananya"], "dependencies": ["payment-api"], "is_critical": False},
+            {"name": "fraud", "description": "Fraud detection", "on_call": ["@raj"], "dependencies": ["payment-api"], "is_critical": False},
+            {"name": "notification", "description": "Notifications", "on_call": ["@kavya"], "dependencies": ["user"], "is_critical": False},
+            {"name": "user", "description": "User management", "on_call": ["@arjun"], "dependencies": [], "is_critical": False},
+            {"name": "database", "description": "Database ops", "on_call": ["@shreya"], "dependencies": [], "is_critical": True},
+        ]
