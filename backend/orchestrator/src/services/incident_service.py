@@ -5,14 +5,16 @@ from loguru import logger
 
 from src.database import get_db
 from src.services.llm_service import LLMService
+from src.services.rag_service import RAGService
 
 class IncidentService:
     def __init__(self):
         self.llm = LLMService()
-        logger.info("✅ IncidentService initialized")
+        self.rag = RAGService()
+        logger.info("✅ IncidentService initialized with RAG")
     
     async def declare_incident(self, service_name: str, message: str, stack_trace: str = None) -> dict:
-        """Declare a new incident"""
+        """Declare a new incident with RAG context"""
         incident_id = f"INC-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
         
         logger.info(f"🚨 Declaring incident: {incident_id} for service: {service_name}")
@@ -33,12 +35,21 @@ class IncidentService:
             dependencies=service.get("dependencies", [])
         )
         
-        # Use LLM for analysis
+        # 🔍 RAG: Search for similar past incidents
+        rag_context = await self.rag.generate_context_prompt(message)
+        rag_used = bool(rag_context)
+        if rag_used:
+            logger.info(f"📚 Found similar past incidents for context!")
+        else:
+            logger.info("📚 No similar past incidents found yet")
+        
+        # Use LLM with RAG context
         analysis = await self.llm.analyze_incident(
             service_name=service_name,
             message=message,
             stack_analysis=stack_analysis,
-            blast_radius=blast_radius
+            blast_radius=blast_radius,
+            rag_context=rag_context  # RAG context passed to LLM
         )
         
         incident_data = {
@@ -57,11 +68,14 @@ class IncidentService:
             "rollback_command": analysis.get("rollback_command", ""),
             "confidence_score": analysis.get("confidence", 0.7),
             "declared_at": datetime.utcnow(),
-            "extra_metadata": {"recent_prs": []},
+            "extra_metadata": {"rag_context_used": rag_used},
             "affected_services": blast_radius.get("affected", [])
         }
         
         await self.save_incident(incident_data)
+        
+        # Store for future RAG searches
+        await self.rag.store_incident(incident_data)
         
         return {
             "incident_id": incident_id,
@@ -74,6 +88,7 @@ class IncidentService:
             "rollback_command": analysis.get("rollback_command"),
             "confidence": analysis.get("confidence"),
             "blast_radius": blast_radius,
+            "rag_context_used": rag_used,
             "timestamp": datetime.utcnow().isoformat()
         }
     
