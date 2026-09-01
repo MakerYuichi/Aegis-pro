@@ -6,11 +6,12 @@ import re
 
 class LLMService:
     def __init__(self):
-        if settings.GROQ_API_KEY:
+        if settings.GROQ_API_KEY and settings.GROQ_API_KEY != "":
             try:
                 self.client = Groq(api_key=settings.GROQ_API_KEY)
-                self.model = "mixtral-8x7b-32768"
-                logger.info("✅ Groq LLM initialized")
+                # Updated to the latest model
+                self.model = "llama-3.1-70b-versatile"  # Or "llama-3.1-8b-instant" for faster responses
+                logger.info(f"✅ Groq LLM initialized with model: {self.model}")
             except Exception as e:
                 logger.error(f"❌ Failed to initialize Groq: {e}")
                 self.client = None
@@ -28,6 +29,7 @@ class LLMService:
         """Analyze incident using Groq LLM"""
         
         if not self.client:
+            logger.info("Using mock response (no LLM client)")
             return self._mock_response(service_name, message)
         
         try:
@@ -38,26 +40,29 @@ class LLMService:
                 blast_radius=blast_radius
             )
             
+            logger.info(f"Sending to LLM: {prompt[:200]}...")
+            
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {
                         "role": "system",
-                        "content": """You are an expert SRE analyzing a production incident.
-                        Respond with ONLY valid JSON containing:
-                        {
-                            "severity": "P0" or "P1" or "P2",
-                            "title": "short title",
-                            "root_cause": "2-3 sentence explanation",
-                            "suggested_fix": "1-2 sentence fix",
-                            "rollback_command": "kubectl rollout undo deploy/SERVICE -n production",
-                            "confidence": 0.0 to 1.0
-                        }"""
+                        "content": """You are an expert SRE. Analyze this incident and respond with ONLY valid JSON. No other text.
+
+Example response:
+{
+    "severity": "P0",
+    "title": "Critical NullPointerException in payment-api",
+    "root_cause": "Null check missing in PaymentProcessor.java:442 caused UPI flow to fail",
+    "suggested_fix": "Add null check for upiResponse in processUPI method",
+    "rollback_command": "kubectl rollout undo deploy/payment-api -n production",
+    "confidence": 0.85
+}"""
                     },
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3,
-                max_tokens=500
+                temperature=0.1,
+                max_tokens=300
             )
             
             content = response.choices[0].message.content
@@ -68,9 +73,12 @@ class LLMService:
             if json_match:
                 try:
                     result = json.loads(json_match.group())
+                    logger.info(f"✅ LLM analysis successful: {result}")
                     return result
-                except json.JSONDecodeError:
-                    logger.error("Failed to parse JSON from LLM response")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse JSON: {e}")
+            else:
+                logger.error("No JSON found in LLM response")
             
             return self._mock_response(service_name, message)
             
@@ -79,29 +87,33 @@ class LLMService:
             return self._mock_response(service_name, message)
     
     def _build_prompt(self, **kwargs) -> str:
+        """Build prompt for LLM"""
         prompt = f"""
-        Service: {kwargs['service_name']}
-        Message: {kwargs['message']}
-        """
+Service: {kwargs['service_name']}
+Message: {kwargs['message']}
+"""
         
         if kwargs.get('stack_analysis'):
             sa = kwargs['stack_analysis']
             prompt += f"""
-        Stack Trace:
-        - Exception: {sa.get('exception_type', 'Unknown')}
-        - File: {sa.get('file_path', 'Unknown')}
-        - Line: {sa.get('line_number', 'Unknown')}
-        """
+Stack Trace:
+- Exception: {sa.get('exception_type', 'Unknown')}
+- File: {sa.get('file_path', 'Unknown')}
+- Line: {sa.get('line_number', 'Unknown')}
+"""
         
         if kwargs.get('blast_radius'):
             br = kwargs['blast_radius']
             prompt += f"""
-        Blast Radius:
-        - Affected Services: {br.get('affected', [])}
-        - Count: {br.get('count', 0)}
-        - Severity: {br.get('severity', 'UNKNOWN')}
-        """
+Blast Radius:
+- Affected Services: {', '.join(br.get('affected', []))}
+- Count: {br.get('count', 0)}
+- Severity: {br.get('severity', 'UNKNOWN')}
+"""
         
+        prompt += """
+Provide JSON analysis with: severity (P0/P1/P2), title, root_cause, suggested_fix, rollback_command, confidence (0-1)
+"""
         return prompt
     
     def _mock_response(self, service_name: str, message: str) -> dict:
