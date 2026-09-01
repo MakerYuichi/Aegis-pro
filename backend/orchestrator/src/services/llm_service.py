@@ -7,9 +7,13 @@ import re
 class LLMService:
     def __init__(self):
         if settings.GROQ_API_KEY:
-            self.client = Groq(api_key=settings.GROQ_API_KEY)
-            self.model = "mixtral-8x7b-32768"
-            logger.info("✅ Groq LLM initialized")
+            try:
+                self.client = Groq(api_key=settings.GROQ_API_KEY)
+                self.model = "mixtral-8x7b-32768"
+                logger.info("✅ Groq LLM initialized")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize Groq: {e}")
+                self.client = None
         else:
             logger.warning("⚠️ No GROQ_API_KEY found. Using mock responses.")
             self.client = None
@@ -57,12 +61,16 @@ class LLMService:
             )
             
             content = response.choices[0].message.content
+            logger.info(f"LLM response: {content[:200]}...")
             
             # Extract JSON
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if json_match:
-                result = json.loads(json_match.group())
-                return result
+                try:
+                    result = json.loads(json_match.group())
+                    return result
+                except json.JSONDecodeError:
+                    logger.error("Failed to parse JSON from LLM response")
             
             return self._mock_response(service_name, message)
             

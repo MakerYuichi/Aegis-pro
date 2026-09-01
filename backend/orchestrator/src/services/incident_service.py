@@ -33,7 +33,7 @@ class IncidentService:
             dependencies=service.get("dependencies", [])
         )
         
-        # Use LLM for analysis (or fallback to mock)
+        # Use LLM for analysis
         analysis = await self.llm.analyze_incident(
             service_name=service_name,
             message=message,
@@ -80,7 +80,8 @@ class IncidentService:
     async def get_service(self, service_name: str) -> dict:
         """Get service from catalog"""
         try:
-            async with get_db() as session:
+            session = await get_db()
+            async with session:
                 result = await session.execute(
                     text("SELECT * FROM services WHERE name = :name"),
                     {"name": service_name}
@@ -96,7 +97,8 @@ class IncidentService:
     async def list_services(self) -> list:
         """List all services"""
         try:
-            async with get_db() as session:
+            session = await get_db()
+            async with session:
                 result = await session.execute(text("SELECT name FROM services ORDER BY name"))
                 return [row[0] for row in result.fetchall()]
         except Exception as e:
@@ -106,7 +108,8 @@ class IncidentService:
     async def save_incident(self, incident_data: dict):
         """Save incident to database"""
         try:
-            async with get_db() as session:
+            session = await get_db()
+            async with session:
                 await session.execute(
                     text("""
                         INSERT INTO incidents (
@@ -131,7 +134,8 @@ class IncidentService:
     async def get_incident(self, incident_id: str) -> dict:
         """Get incident by ID"""
         try:
-            async with get_db() as session:
+            session = await get_db()
+            async with session:
                 result = await session.execute(
                     text("SELECT * FROM incidents WHERE incident_id = :incident_id"),
                     {"incident_id": incident_id}
@@ -172,7 +176,8 @@ class IncidentService:
             return {"error": "Incident not found"}
         
         try:
-            async with get_db() as session:
+            session = await get_db()
+            async with session:
                 await session.execute(
                     text("UPDATE incidents SET status = 'resolved', resolved_at = NOW() WHERE incident_id = :incident_id"),
                     {"incident_id": incident_id}
@@ -192,7 +197,8 @@ class IncidentService:
     async def seed_services(self) -> dict:
         """Seed demo services"""
         try:
-            async with get_db() as session:
+            session = await get_db()
+            async with session:
                 await session.execute(text("DELETE FROM services"))
                 
                 services = [

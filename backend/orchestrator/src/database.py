@@ -30,18 +30,11 @@ async def init_db():
     try:
         async with engine.begin() as conn:
             logger.info("✅ Database connected successfully")
-            # Note: Tables are created by migrations
     except Exception as e:
-        logger.error(f"❌ Database connection failed: {e}")
-        raise
+        logger.warning(f"⚠️ Database connection failed (continuing without DB): {e}")
 
+# Simple function to get session - no async generator
 async def get_db():
     """Get database session"""
     async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        except Exception:
-            await session.rollback()
-            raise
-        finally:
-            await session.close()
+        return session
