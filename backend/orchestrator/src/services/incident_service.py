@@ -52,7 +52,25 @@ class IncidentService:
             blast_radius=blast_radius,
             rag_context=rag_context
         )
+        github_context = {}
+        if service.get("repo_name") and settings.GITHUB_TOKEN:
+            github = GitHubService()
+            github_context["recent_prs"] = await github.get_recent_prs(service["repo_name"])
+            
+            if stack_analysis and stack_analysis.get("file_path"):
+                github_context["blame"] = await github.get_blame(
+                    service["repo_name"],
+                    stack_analysis["file_path"],
+                    stack_analysis.get("line_number", 1)
         
+                )
+        if github_context:
+            logger.info(f"🔗 GitHub context: {len(github_context.get('recent_prs', []))} PRs found")
+        # Add to metadata
+            incident_data["extra_metadata"] = json.dumps({
+                "rag_context_used": rag_used,
+                "github": github_context
+            })
         # Convert dict to JSON string for PostgreSQL
         extra_metadata_json = json.dumps({"rag_context_used": rag_used})
         affected_services_json = json.dumps(blast_radius.get("affected", []))
@@ -172,6 +190,7 @@ class IncidentService:
                 logger.info(f"✅ Incident {incident_data['incident_id']} saved")
         except Exception as e:
             logger.error(f"Error saving incident: {e}")
+            
     
     async def get_incident(self, incident_id: str) -> dict:
         """Get incident by ID"""

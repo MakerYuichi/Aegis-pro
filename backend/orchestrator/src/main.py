@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from loguru import logger
@@ -9,6 +9,7 @@ from src.api.slack import router as slack_router
 from src.database import init_db
 from src.services.incident_service import IncidentService
 from src.config import settings
+from src.websocket import manager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -62,6 +63,16 @@ app.add_middleware(
 app.include_router(router, prefix="/api/v1")
 app.include_router(slack_router)
 
+@app.websocket("/ws/incidents")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time incident updates"""
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
 @app.get("/")
 async def root():
     return {
@@ -73,7 +84,8 @@ async def root():
             "api": "/api/v1",
             "ping": "/api/v1/ping",
             "slack": "/slack/events",
-            "slack_status": "/slack/status"
+            "slack_status": "/slack/status",
+            "websocket": "ws://localhost:8000/ws/incidents"
         }
     }
 
