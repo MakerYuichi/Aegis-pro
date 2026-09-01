@@ -1,13 +1,14 @@
-# Update the incident_service.py with the new column name
 from sqlalchemy import text
 from datetime import datetime
 import uuid
 from loguru import logger
 
 from src.database import get_db
+from src.services.llm_service import LLMService
 
 class IncidentService:
     def __init__(self):
+        self.llm = LLMService()
         logger.info("✅ IncidentService initialized")
     
     async def declare_incident(self, service_name: str, message: str, stack_trace: str = None) -> dict:
@@ -32,7 +33,13 @@ class IncidentService:
             dependencies=service.get("dependencies", [])
         )
         
-        analysis = self._mock_analysis(service_name, message, stack_analysis)
+        # Use LLM for analysis (or fallback to mock)
+        analysis = await self.llm.analyze_incident(
+            service_name=service_name,
+            message=message,
+            stack_analysis=stack_analysis,
+            blast_radius=blast_radius
+        )
         
         incident_data = {
             "incident_id": incident_id,
@@ -50,7 +57,7 @@ class IncidentService:
             "rollback_command": analysis.get("rollback_command", ""),
             "confidence_score": analysis.get("confidence", 0.7),
             "declared_at": datetime.utcnow(),
-            "extra_metadata": {"recent_prs": []},  # Changed from 'metadata' to 'extra_metadata'
+            "extra_metadata": {"recent_prs": []},
             "affected_services": blast_radius.get("affected", [])
         }
         
@@ -247,38 +254,6 @@ class IncidentService:
             "file_path": file_match.group(2) if file_match else None,
             "line_number": int(file_match.group(3)) if file_match and len(file_match.groups()) >= 3 else None,
             "full_trace": stack_trace[:500]
-        }
-    
-    def _mock_analysis(self, service_name: str, message: str, stack_analysis: dict) -> dict:
-        """Mock analysis"""
-        if stack_analysis and stack_analysis.get("exception_type"):
-            exception = stack_analysis["exception_type"]
-            if "NullPointer" in exception:
-                return {
-                    "severity": "P0",
-                    "title": f"Critical NullPointerException in {service_name}",
-                    "root_cause": f"Null check missing in {stack_analysis.get('file_path', 'unknown')} at line {stack_analysis.get('line_number', 'unknown')}",
-                    "suggested_fix": "Add null check and return appropriate response",
-                    "rollback_command": f"kubectl rollout undo deploy/{service_name} -n production",
-                    "confidence": 0.85
-                }
-            elif "Timeout" in exception:
-                return {
-                    "severity": "P1",
-                    "title": f"Timeout issues in {service_name}",
-                    "root_cause": "External service or database is slow",
-                    "suggested_fix": "Increase timeout values or optimize queries",
-                    "rollback_command": f"kubectl rollout undo deploy/{service_name} -n production",
-                    "confidence": 0.75
-                }
-        
-        return {
-            "severity": "P1",
-            "title": f"{service_name} incident detected",
-            "root_cause": "Recent change caused service degradation. Check recent deployments.",
-            "suggested_fix": f"Rollback the latest deployment of {service_name}",
-            "rollback_command": f"kubectl rollout undo deploy/{service_name} -n production",
-            "confidence": 0.65
         }
     
     def _mock_service(self, service_name: str) -> dict:
