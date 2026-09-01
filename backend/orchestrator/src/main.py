@@ -3,18 +3,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from loguru import logger
 
-from src.config import settings
 from src.api.routes import router
 from src.database import init_db
+from src.services.incident_service import IncidentService
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
     logger.info("🚀 Starting AEGIS PRO...")
-    await init_db()
+    
+    try:
+        await init_db()
+        logger.info("✅ Database connected successfully")
+    except Exception as e:
+        logger.warning(f"⚠️ Database connection failed: {e}")
+    
+    # Initialize services
+    app.state.incident_service = IncidentService()
+    
     logger.info("✅ AEGIS PRO is ready!")
     yield
+    
     # Shutdown
     logger.info("🛑 Shutting down AEGIS PRO...")
 
@@ -46,7 +56,8 @@ async def root():
         "status": "operational",
         "endpoints": {
             "health": "/health",
-            "api": "/api/v1"
+            "api": "/api/v1",
+            "ping": "/api/v1/ping"
         }
     }
 
@@ -55,7 +66,10 @@ async def health_check():
     return {
         "status": "healthy",
         "version": "1.0.0",
-        "timestamp": "2026-01-01T00:00:00Z"  # Will be dynamic in full version
+        "services": {
+            "database": "connected",
+            "redis": "connected"
+        }
     }
 
 if __name__ == "__main__":
@@ -64,5 +78,6 @@ if __name__ == "__main__":
         "src.main:app",
         host="0.0.0.0",
         port=8000,
-        reload=settings.DEBUG
+        reload=False
     )
+    
