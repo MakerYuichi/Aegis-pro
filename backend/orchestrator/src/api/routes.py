@@ -36,6 +36,13 @@ async def get_incident(incident_id: str, req: Request):
         raise HTTPException(status_code=404, detail="Incident not found")
     return result
 
+@router.get("/incidents")
+async def list_incidents(req: Request, limit: int = 50):
+    """List all incidents"""
+    service = req.app.state.incident_service
+    result = await service.get_all_incidents(limit)
+    return {"incidents": result, "count": len(result)}
+
 @router.post("/incident/rollback")
 async def rollback_incident(request: RollbackRequest, req: Request):
     """Rollback an incident"""

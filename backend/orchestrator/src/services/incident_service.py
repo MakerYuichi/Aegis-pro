@@ -1,6 +1,8 @@
+# backend/orchestrator/src/services/incident_service.py
 from sqlalchemy import text
 from datetime import datetime
 import uuid
+import json
 from loguru import logger
 
 from src.database import get_db
@@ -35,7 +37,7 @@ class IncidentService:
             dependencies=service.get("dependencies", [])
         )
         
-        # 🔍 RAG: Search for similar past incidents
+        # RAG: Search for similar past incidents
         rag_context = await self.rag.generate_context_prompt(message)
         rag_used = bool(rag_context)
         if rag_used:
@@ -49,8 +51,12 @@ class IncidentService:
             message=message,
             stack_analysis=stack_analysis,
             blast_radius=blast_radius,
-            rag_context=rag_context  # RAG context passed to LLM
+            rag_context=rag_context
         )
+        
+        # Convert dict to JSON string for PostgreSQL
+        extra_metadata_json = json.dumps({"rag_context_used": rag_used})
+        affected_services_json = json.dumps(blast_radius.get("affected", []))
         
         incident_data = {
             "incident_id": incident_id,
@@ -68,8 +74,8 @@ class IncidentService:
             "rollback_command": analysis.get("rollback_command", ""),
             "confidence_score": analysis.get("confidence", 0.7),
             "declared_at": datetime.utcnow(),
-            "extra_metadata": {"rag_context_used": rag_used},
-            "affected_services": blast_radius.get("affected", [])
+            "extra_metadata": extra_metadata_json,
+            "affected_services": affected_services_json
         }
         
         await self.save_incident(incident_data)
@@ -136,7 +142,7 @@ class IncidentService:
                             :incident_id, :service_name, :severity, :status, :title, :description,
                             :stack_trace, :exception_type, :file_path, :line_number,
                             :root_cause, :suggested_fix, :rollback_command, :confidence_score,
-                            :declared_at, :extra_metadata, :affected_services
+                            :declared_at, :extra_metadata::jsonb, :affected_services::jsonb
                         )
                     """),
                     incident_data
@@ -162,6 +168,27 @@ class IncidentService:
         except Exception as e:
             logger.error(f"Error getting incident: {e}")
             return None
+    
+    async def get_all_incidents(self, limit: int = 50) -> list:
+        """Get all incidents"""
+        try:
+            session = await get_db()
+            async with session:
+                result = await session.execute(
+                    text("""
+                        SELECT incident_id, service_name, severity, status, title, 
+                               root_cause, suggested_fix, confidence_score, declared_at
+                        FROM incidents 
+                        ORDER BY declared_at DESC 
+                        LIMIT :limit
+                    """),
+                    {"limit": limit}
+                )
+                rows = result.fetchall()
+                return [dict(row._mapping) for row in rows]
+        except Exception as e:
+            logger.error(f"Error getting incidents: {e}")
+            return []
     
     async def calculate_blast_radius(self, service_name: str, dependencies: list) -> dict:
         """Calculate blast radius"""
