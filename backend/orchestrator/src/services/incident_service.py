@@ -1,4 +1,3 @@
-# backend/orchestrator/src/services/incident_service.py
 from sqlalchemy import text
 from datetime import datetime
 import uuid
@@ -131,6 +130,7 @@ class IncidentService:
         try:
             session = await get_db()
             async with session:
+                # Use the JSON strings directly - PostgreSQL will handle them as text
                 await session.execute(
                     text("""
                         INSERT INTO incidents (
@@ -142,7 +142,7 @@ class IncidentService:
                             :incident_id, :service_name, :severity, :status, :title, :description,
                             :stack_trace, :exception_type, :file_path, :line_number,
                             :root_cause, :suggested_fix, :rollback_command, :confidence_score,
-                            :declared_at, :extra_metadata::jsonb, :affected_services::jsonb
+                            :declared_at, :extra_metadata, :affected_services
                         )
                     """),
                     incident_data
