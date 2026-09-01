@@ -1,79 +1,101 @@
-from fastapi import APIRouter, Request, HTTPException, Response
-from src.config import settings
-from src.services.incident_service import IncidentService
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from loguru import logger
-import json
+import redis.asyncio as redis
 
-router = APIRouter()
+from src.api.routes import router
+from src.api.slack import router as slack_router
+from src.database import init_db
+from src.services.incident_service import IncidentService
+from src.config import settings
 
-@router.post("/slack/events")
-async def slack_events(request: Request):
-    """Handle Slack events - including URL verification and commands"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("🚀 Starting AEGIS PRO...")
+    
+    db_connected = False
     try:
-        # Get the raw body
-        body = await request.body()
-        body_str = body.decode('utf-8')
-        
-        logger.info(f"Raw Slack request: {body_str[:500]}")
-        
-        # Try to parse JSON
-        try:
-            data = json.loads(body_str)
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON received: {body_str[:200]}")
-            return {"error": "invalid json"}
-        
-        # Handle URL verification challenge
-        if data.get("type") == "url_verification":
-            challenge = data.get("challenge")
-            logger.info(f"URL verification challenge: {challenge}")
-            return {"challenge": challenge}
-        
-        # Handle slash command
-        if data.get("command") == "/incident":
-            logger.info(f"Slash command received: {data.get('text', '')}")
-            
-            # Parse command: /incident service-name "message"
-            parts = data.get('text', '').split(' ', 1)
-            service_name = parts[0] if parts else None
-            message = parts[1] if len(parts) > 1 else "Incident reported"
-            
-            if not service_name:
-                return {"text": "⚠️ Please specify a service: `/incident payment-api Failure detected`"}
-            
-            try:
-                # Declare incident
-                incident_service = IncidentService()
-                result = await incident_service.declare_incident(
-                    service_name=service_name,
-                    message=message,
-                    stack_trace=None
-                )
-                
-                # Format response for Slack
-                response_text = f"🚨 Incident {result['incident_id']} declared for {service_name}\n\n"
-                response_text += f"*Severity:* {result['severity']}\n"
-                response_text += f"*Root Cause:* {result['root_cause'][:300]}\n"
-                response_text += f"*Suggested Fix:* {result['suggested_fix'][:200]}\n"
-                response_text += f"*Rollback Command:* `{result['rollback_command']}`"
-                
-                return {"text": response_text}
-                
-            except Exception as e:
-                logger.error(f"Error declaring incident: {e}")
-                return {"text": f"❌ Failed to declare incident: {str(e)}"}
-        
-        # Handle other events
-        return {"status": "ok"}
-        
+        await init_db()
+        db_connected = True
+        logger.info("✅ Database connected successfully")
     except Exception as e:
-        logger.error(f"Slack error: {e}")
-        return {"error": str(e)}
+        logger.warning(f"⚠️ Database connection failed: {e}")
+    
+    redis_connected = False
+    try:
+        redis_client = redis.from_url(settings.REDIS_URL)
+        await redis_client.ping()
+        redis_connected = True
+        logger.info("✅ Redis connected successfully")
+        await redis_client.close()
+    except Exception as e:
+        logger.warning(f"⚠️ Redis connection failed: {e}")
+    
+    app.state.db_connected = db_connected
+    app.state.redis_connected = redis_connected
+    app.state.incident_service = IncidentService()
+    
+    logger.info("✅ AEGIS PRO is ready!")
+    yield
+    
+    logger.info("🛑 Shutting down AEGIS PRO...")
 
-@router.get("/slack/status")
-async def slack_status():
+app = FastAPI(
+    title="AEGIS PRO",
+    description="AI Incident Commander - 10 second incident response",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include routes
+app.include_router(router, prefix="/api/v1")
+app.include_router(slack_router)
+
+@app.get("/")
+async def root():
     return {
-        "status": "configured",
-        "message": "Slack integration is ready",
-        "bot_token": "✅ Set" if settings.SLACK_BOT_TOKEN else "❌ Missing"
+        "service": "AEGIS PRO",
+        "version": "1.0.0",
+        "status": "operational",
+        "endpoints": {
+            "health": "/health",
+            "api": "/api/v1",
+            "ping": "/api/v1/ping",
+            "slack": "/slack/events",
+            "slack_status": "/slack/status"
+        }
     }
+
+@app.get("/health")
+async def health_check():
+    db_status = getattr(app.state, 'db_connected', False)
+    redis_status = getattr(app.state, 'redis_connected', False)
+    
+    return {
+        "status": "healthy" if db_status and redis_status else "degraded",
+        "version": "1.0.0",
+        "services": {
+            "database": "connected" if db_status else "disconnected",
+            "redis": "connected" if redis_status else "disconnected"
+        }
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "src.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=False
+    )
