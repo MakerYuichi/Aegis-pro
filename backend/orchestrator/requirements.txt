@@ -28,4 +28,4 @@ pygithub==2.3.0
 slack-bolt==1.18.0
 
 # Utils
-loguru==0.7.2groq==0.4.2
+loguru==0.7.2
