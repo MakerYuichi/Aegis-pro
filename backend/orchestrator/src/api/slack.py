@@ -8,28 +8,49 @@ router = APIRouter()
 
 @router.post("/slack/events")
 async def slack_events(request: Request, background_tasks: BackgroundTasks):
-    """Handle Slack events - with immediate response"""
+    """Handle Slack events"""
     try:
+        # Get raw body
         body = await request.body()
         body_str = body.decode('utf-8')
         
-        logger.info(f"Slack request received: {body_str[:200]}")
+        # Log the FULL raw body for debugging
+        logger.info(f"RAW SLACK REQUEST: {body_str}")
         
+        # For Slack slash commands, the body might be form-encoded, not JSON!
+        # Let's check content-type
+        content_type = request.headers.get('content-type', '')
+        logger.info(f"Content-Type: {content_type}")
+        
+        # If it's form-encoded, parse it differently
+        if 'application/x-www-form-urlencoded' in content_type:
+            # Parse form data
+            from urllib.parse import parse_qs
+            form_data = parse_qs(body_str)
+            logger.info(f"Form data: {form_data}")
+            
+            # Convert to dict with string values
+            data = {k: v[0] for k, v in form_data.items()}
+            logger.info(f"Parsed form data: {data}")
+            
+            # Handle slash command
+            if data.get('command') == '/incident':
+                logger.info(f"Slash command: {data.get('text', '')}")
+                background_tasks.add_task(process_slack_command, data=data)
+                return Response(content='', media_type="application/json")
+        
+        # Try JSON parsing
         try:
             data = json.loads(body_str)
         except json.JSONDecodeError:
             logger.error(f"Invalid JSON: {body_str[:200]}")
             return Response(content='{"error":"invalid json"}', media_type="application/json")
         
+        # Handle URL verification
         if data.get("type") == "url_verification":
             challenge = data.get("challenge")
             logger.info(f"URL verification challenge: {challenge}")
             return {"challenge": challenge}
-        
-        if data.get("command") == "/incident":
-            logger.info(f"Slash command: {data.get('text', '')}")
-            background_tasks.add_task(process_slack_command, data=data)
-            return Response(content='', media_type="application/json")
         
         return {"status": "ok"}
         
@@ -40,13 +61,14 @@ async def slack_events(request: Request, background_tasks: BackgroundTasks):
 async def process_slack_command(data: dict):
     """Process Slack slash command in background"""
     try:
-        parts = data.get('text', '').split(' ', 1)
-        service_name = parts[0] if parts else None
-        message = parts[1] if len(parts) > 1 else "Incident reported"
+        service_name = data.get('text', '').split(' ')[0] if data.get('text') else None
+        message = data.get('text', '')[len(service_name)+1:] if service_name else "Incident reported"
         
         if not service_name:
             logger.warning("No service name provided")
             return
+        
+        logger.info(f"Processing: service={service_name}, message={message}")
         
         incident_service = IncidentService()
         result = await incident_service.declare_incident(
