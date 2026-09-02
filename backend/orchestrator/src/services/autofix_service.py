@@ -44,15 +44,14 @@ class AutoFixService:
             {code_context['code_snippet']}
             
             Please provide:
-            1. The fixed code (show the exact changes)
+            1. The fixed code (show the exact changes in diff format)
             2. A short explanation of the fix
             """
             
-            # FIX: Remove 'await' - the client call is synchronous
             response = self.llm.client.chat.completions.create(
                 model="openai/gpt-oss-20b",
                 messages=[
-                    {"role": "system", "content": "You are an expert software engineer. Provide code fixes."},
+                    {"role": "system", "content": "You are an expert software engineer. Provide code fixes in diff format."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.2,
@@ -100,3 +99,65 @@ class AutoFixService:
                 "title": f"Fix: Auto-generated fix for incident {incident_id}",
                 "body": f"Auto-generated fix for incident {incident_id}\n\nLine {line_number} in {file_path}\n\n{fix}"
             }
+    
+    async def approve_fix(self, incident_id: str) -> dict:
+        """
+        Approve and create the PR (called after human approval)
+        """
+        try:
+            # Get the incident
+            from src.services.incident_service import IncidentService
+            incident_service = IncidentService()
+            incident = await incident_service.get_incident(incident_id)
+            
+            if not incident:
+                return {"error": "Incident not found"}
+            
+            # Get the fix from metadata
+            extra_metadata = incident.get('extra_metadata', {})
+            if isinstance(extra_metadata, str):
+                try:
+                    extra_metadata = json.loads(extra_metadata)
+                except:
+                    extra_metadata = {}
+            
+            auto_fix = extra_metadata.get('auto_fix', {})
+            if not auto_fix or auto_fix.get('error'):
+                return {"error": "No fix found for this incident"}
+            
+            # Get the fix content
+            fix = auto_fix.get('fix')
+            file_path = incident.get('file_path', 'unknown')
+            line_number = incident.get('line_number', 0)
+            
+            # Create the PR
+            pr_info = await self.create_pr(
+                repo_name="fastapi",
+                file_path=file_path,
+                line_number=line_number,
+                fix=fix,
+                incident_id=incident_id,
+                require_permission=False
+            )
+            
+            # Update incident status
+            try:
+                session = await incident_service.get_db()
+                async with session:
+                    await session.execute(
+                        text("UPDATE incidents SET status = 'fix_approved' WHERE incident_id = :incident_id"),
+                        {"incident_id": incident_id}
+                    )
+                    await session.commit()
+            except Exception as e:
+                logger.error(f"Error updating incident status: {e}")
+            
+            return {
+                "status": "approved",
+                "pr": pr_info,
+                "message": "✅ Fix approved and PR created!"
+            }
+            
+        except Exception as e:
+            logger.error(f"Approval error: {e}")
+            return {"error": str(e)}

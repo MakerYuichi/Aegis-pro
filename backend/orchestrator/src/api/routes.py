@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
+import json
 
 router = APIRouter()
 
@@ -18,7 +19,6 @@ async def ping():
 
 @router.post("/incident/declare")
 async def declare_incident(request: DeclareIncidentRequest, req: Request):
-    """Declare a new incident"""
     service = req.app.state.incident_service
     result = await service.declare_incident(
         service_name=request.service_name,
@@ -29,7 +29,6 @@ async def declare_incident(request: DeclareIncidentRequest, req: Request):
 
 @router.get("/incident/{incident_id}")
 async def get_incident(incident_id: str, req: Request):
-    """Get incident details"""
     service = req.app.state.incident_service
     result = await service.get_incident(incident_id)
     if not result:
@@ -38,36 +37,35 @@ async def get_incident(incident_id: str, req: Request):
 
 @router.get("/incidents")
 async def list_incidents(req: Request, limit: int = 50):
-    """List all incidents"""
     service = req.app.state.incident_service
     result = await service.get_all_incidents(limit)
     return {"incidents": result, "count": len(result)}
 
 @router.post("/incident/rollback")
 async def rollback_incident(request: RollbackRequest, req: Request):
-    """Rollback an incident"""
     service = req.app.state.incident_service
     result = await service.rollback(request.incident_id)
     return result
 
+@router.post("/incident/{incident_id}/approve")
+async def approve_fix(incident_id: str, req: Request):
+    """Approve an auto-generated fix"""
+    try:
+        from src.services.autofix_service import AutoFixService
+        autofix = AutoFixService()
+        result = await autofix.approve_fix(incident_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/services")
 async def list_services(req: Request):
-    """List all services"""
     service = req.app.state.incident_service
     result = await service.list_services()
     return {"services": result}
 
 @router.post("/services/seed")
 async def seed_services(req: Request):
-    """Seed demo services"""
     service = req.app.state.incident_service
     result = await service.seed_services()
-    return result
-
-@router.post("/incident/{incident_id}/approve")
-async def approve_fix(incident_id: str, req: Request):
-    """Approve an auto-generated fix"""
-    from src.services.autofix_service import AutoFixService
-    autofix = AutoFixService()
-    result = await autofix.approve_fix(incident_id)
     return result
