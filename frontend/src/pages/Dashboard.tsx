@@ -151,9 +151,9 @@ export function Dashboard() {
             </div>
           </div>
 
-          {/* Activity Feed - NEW SECTION */}
+          {/* Activity Feed */}
           <div className="mt-8">
-            <ActivityFeed websocket={ws} />
+            <ActivityFeed websocket={ws} initialIncidents={incidents} />
           </div>
         </>
       )}
