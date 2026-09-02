@@ -3,6 +3,7 @@ import { ServiceGraph } from '../components/ServiceGraph';
 import { IncidentList } from '../components/IncidentList';
 import { Stats } from '../components/Stats';
 import { DeclareIncidentModal } from '../components/DeclareIncidentModal';
+import { ActivityFeed } from '../components/ActivityFeed';
 import { getIncidents, getServices, seedServices, type Incident, type Service } from '../utils/api';
 import { PlusCircle, Database, RefreshCw } from 'lucide-react';
 
@@ -13,6 +14,14 @@ export function Dashboard() {
   const [seeding, setSeeding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [ws, setWs] = useState<WebSocket | null>(null);
+
+  // WebSocket connection
+  useEffect(() => {
+    const websocket = new WebSocket('ws://localhost:8000/ws/incidents');
+    setWs(websocket);
+    return () => websocket.close();
+  }, []);
 
   const fetchData = async () => {
     try {
@@ -127,10 +136,12 @@ export function Dashboard() {
 
       {hasServices && (
         <>
+          {/* Stats */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <Stats incidents={incidents} />
           </div>
 
+          {/* Main Grid: Graph + Incident List */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             <div className="lg:col-span-2">
               <ServiceGraph services={services} incidents={incidents} />
@@ -138,6 +149,11 @@ export function Dashboard() {
             <div className="lg:col-span-1">
               <IncidentList incidents={incidents} />
             </div>
+          </div>
+
+          {/* Activity Feed - NEW SECTION */}
+          <div className="mt-8">
+            <ActivityFeed websocket={ws} />
           </div>
         </>
       )}

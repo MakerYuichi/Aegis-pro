@@ -16,7 +16,7 @@ class IncidentService:
         self.rag = RAGService()
         logger.info("✅ IncidentService initialized with RAG")
     
-    async def declare_incident(self, service_name: str, message: str, stack_trace: str = None) -> dict:
+    async def declare_incident(self, service_name: str, message: str, stack_trace: str = None, reported_by: str = None) -> dict:
         """Declare a new incident with RAG context"""
         incident_id = f"INC-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
         
@@ -80,24 +80,38 @@ class IncidentService:
         }
         
         # --- GitHub Context (AFTER incident_data is defined) ---
+        github_context = {}
         try:
             if service.get("repo_name") and settings.GITHUB_TOKEN:
                 from src.services.github_service import GitHubService
                 github = GitHubService()
-                github_context = {}
+                
+                # Get recent PRs
                 github_context["recent_prs"] = await github.get_recent_prs(service["repo_name"])
                 
+                # Get specific blame if we have file and line number
                 if stack_analysis and stack_analysis.get("file_path"):
-                    github_context["blame"] = await github.get_blame(
+                    logger.info(f"🔍 Getting blame for: {stack_analysis['file_path']}:{stack_analysis.get('line_number', 'unknown')}")
+                    blame_info = await github.get_blame_with_pr(
                         service["repo_name"],
                         stack_analysis["file_path"],
                         stack_analysis.get("line_number", 1)
                     )
+                    if blame_info:
+                        github_context["blame"] = blame_info
+                        logger.info(f"✅ Blame found: {blame_info.get('author')} - {blame_info.get('message')[:50]}")
+                        if blame_info.get('pr_number'):
+                            logger.info(f"🔗 PR #{blame_info.get('pr_number')}: {blame_info.get('pr_title')}")
+                    else:
+                        logger.warning("⚠️ No blame info found for this file/line")
                 
                 if github_context:
                     logger.info(f"🔗 GitHub context: {len(github_context.get('recent_prs', []))} PRs found")
+                    
+                    # Update extra_metadata with GitHub context and reported_by
                     incident_data["extra_metadata"] = json.dumps({
                         "rag_context_used": rag_used,
+                        "reported_by": reported_by if reported_by else None,
                         "github": github_context
                     })
         except Exception as e:
@@ -137,6 +151,8 @@ class IncidentService:
             "rag_context_used": rag_used,
             "timestamp": datetime.utcnow().isoformat()
         }
+    
+    # ... (rest of the methods remain the same)
     
     async def get_service(self, service_name: str) -> dict:
         """Get service from catalog"""
@@ -284,7 +300,6 @@ class IncidentService:
                         "confidence_score": row[9],
                         "declared_at": row[11]
                     }
-                    # Handle affected_services properly
                     if row[10]:
                         if isinstance(row[10], str):
                             try:
@@ -304,7 +319,6 @@ class IncidentService:
             return []
     
     async def calculate_blast_radius(self, service_name: str, dependencies: list) -> dict:
-        """Calculate blast radius"""
         affected = [service_name]
         
         for dep in dependencies:
@@ -325,7 +339,6 @@ class IncidentService:
         }
     
     async def rollback(self, incident_id: str) -> dict:
-        """Execute rollback (mock)"""
         incident = await self.get_incident(incident_id)
         if not incident:
             return {"error": "Incident not found"}
@@ -350,14 +363,13 @@ class IncidentService:
         }
     
     async def seed_services(self) -> dict:
-        """Seed demo services"""
         try:
             session = await get_db()
             async with session:
                 await session.execute(text("DELETE FROM services"))
                 
                 services = [
-                    ("payment-api", "Payment processing", "payment-service", '["@rahul", "@priya"]', '["auth", "ledger"]', True),
+                    ("payment-api", "Payment processing", "fastapi", '["@rahul", "@priya"]', '["auth", "ledger"]', True),
                     ("auth", "Authentication", "auth-service", '["@amit"]', '[]', True),
                     ("ledger", "Transaction ledger", "ledger-service", '["@sneha"]', '["database"]', True),
                     ("refund", "Refund processing", "refund-service", '["@ananya"]', '["payment-api"]', False),
@@ -390,7 +402,6 @@ class IncidentService:
             return {"status": "error", "message": str(e)}
     
     def _parse_stack_trace(self, stack_trace: str) -> dict:
-        """Parse stack trace"""
         import re
         
         exception_pattern = r"([A-Za-z]+Exception|Error):"
@@ -418,7 +429,6 @@ class IncidentService:
         }
     
     def _mock_service(self, service_name: str) -> dict:
-        """Mock service when DB not available"""
         services = {
             "payment-api": {"name": "payment-api", "on_call": ["@rahul", "@priya"], "dependencies": ["auth", "ledger"]},
             "auth": {"name": "auth", "on_call": ["@amit"], "dependencies": []},
@@ -432,7 +442,6 @@ class IncidentService:
         return services.get(service_name, {"name": service_name, "on_call": [], "dependencies": []})
     
     def _mock_services_list(self) -> list:
-        """Mock full service list when DB not available"""
         return [
             {"name": "payment-api", "description": "Payment processing", "on_call": ["@rahul", "@priya"], "dependencies": ["auth", "ledger"], "is_critical": True},
             {"name": "auth", "description": "Authentication", "on_call": ["@amit"], "dependencies": [], "is_critical": True},

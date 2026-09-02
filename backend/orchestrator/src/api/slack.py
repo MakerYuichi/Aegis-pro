@@ -1,16 +1,25 @@
 from fastapi import APIRouter, Request, Response, BackgroundTasks
 from src.config import settings
 from src.services.incident_service import IncidentService
+from src.websocket import manager
 from loguru import logger
 import json
 import httpx
 from urllib.parse import parse_qs
+from datetime import datetime
 
 router = APIRouter()
 
+async def send_slack_response(response_url: str, payload: dict):
+    """Send response to Slack via webhook"""
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(response_url, json=payload)
+    except Exception as e:
+        logger.error(f"Error sending Slack response: {e}")
+
 @router.post("/slack/events")
 async def slack_events(request: Request, background_tasks: BackgroundTasks):
-    """Complete Slack handler with Block Kit support"""
     try:
         body = await request.body()
         body_str = body.decode('utf-8')
@@ -30,18 +39,27 @@ async def slack_events(request: Request, background_tasks: BackgroundTasks):
                 action = data['actions'][0]
                 action_id = action.get('action_id')
                 incident_id = action.get('value')
+                user_name = data.get('user', {}).get('username', 'Unknown')
+                
+                # Broadcast activity to WebSocket
+                activity = {
+                    "type": "activity",
+                    "action": action_id,
+                    "incident_id": incident_id,
+                    "user": user_name,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "message": f"@{user_name} {action_id.replace('_', ' ')} incident {incident_id}"
+                }
+                await manager.broadcast(activity)
                 
                 if action_id == 'rollback':
-                    background_tasks.add_task(handle_rollback, data=data, incident_id=incident_id)
-                    return Response(content='', media_type="application/json")
-                
+                    background_tasks.add_task(handle_rollback, data=data, incident_id=incident_id, user=user_name)
                 elif action_id == 'view_details':
-                    background_tasks.add_task(handle_view_details, data=data, incident_id=incident_id)
-                    return Response(content='', media_type="application/json")
-                
+                    background_tasks.add_task(handle_view_details, data=data, incident_id=incident_id, user=user_name)
                 elif action_id == 'acknowledge':
-                    background_tasks.add_task(handle_acknowledge, data=data, incident_id=incident_id)
-                    return Response(content='', media_type="application/json")
+                    background_tasks.add_task(handle_acknowledge, data=data, incident_id=incident_id, user=user_name)
+                
+                return Response(content='', media_type="application/json")
         
         # Handle slash command
         if 'command' in body_str:
@@ -60,12 +78,12 @@ async def slack_events(request: Request, background_tasks: BackgroundTasks):
         return Response(content=f'{{"error":"{str(e)}"}}', media_type="application/json")
 
 async def process_incident_command(data: dict):
-    """Process slash command with Block Kit response"""
     try:
         text = data.get('text', '')
         parts = text.split(' ', 1)
         service_name = parts[0] if parts else None
         message = parts[1] if len(parts) > 1 else "Incident reported"
+        user_name = data.get('user_name', 'Unknown')  # Get Slack user
         
         if not service_name:
             await send_slack_response(data.get('response_url'), {
@@ -77,12 +95,17 @@ async def process_incident_command(data: dict):
         result = await incident_service.declare_incident(
             service_name=service_name,
             message=message,
-            stack_trace=None
+            stack_trace=None,
+            reported_by=user_name  # Pass user name
         )
         
-        # Build Block Kit message
-        blocks = build_incident_blocks(result)
+        # Broadcast incident creation
+        await manager.broadcast({
+            "type": "new_incident",
+            "data": result
+        })
         
+        blocks = build_incident_blocks(result)
         await send_slack_response(data.get('response_url'), {
             "blocks": blocks,
             "text": f"🚨 Incident {result['incident_id']}"
@@ -91,25 +114,41 @@ async def process_incident_command(data: dict):
     except Exception as e:
         logger.error(f"Error processing command: {e}")
 
-async def handle_rollback(data: dict, incident_id: str):
-    """Handle rollback button click"""
+async def handle_rollback(data: dict, incident_id: str, user: str):
     try:
         incident_service = IncidentService()
         result = await incident_service.rollback(incident_id)
         
+        await manager.broadcast({
+            "type": "activity",
+            "action": "rollback",
+            "incident_id": incident_id,
+            "user": user,
+            "timestamp": datetime.utcnow().isoformat(),
+            "message": f"@{user} rolled back incident {incident_id}"
+        })
+        
         response_url = data.get('response_url')
         if response_url:
             await send_slack_response(response_url, {
-                "text": f"✅ Rollback initiated for {incident_id}" if not result.get('error') else f"❌ Rollback failed: {result.get('error')}"
+                "text": f"✅ Rollback initiated for {incident_id} by @{user}"
             })
     except Exception as e:
         logger.error(f"Rollback error: {e}")
 
-async def handle_view_details(data: dict, incident_id: str):
-    """Handle view details button click"""
+async def handle_view_details(data: dict, incident_id: str, user: str):
     try:
         incident_service = IncidentService()
         incident = await incident_service.get_incident(incident_id)
+        
+        await manager.broadcast({
+            "type": "activity",
+            "action": "view_details",
+            "incident_id": incident_id,
+            "user": user,
+            "timestamp": datetime.utcnow().isoformat(),
+            "message": f"@{user} viewed incident {incident_id}"
+        })
         
         response_url = data.get('response_url')
         if response_url and incident:
@@ -118,28 +157,26 @@ async def handle_view_details(data: dict, incident_id: str):
     except Exception as e:
         logger.error(f"View details error: {e}")
 
-async def handle_acknowledge(data: dict, incident_id: str):
-    """Handle acknowledge button click"""
+async def handle_acknowledge(data: dict, incident_id: str, user: str):
     try:
-        user = data.get('user', {}).get('name', 'Unknown')
+        await manager.broadcast({
+            "type": "activity",
+            "action": "acknowledge",
+            "incident_id": incident_id,
+            "user": user,
+            "timestamp": datetime.utcnow().isoformat(),
+            "message": f"@{user} acknowledged incident {incident_id}"
+        })
+        
         response_url = data.get('response_url')
         if response_url:
             await send_slack_response(response_url, {
-                "text": f"👋 {user} acknowledged incident {incident_id}"
+                "text": f"👋 @{user} acknowledged incident {incident_id}"
             })
     except Exception as e:
         logger.error(f"Acknowledge error: {e}")
 
-async def send_slack_response(response_url: str, payload: dict):
-    """Send response to Slack via webhook"""
-    try:
-        async with httpx.AsyncClient() as client:
-            await client.post(response_url, json=payload)
-    except Exception as e:
-        logger.error(f"Error sending Slack response: {e}")
-
 def build_incident_blocks(result: dict) -> list:
-    """Build Slack Block Kit for incident"""
     severity_color = {"P0": "#FF4444", "P1": "#FF8800", "P2": "#FFCC00"}.get(result['severity'], "#808080")
     
     blocks = [
@@ -184,6 +221,28 @@ def build_incident_blocks(result: dict) -> list:
             "elements": [{"type": "mrkdwn", "text": "🧠 AI used similar past incidents for analysis"}]
         })
     
+    # --- NEW: Git Blame and PR Info ---
+    extra_metadata = result.get('extra_metadata', {})
+    if extra_metadata and isinstance(extra_metadata, dict):
+        github = extra_metadata.get('github')
+        if github and github.get('blame'):
+            blame = github['blame']
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*👤 Git Blame:*\nLine {blame.get('line', '?')} in `{blame.get('file', 'unknown')}`\nLast changed by *{blame.get('author', 'Unknown')}*"
+                }
+            })
+            if blame.get('pr_number'):
+                blocks.append({
+                    "type": "context",
+                    "elements": [{
+                        "type": "mrkdwn",
+                        "text": f"🔗 PR #{blame['pr_number']}: {blame.get('pr_title', '')} (by {blame.get('pr_author', 'Unknown')})"
+                    }]
+                })
+    
     blocks.append({
         "type": "actions",
         "elements": [
@@ -213,7 +272,6 @@ def build_incident_blocks(result: dict) -> list:
     return blocks
 
 def build_detail_blocks(incident: dict) -> list:
-    """Build detail view for incident"""
     blocks = [
         {
             "type": "header",
@@ -255,6 +313,28 @@ def build_detail_blocks(incident: dict) -> list:
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": f"💥 Affected: {', '.join(incident['affected_services'])}"}]
         })
+    
+    # --- NEW: Git Blame and PR Info in Details ---
+    extra_metadata = incident.get('extra_metadata', {})
+    if extra_metadata and isinstance(extra_metadata, dict):
+        github = extra_metadata.get('github')
+        if github and github.get('blame'):
+            blame = github['blame']
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*👤 Git Blame:*\nLine {blame.get('line', '?')} in `{blame.get('file', 'unknown')}`\nLast changed by *{blame.get('author', 'Unknown')}*\nCommit: `{blame.get('commit_hash', '')}`"
+                }
+            })
+            if blame.get('pr_number'):
+                blocks.append({
+                    "type": "context",
+                    "elements": [{
+                        "type": "mrkdwn",
+                        "text": f"🔗 PR #{blame['pr_number']}: {blame.get('pr_title', '')} (by {blame.get('pr_author', 'Unknown')})"
+                    }]
+                })
     
     return blocks
 
