@@ -63,3 +63,11 @@ async def seed_services(req: Request):
     service = req.app.state.incident_service
     result = await service.seed_services()
     return result
+
+@router.post("/incident/{incident_id}/approve")
+async def approve_fix(incident_id: str, req: Request):
+    """Approve an auto-generated fix"""
+    from src.services.autofix_service import AutoFixService
+    autofix = AutoFixService()
+    result = await autofix.approve_fix(incident_id)
+    return result
