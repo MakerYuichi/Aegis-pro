@@ -116,6 +116,69 @@ class IncidentService:
                     })
         except Exception as e:
             logger.error(f"GitHub integration error: {e}")
+            
+        # --- Code-Level Diagnosis (Fetch actual code from GitHub) ---
+        code_context = {}
+        if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
+            try:
+                from src.services.github_service import GitHubService
+                github = GitHubService()
+                        
+                code_context = await github.get_file_content(
+                    repo_name=service["repo_name"],
+                    file_path=stack_analysis["file_path"],
+                    line_number=stack_analysis.get("line_number", 1)
+                )
+                        
+                if code_context:
+                    logger.info(f"✅ Code context fetched: {code_context.get('file_path')}:{code_context.get('line_number')}")
+                    # Update the incident_data directly
+                    if incident_data.get("extra_metadata"):
+                        try:
+                            metadata = json.loads(incident_data["extra_metadata"])
+                        except:
+                            metadata = {}
+
+                    else:
+                        metadata = {}
+                    metadata["code_context"] = code_context
+                    incident_data["extra_metadata"] = json.dumps(metadata)
+                        
+            except Exception as e:
+                logger.error(f"Code context error: {e}")
+                
+                
+         # --- Auto-Fix Generation (with permission check) ---
+        if stack_analysis and stack_analysis.get("file_path"):
+            try:
+                from src.services.autofix_service import AutoFixService
+                autofix = AutoFixService()
+                fix_result = await autofix.generate_fix({
+                    "incident_id": incident_id,
+                    "service_name": service_name,
+                    "file_path": stack_analysis["file_path"],
+                    "line_number": stack_analysis.get("line_number"),
+                    "exception_type": stack_analysis.get("exception_type"),
+                    "root_cause": analysis.get("root_cause")
+                }, require_permission=True)  # Always require permission
+                        
+                if fix_result and not fix_result.get("error"):
+                    # Parse existing metadata
+                    existing_metadata = {}
+                    if incident_data.get("extra_metadata"):
+                        try:
+                            existing_metadata = json.loads(incident_data["extra_metadata"])
+                        except:
+                            pass
+                            
+                    # Update metadata with auto-fix
+                    existing_metadata["auto_fix"] = fix_result
+                    incident_data["extra_metadata"] = json.dumps(existing_metadata)
+                    logger.info(f"✅ Auto-fix generated for {incident_id} (waiting for approval)")
+                else:
+                    logger.warning(f"⚠️ Auto-fix failed: {fix_result.get('error')}")
+            except Exception as e:
+                logger.error(f"Auto-fix error: {e}")
         
         # --- Save incident ---
         await self.save_incident(incident_data)
@@ -136,66 +199,8 @@ class IncidentService:
             })
         except Exception as e:
             logger.error(f"WebSocket broadcast error: {e}")
-            
-        # --- Auto-Fix Generation (with permission check) ---
-        if stack_analysis and stack_analysis.get("file_path"):
-            try:
-                from src.services.autofix_service import AutoFixService
-                autofix = AutoFixService()
-                fix_result = await autofix.generate_fix({
-                    "incident_id": incident_id,
-                    "service_name": service_name,
-                    "file_path": stack_analysis["file_path"],
-                    "line_number": stack_analysis.get("line_number"),
-                    "exception_type": stack_analysis.get("exception_type"),
-                    "root_cause": analysis.get("root_cause")
-                }, require_permission=True)  # Always require permission
                 
-                if fix_result and not fix_result.get("error"):
-                    # Parse existing metadata
-                    existing_metadata = {}
-                    if incident_data.get("extra_metadata"):
-                        try:
-                            existing_metadata = json.loads(incident_data["extra_metadata"])
-                        except:
-                            pass
-                    
-                    # Update metadata with auto-fix
-                    existing_metadata["auto_fix"] = fix_result
-                    incident_data["extra_metadata"] = json.dumps(existing_metadata)
-                    logger.info(f"✅ Auto-fix generated for {incident_id} (waiting for approval)")
-                else:
-                    logger.warning(f"⚠️ Auto-fix failed: {fix_result.get('error')}")
-            except Exception as e:
-                logger.error(f"Auto-fix error: {e}")
-                
-        # --- Code-Level Diagnosis (Fetch actual code from GitHub) ---
-        code_context = {}
-        if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
-            try:
-                from src.services.github_service import GitHubService
-                github = GitHubService()
-                
-                code_context = await github.get_file_content(
-                    repo_name=service["repo_name"],
-                    file_path=stack_analysis["file_path"],
-                    line_number=stack_analysis.get("line_number", 1)
-                )
-                
-                if code_context:
-                    logger.info(f"📄 Code context fetched: {code_context.get('file_path')}:{code_context.get('line_number')}")
-                    # Add to existing metadata
-                    existing_metadata = {}
-                    if incident_data.get("extra_metadata"):
-                        try:
-                            existing_metadata = json.loads(incident_data["extra_metadata"])
-                        except:
-                            pass
-                    
-                    existing_metadata["code_context"] = code_context
-                    incident_data["extra_metadata"] = json.dumps(existing_metadata)
-            except Exception as e:
-                logger.error(f"Code context error: {e}")
+        
         
         return {
             "incident_id": incident_id,
