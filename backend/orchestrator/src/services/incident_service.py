@@ -7,6 +7,7 @@ from loguru import logger
 from src.database import get_db
 from src.services.llm_service import LLMService
 from src.services.rag_service import RAGService
+from src.services.autofix_service import AutoFixService
 from src.config import settings
 from src.websocket import manager
 
@@ -200,7 +201,37 @@ class IncidentService:
         except Exception as e:
             logger.error(f"WebSocket broadcast error: {e}")
                 
-        
+        # --- Auto-Fix Generation (with permission check) ---
+        if stack_analysis and stack_analysis.get("file_path"):
+            try:
+                autofix = AutoFixService()
+                
+                # Get existing metadata
+                existing_metadata = {}
+                if incident_data.get("extra_metadata"):
+                    try:
+                        existing_metadata = json.loads(incident_data["extra_metadata"])
+                    except:
+                        pass
+                
+                # Generate fix
+                fix_result = await autofix.generate_fix({
+                    "incident_id": incident_id,
+                    "service_name": service_name,
+                    "file_path": stack_analysis["file_path"],
+                    "line_number": stack_analysis.get("line_number"),
+                    "exception_type": stack_analysis.get("exception_type"),
+                    "root_cause": analysis.get("root_cause")
+                }, require_permission=True)
+                
+                if fix_result and not fix_result.get("error"):
+                    existing_metadata["auto_fix"] = fix_result
+                    incident_data["extra_metadata"] = json.dumps(existing_metadata)
+                    logger.info(f"✅ Auto-fix generated for {incident_id} (waiting for approval)")
+                else:
+                    logger.warning(f"⚠️ Auto-fix failed: {fix_result.get('error')}")
+            except Exception as e:
+                logger.error(f"Auto-fix error: {e}")
         
         return {
             "incident_id": incident_id,
@@ -216,6 +247,7 @@ class IncidentService:
             "rag_context_used": rag_used,
             "timestamp": datetime.utcnow().isoformat()
         }
+        
     
     async def get_service(self, service_name: str) -> dict:
         """Get service from catalog"""
