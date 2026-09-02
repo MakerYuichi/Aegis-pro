@@ -7,6 +7,8 @@ from loguru import logger
 from src.database import get_db
 from src.services.llm_service import LLMService
 from src.services.rag_service import RAGService
+from src.config import settings
+from src.websocket import manager
 
 class IncidentService:
     def __init__(self):
@@ -52,26 +54,8 @@ class IncidentService:
             blast_radius=blast_radius,
             rag_context=rag_context
         )
-        github_context = {}
-        if service.get("repo_name") and settings.GITHUB_TOKEN:
-            github = GitHubService()
-            github_context["recent_prs"] = await github.get_recent_prs(service["repo_name"])
-            
-            if stack_analysis and stack_analysis.get("file_path"):
-                github_context["blame"] = await github.get_blame(
-                    service["repo_name"],
-                    stack_analysis["file_path"],
-                    stack_analysis.get("line_number", 1)
         
-                )
-        if github_context:
-            logger.info(f"🔗 GitHub context: {len(github_context.get('recent_prs', []))} PRs found")
-        # Add to metadata
-            incident_data["extra_metadata"] = json.dumps({
-                "rag_context_used": rag_used,
-                "github": github_context
-            })
-        # Convert dict to JSON string for PostgreSQL
+        # --- Build incident_data FIRST ---
         extra_metadata_json = json.dumps({"rag_context_used": rag_used})
         affected_services_json = json.dumps(blast_radius.get("affected", []))
         
@@ -95,10 +79,49 @@ class IncidentService:
             "affected_services": affected_services_json
         }
         
+        # --- GitHub Context (AFTER incident_data is defined) ---
+        try:
+            if service.get("repo_name") and settings.GITHUB_TOKEN:
+                from src.services.github_service import GitHubService
+                github = GitHubService()
+                github_context = {}
+                github_context["recent_prs"] = await github.get_recent_prs(service["repo_name"])
+                
+                if stack_analysis and stack_analysis.get("file_path"):
+                    github_context["blame"] = await github.get_blame(
+                        service["repo_name"],
+                        stack_analysis["file_path"],
+                        stack_analysis.get("line_number", 1)
+                    )
+                
+                if github_context:
+                    logger.info(f"🔗 GitHub context: {len(github_context.get('recent_prs', []))} PRs found")
+                    incident_data["extra_metadata"] = json.dumps({
+                        "rag_context_used": rag_used,
+                        "github": github_context
+                    })
+        except Exception as e:
+            logger.error(f"GitHub integration error: {e}")
+        
+        # --- Save incident ---
         await self.save_incident(incident_data)
         
-        # Store for future RAG searches
+        # --- Store for future RAG searches ---
         await self.rag.store_incident(incident_data)
+        
+        # --- Broadcast via WebSocket ---
+        try:
+            await manager.broadcast({
+                "type": "new_incident",
+                "data": {
+                    "incident_id": incident_id,
+                    "service_name": service_name,
+                    "severity": analysis.get("severity"),
+                    "title": analysis.get("title")
+                }
+            })
+        except Exception as e:
+            logger.error(f"WebSocket broadcast error: {e}")
         
         return {
             "incident_id": incident_id,
@@ -162,7 +185,6 @@ class IncidentService:
                 ]
         except Exception as e:
             logger.error(f"Error listing services: {e}")
-            # Return mock services as fallback
             return self._mock_services_list()
     
     async def save_incident(self, incident_data: dict):
@@ -190,7 +212,6 @@ class IncidentService:
                 logger.info(f"✅ Incident {incident_data['incident_id']} saved")
         except Exception as e:
             logger.error(f"Error saving incident: {e}")
-            
     
     async def get_incident(self, incident_id: str) -> dict:
         """Get incident by ID"""
@@ -206,9 +227,15 @@ class IncidentService:
                     data = dict(row._mapping)
                     # Parse JSONB fields back to Python objects
                     if data.get('extra_metadata') and isinstance(data['extra_metadata'], str):
-                        data['extra_metadata'] = json.loads(data['extra_metadata'])
+                        try:
+                            data['extra_metadata'] = json.loads(data['extra_metadata'])
+                        except:
+                            pass
                     if data.get('affected_services') and isinstance(data['affected_services'], str):
-                        data['affected_services'] = json.loads(data['affected_services'])
+                        try:
+                            data['affected_services'] = json.loads(data['affected_services'])
+                        except:
+                            pass
                     return data
                 return None
         except Exception as e:
@@ -242,8 +269,9 @@ class IncidentService:
                     {"limit": limit}
                 )
                 rows = result.fetchall()
-                return [
-                    {
+                incidents = []
+                for row in rows:
+                    incident = {
                         "incident_id": row[0],
                         "service_name": row[1],
                         "severity": row[2],
@@ -254,11 +282,23 @@ class IncidentService:
                         "suggested_fix": row[7],
                         "rollback_command": row[8],
                         "confidence_score": row[9],
-                        "affected_services": json.loads(row[10]) if row[10] else [],
                         "declared_at": row[11]
                     }
-                    for row in rows
-                ]
+                    # Handle affected_services properly
+                    if row[10]:
+                        if isinstance(row[10], str):
+                            try:
+                                incident["affected_services"] = json.loads(row[10])
+                            except:
+                                incident["affected_services"] = []
+                        elif isinstance(row[10], list):
+                            incident["affected_services"] = row[10]
+                        else:
+                            incident["affected_services"] = []
+                    else:
+                        incident["affected_services"] = []
+                    incidents.append(incident)
+                return incidents
         except Exception as e:
             logger.error(f"Error getting incidents: {e}")
             return []
