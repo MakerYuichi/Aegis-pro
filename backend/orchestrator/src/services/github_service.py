@@ -226,3 +226,43 @@ class GitHubService:
         except Exception as e:
             logger.debug(f"PR lookup error: {e}")
             return {}
+        
+    async def get_file_content(self, repo_name: str, file_path: str, line_number: int, context_lines: int = 5) -> dict:
+        
+        if not self.client:
+            return {}
+        
+        try:
+            repo = await self._get_repo(repo_name)
+            if not repo:
+                return {}
+                
+            # Get the file content
+            content = repo.get_contents(file_path)
+            lines = content.decoded_content.decode().split('\n')
+                
+            # Calculate context window
+            start = max(0, line_number - context_lines - 1)
+            end = min(len(lines), line_number + context_lines)
+                
+                # Extract code snippet
+            code_snippet = []
+            for i in range(start, end):
+                line_num = i + 1
+                marker = ">>> " if i == line_number - 1 else "    "
+                code_snippet.append(f"{line_num:4d} {marker}{lines[i]}")
+                
+            return {
+                "file_path": file_path,
+                "line_number": line_number,
+                "total_lines": len(lines),
+                "code_snippet": "\n".join(code_snippet),
+                "full_file": "\n".join(lines) if len(lines) < 100 else None  # Avoid huge responses
+            }
+                
+        except Exception as e:
+            logger.error(f"Error fetching file content: {e}")
+            return {}
+        
+    
+    
