@@ -168,6 +168,34 @@ class IncidentService:
                     logger.warning(f"⚠️ Auto-fix failed: {fix_result.get('error')}")
             except Exception as e:
                 logger.error(f"Auto-fix error: {e}")
+                
+        # --- Code-Level Diagnosis (Fetch actual code from GitHub) ---
+        code_context = {}
+        if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
+            try:
+                from src.services.github_service import GitHubService
+                github = GitHubService()
+                
+                code_context = await github.get_file_content(
+                    repo_name=service["repo_name"],
+                    file_path=stack_analysis["file_path"],
+                    line_number=stack_analysis.get("line_number", 1)
+                )
+                
+                if code_context:
+                    logger.info(f"📄 Code context fetched: {code_context.get('file_path')}:{code_context.get('line_number')}")
+                    # Add to existing metadata
+                    existing_metadata = {}
+                    if incident_data.get("extra_metadata"):
+                        try:
+                            existing_metadata = json.loads(incident_data["extra_metadata"])
+                        except:
+                            pass
+                    
+                    existing_metadata["code_context"] = code_context
+                    incident_data["extra_metadata"] = json.dumps(existing_metadata)
+            except Exception as e:
+                logger.error(f"Code context error: {e}")
         
         return {
             "incident_id": incident_id,
@@ -183,8 +211,6 @@ class IncidentService:
             "rag_context_used": rag_used,
             "timestamp": datetime.utcnow().isoformat()
         }
-    
-    # ... (rest of the methods remain the same)
     
     async def get_service(self, service_name: str) -> dict:
         """Get service from catalog"""
@@ -506,3 +532,5 @@ class IncidentService:
             {"name": "user", "description": "User management", "on_call": ["@arjun"], "dependencies": [], "is_critical": False},
             {"name": "database", "description": "Database ops", "on_call": ["@shreya"], "dependencies": [], "is_critical": True},
         ]
+        
+    
