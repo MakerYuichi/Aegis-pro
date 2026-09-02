@@ -94,11 +94,14 @@ class GitHubService:
             if not repo:
                 return {}
             
+            logger.info(f"🔍 Getting blame for: {file_path}:{line_number}")
+            
             # Try multiple approaches to find the commit
             
             # Approach 1: Get commit history for the file with exact path
             try:
                 commits = repo.get_commits(path=file_path)
+                logger.info(f"📝 Found {commits.totalCount} commits for {file_path}")
                 if commits.totalCount > 0:
                     commit = commits[0]  # Get the most recent commit
                     pr_info = await self._find_pr_for_commit(repo, commit.sha)
@@ -121,7 +124,13 @@ class GitHubService:
                         logger.info(f"✅ Found commit {commit.sha[:8]} but no PR associated")
                     return result
             except Exception as e:
-                logger.debug(f"Commit history approach failed: {e}")
+                logger.error(f"Error getting commits: {e}")
+            
+            return{}
+        
+        except Exception as e:
+            logger.error(f"Git blame error: {e}")
+            return {}
             
             # Approach 2: Try with different path variants
             path_variants = [

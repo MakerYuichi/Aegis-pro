@@ -402,31 +402,53 @@ class IncidentService:
             return {"status": "error", "message": str(e)}
     
     def _parse_stack_trace(self, stack_trace: str) -> dict:
+        """Parse stack trace - handles multiple formats"""
         import re
         
-        exception_pattern = r"([A-Za-z]+Exception|Error):"
-        exception_match = re.search(exception_pattern, stack_trace)
-        
-        file_pattern = r"at\s+[\w.]+\.(\w+)\((\w+\.java):(\d+)\)"
-        file_match = re.search(file_pattern, stack_trace)
-        
-        if not file_match:
-            file_pattern = r'File "([^"]+)", line (\d+)'
-            file_match = re.search(file_pattern, stack_trace)
-            if file_match:
-                return {
-                    "exception_type": exception_match.group(1) if exception_match else "Exception",
-                    "file_path": file_match.group(1),
-                    "line_number": int(file_match.group(2)),
-                    "full_trace": stack_trace[:500]
-                }
-        
-        return {
-            "exception_type": exception_match.group(1) if exception_match else "Exception",
-            "file_path": file_match.group(2) if file_match else None,
-            "line_number": int(file_match.group(3)) if file_match and len(file_match.groups()) >= 3 else None,
+        result = {
+            "exception_type": None,
+            "file_path": None,
+            "line_number": None,
             "full_trace": stack_trace[:500]
         }
+        
+        # Try to extract exception type
+        exception_pattern = r"([A-Za-z]+Exception|Error):"
+        exception_match = re.search(exception_pattern, stack_trace)
+        if exception_match:
+            result["exception_type"] = exception_match.group(1)
+        
+        # Try multiple file/line patterns
+        patterns = [
+            # Pattern 1: "at fastapi/applications.py:10" or "at File.java:123"
+            r"at\s+([\w./-]+\.\w+):(\d+)",
+            # Pattern 2: File "path/to/file.py", line 123
+            r'File "([^"]+)", line (\d+)',
+            # Pattern 3: (File.java:123)
+            r"\(([\w./-]+\.\w+):(\d+)\)",
+            # Pattern 4: simple file:line
+            r"([\w./-]+\.\w+):(\d+)",
+            # Pattern 5: Java style: com.Class.method(File.java:123)
+            r"\(([\w./-]+\.\w+):(\d+)\)"
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, stack_trace)
+            if match:
+                result["file_path"] = match.group(1)
+                result["line_number"] = int(match.group(2))
+                break
+        
+        # If file_path contains spaces or is None, try to find a valid path
+        if not result["file_path"] or " " in str(result["file_path"]):
+            # Look for any valid file path pattern
+            path_pattern = r'([\w./-]+\.\w+):(\d+)'
+            match = re.search(path_pattern, stack_trace)
+            if match:
+                result["file_path"] = match.group(1)
+                result["line_number"] = int(match.group(2))
+        
+        return result
     
     def _mock_service(self, service_name: str) -> dict:
         services = {
