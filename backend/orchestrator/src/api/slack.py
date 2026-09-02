@@ -50,7 +50,6 @@ async def slack_events(request: Request, background_tasks: BackgroundTasks):
                     "timestamp": datetime.utcnow().isoformat(),
                     "message": f"@{user_name} {action_id.replace('_', ' ')} incident {incident_id}"
                 }
-                await manager.broadcast(activity)
                 
                 if action_id == 'rollback':
                     background_tasks.add_task(handle_rollback, data=data, incident_id=incident_id, user=user_name)
