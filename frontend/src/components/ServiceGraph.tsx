@@ -59,8 +59,8 @@ export function ServiceGraph({ services, incidents, onNodeClick }: ServiceGraphP
       .data(validLinks)
       .enter()
       .append('line')
-      .attr('stroke', '#cbd5e1')
-      .attr('stroke-opacity', 0.8)
+      .attr('stroke', '#94A3B8')
+      .attr('stroke-opacity', 0.6)
       .attr('stroke-width', 2);
 
     // Nodes
@@ -93,10 +93,10 @@ export function ServiceGraph({ services, incidents, onNodeClick }: ServiceGraphP
     nodeGroup.append('circle')
       .attr('r', (d: any) => d.critical ? 28 : 22)
       .attr('fill', (d: any) => {
-        if (d.severity === 'P0') return '#ef4444';
-        if (d.severity === 'P1') return '#f97316';
-        if (d.hasIncident) return '#eab308';
-        return '#3b82f6';
+        if (d.severity === 'P0') return '#DC2626';
+        if (d.severity === 'P1') return '#EA580C';
+        if (d.hasIncident) return '#D97706';
+        return '#3B82F6';
       })
       .attr('stroke', '#fff')
       .attr('stroke-width', 3);
@@ -128,14 +128,14 @@ export function ServiceGraph({ services, incidents, onNodeClick }: ServiceGraphP
   }, [services, incidents, onNodeClick]);
 
   return (
-    <div ref={containerRef} className="bg-white dark:bg-dark-surface rounded-xl shadow-lg p-4">
+    <div ref={containerRef} className="bg-light-card dark:bg-dark-card rounded-2xl border border-light-border dark:border-dark-border shadow-lg p-4">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold dark:text-dark-text">Service Dependency Graph</h3>
-        <div className="flex gap-4 text-xs dark:text-dark-muted">
-          <span className="flex items-center"><span className="w-3 h-3 rounded-full bg-red-500 mr-1"></span>P0</span>
-          <span className="flex items-center"><span className="w-3 h-3 rounded-full bg-orange-500 mr-1"></span>P1</span>
-          <span className="flex items-center"><span className="w-3 h-3 rounded-full bg-yellow-500 mr-1"></span>Has Incident</span>
-          <span className="flex items-center"><span className="w-3 h-3 rounded-full bg-blue-500 mr-1"></span>Healthy</span>
+        <h3 className="text-lg font-semibold text-light-text dark:text-dark-text">Service Dependency Graph</h3>
+        <div className="flex gap-4 text-xs text-light-muted dark:text-dark-muted">
+          <span className="flex items-center"><span className="w-3 h-3 rounded-full bg-severity-critical mr-1"></span>P0</span>
+          <span className="flex items-center"><span className="w-3 h-3 rounded-full bg-severity-high mr-1"></span>P1</span>
+          <span className="flex items-center"><span className="w-3 h-3 rounded-full bg-severity-medium mr-1"></span>Has Incident</span>
+          <span className="flex items-center"><span className="w-3 h-3 rounded-full bg-brand-primary mr-1"></span>Healthy</span>
         </div>
       </div>
       <svg ref={svgRef} className="w-full h-96"></svg>
