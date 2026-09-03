@@ -50,29 +50,29 @@ export function DeclareIncidentModal({ isOpen, onClose, onSuccess, services }: D
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/50" onClick={onClose}></div>
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose}></div>
       
       {/* Modal */}
-      <div className="relative bg-white rounded-lg shadow-xl w-full max-w-lg mx-4 p-6">
+      <div className="relative bg-light-card dark:bg-dark-card rounded-2xl shadow-2xl w-full max-w-lg mx-4 p-6 border border-light-border dark:border-dark-border">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-bold">Declare Incident</h2>
+          <h2 className="text-xl font-bold text-light-text dark:text-dark-text">Declare Incident</h2>
           <button
             onClick={onClose}
-            className="p-1 hover:bg-gray-100 rounded-lg transition"
+            className="p-1 hover:bg-light-surface dark:hover:bg-dark-surface rounded-lg transition"
           >
-            <X className="w-5 h-5 text-gray-500" />
+            <X className="w-5 h-5 text-light-muted dark:text-dark-muted" />
           </button>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Service <span className="text-red-500">*</span>
+            <label className="block text-sm font-medium text-light-text dark:text-dark-text mb-1">
+              Service <span className="text-severity-critical">*</span>
             </label>
             <select
               value={serviceName}
               onChange={(e) => setServiceName(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-transparent"
+              className="w-full px-3 py-2 border border-light-border dark:border-dark-border rounded-lg bg-light-bg dark:bg-dark-bg text-light-text dark:text-dark-text focus:ring-2 focus:ring-brand-primary focus:border-transparent"
               required
             >
               <option value="">Select a service...</option>
@@ -85,34 +85,34 @@ export function DeclareIncidentModal({ isOpen, onClose, onSuccess, services }: D
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Message <span className="text-red-500">*</span>
+            <label className="block text-sm font-medium text-light-text dark:text-dark-text mb-1">
+              Message <span className="text-severity-critical">*</span>
             </label>
             <input
               type="text"
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               placeholder="What's happening?"
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-transparent"
+              className="w-full px-3 py-2 border border-light-border dark:border-dark-border rounded-lg bg-light-bg dark:bg-dark-bg text-light-text dark:text-dark-text focus:ring-2 focus:ring-brand-primary focus:border-transparent"
               required
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Stack Trace <span className="text-gray-400 text-xs">(optional)</span>
+            <label className="block text-sm font-medium text-light-text dark:text-dark-text mb-1">
+              Stack Trace <span className="text-light-muted dark:text-dark-muted text-xs">(optional)</span>
             </label>
             <textarea
               value={stackTrace}
               onChange={(e) => setStackTrace(e.target.value)}
               placeholder="Paste your stack trace here..."
               rows={4}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-transparent font-mono text-sm"
+              className="w-full px-3 py-2 border border-light-border dark:border-dark-border rounded-lg bg-light-bg dark:bg-dark-bg text-light-text dark:text-dark-text focus:ring-2 focus:ring-brand-primary focus:border-transparent font-mono text-sm"
             />
           </div>
 
           {error && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-600">
+            <div className="bg-severity-critical/10 border border-severity-critical/30 rounded-lg p-3 text-sm text-severity-critical">
               {error}
             </div>
           )}
@@ -121,14 +121,14 @@ export function DeclareIncidentModal({ isOpen, onClose, onSuccess, services }: D
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
+              className="flex-1 px-4 py-2 border border-light-border dark:border-dark-border rounded-lg hover:bg-light-surface dark:hover:bg-dark-surface transition text-light-text dark:text-dark-text"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={loading}
-              className="flex-1 px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary-dark transition disabled:opacity-50 flex items-center justify-center gap-2"
+              className="flex-1 px-4 py-2 bg-brand-primary hover:bg-brand-primary/90 text-white rounded-lg transition disabled:opacity-50 flex items-center justify-center gap-2"
             >
               {loading ? (
                 <>
