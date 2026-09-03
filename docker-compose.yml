@@ -35,20 +35,16 @@ services:
     container_name: aegis-orchestrator
     ports:
       - "8000:8000"
-    environment:
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/aegis
-      - REDIS_URL=redis://redis:6379
+    # FIX: Use env_file to load .env
     env_file:
-      - backend/orchestrator/.env
+      - ./backend/orchestrator/.env
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
-      # Mount the entire code directory - NO REBUILD NEEDED!
       - ./backend/orchestrator:/app
-      # Prevent overwriting installed packages
       - /app/__pycache__
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
