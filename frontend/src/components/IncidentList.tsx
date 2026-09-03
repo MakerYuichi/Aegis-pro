@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 import { useState } from 'react';
 import { type Incident } from '../utils/api';
-import { ChevronRight, Search, Filter, CheckCircle} from 'lucide-react';
+import { ChevronRight, Search, CheckCircle } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 interface IncidentListProps {
