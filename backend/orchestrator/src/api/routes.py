@@ -1,7 +1,9 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from typing import Optional
-import json
+from typing import Optional, List
+from src.services.autofix_service import AutoFixService
+from src.services.oncall_service import OnCallService
+from src.services.alert_service import AlertService
 
 router = APIRouter()
 
@@ -12,6 +14,32 @@ class DeclareIncidentRequest(BaseModel):
 
 class RollbackRequest(BaseModel):
     incident_id: str
+
+class RejectFixRequest(BaseModel):
+    reason: Optional[str] = None
+
+class AlertRequest(BaseModel):
+    target: Optional[str] = None
+    everyone: bool = False
+    message: Optional[str] = None
+    incident_id: Optional[str] = None
+    service_name: Optional[str] = None
+
+class TeamMemberRequest(BaseModel):
+    name: str
+    email: Optional[str] = None
+    slack_handle: Optional[str] = None
+    phone: Optional[str] = None
+    role: Optional[str] = "secondary"
+    service_name: str
+
+class CreateServiceRequest(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    repo_name: Optional[str] = None
+    dependencies: Optional[List[str]] = []
+    is_critical: Optional[bool] = False
+    on_call: Optional[List[str]] = []
 
 @router.get("/ping")
 async def ping():
@@ -48,15 +76,21 @@ async def rollback_incident(request: RollbackRequest, req: Request):
     return result
 
 @router.post("/incident/{incident_id}/approve")
-async def approve_fix(incident_id: str, req: Request):
+async def approve_fix(incident_id: str):
     """Approve an auto-generated fix"""
-    try:
-        from src.services.autofix_service import AutoFixService
-        autofix = AutoFixService()
-        result = await autofix.approve_fix(incident_id)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    autofix = AutoFixService()
+    result = await autofix.approve_fix(incident_id)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@router.post("/incident/{incident_id}/reject")
+async def reject_fix(incident_id: str, request: RejectFixRequest = RejectFixRequest()):
+    autofix = AutoFixService()
+    result = await autofix.reject_fix(incident_id, request.reason)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 @router.get("/services")
 async def list_services(req: Request):
@@ -64,8 +98,83 @@ async def list_services(req: Request):
     result = await service.list_services()
     return {"services": result}
 
+@router.post("/services")
+async def create_service(request: CreateServiceRequest, req: Request):
+    service = req.app.state.incident_service
+    try:
+        return await service.add_service(request.model_dump())
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.delete("/services/{name}")
+async def delete_service(name: str, req: Request):
+    service = req.app.state.incident_service
+    return await service.delete_service(name)
+
 @router.post("/services/seed")
 async def seed_services(req: Request):
     service = req.app.state.incident_service
     result = await service.seed_services()
+    return result
+
+@router.get("/fixes/pending")
+async def get_pending_fixes():
+    """Get all pending fixes for approval"""
+    autofix = AutoFixService()
+    pending = await autofix.get_pending_fixes()
+    return {"fixes": pending, "count": len(pending)}
+
+@router.post("/fixes/{incident_id}/approve")
+async def approve_fix_from_ui(incident_id: str):
+    """Approve a fix from the UI"""
+    autofix = AutoFixService()
+    result = await autofix.approve_fix(incident_id)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@router.post("/fixes/{incident_id}/reject")
+async def reject_fix_from_ui(incident_id: str, request: RejectFixRequest = RejectFixRequest()):
+    autofix = AutoFixService()
+    result = await autofix.reject_fix(incident_id, request.reason)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@router.get("/oncall")
+async def list_oncall(service_name: Optional[str] = None):
+    oncall = OnCallService()
+    roster = await oncall.list_roster(service_name)
+    return {"roster": roster, "count": len(roster)}
+
+@router.post("/oncall/members")
+async def add_oncall_member(request: TeamMemberRequest):
+    oncall = OnCallService()
+    try:
+        return await oncall.add_member(request.model_dump())
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.delete("/oncall/members/{member_id}")
+async def remove_oncall_member(member_id: int):
+    oncall = OnCallService()
+    return await oncall.remove_member(member_id)
+
+@router.post("/oncall/alert")
+async def send_oncall_alert(request: AlertRequest):
+    alerts = AlertService()
+    message = request.message or (
+        f"🚨 AEGIS PRO page: all hands on incident {request.incident_id}"
+        if request.incident_id
+        else "🚨 AEGIS PRO: please acknowledge — on-call page"
+    )
+    if request.everyone or (request.target or "").lower() in ("everyone", "all"):
+        return await alerts.alert_everyone(message, request.service_name)
+    if not request.target:
+        raise HTTPException(status_code=400, detail="Provide target Slack handle or set everyone=true")
+    result = await alerts.alert_person(
+        slack_handle=request.target,
+        message=message,
+        incident_id=request.incident_id,
+    )
     return result
