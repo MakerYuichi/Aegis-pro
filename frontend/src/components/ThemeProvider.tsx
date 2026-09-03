@@ -9,24 +9,29 @@ interface ThemeContextType {
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
-export function ThemeProvider({ children, defaultTheme = 'dark' }: { children: React.ReactNode; defaultTheme?: Theme }) {
+export function ThemeProvider({ children, defaultTheme = 'light' }: { children: React.ReactNode; defaultTheme?: Theme }) {
   const [theme, setTheme] = useState<Theme>(defaultTheme);
 
   useEffect(() => {
     const saved = localStorage.getItem('theme') as Theme | null;
     if (saved) {
       setTheme(saved);
-      document.documentElement.classList.toggle('dark', saved === 'dark');
     } else {
-      document.documentElement.classList.toggle('dark', defaultTheme === 'dark');
+      // Check system preference
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      setTheme(prefersDark ? 'dark' : 'light');
     }
   }, []);
 
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.remove('light', 'dark');
+    root.classList.add(theme);
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
   const toggleTheme = () => {
-    const newTheme = theme === 'dark' ? 'light' : 'dark';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    document.documentElement.classList.toggle('dark', newTheme === 'dark');
+    setTheme(prev => prev === 'dark' ? 'light' : 'dark');
   };
 
   return (
