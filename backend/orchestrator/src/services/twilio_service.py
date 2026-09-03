@@ -31,9 +31,9 @@ class TwilioService:
         except Exception as e:
             logger.error(f"SMS error: {e}")
             return False
-    
+    """
     async def make_call(self, to_number: str, message: str) -> bool:
-        """Make a phone call via Twilio (with mock fallback)"""
+        Make a phone call via Twilio (with mock fallback)
         if not self.enabled or not to_number:
             logger.info(f"📞 [MOCK CALL] To: {to_number or 'Not configured'} | Message: {message[:50]}...")
             return True
@@ -59,3 +59,4 @@ class TwilioService:
         except Exception as e:
             logger.error(f"Call error: {e}")
             return False
+"""
