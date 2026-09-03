@@ -8,6 +8,10 @@ from src.database import get_db
 from src.services.llm_service import LLMService
 from src.services.rag_service import RAGService
 from src.services.autofix_service import AutoFixService
+from src.services.oncall_service import OnCallService
+from src.services.alert_service import AlertService
+from src.services.kubernetes_service import KubernetesService
+from src.services.slack_service import SlackService
 from src.config import settings
 from src.websocket import manager
 
@@ -183,6 +187,33 @@ class IncidentService:
         
         # --- Save incident ---
         await self.save_incident(incident_data)
+        
+        # --- Get On-Call Engineers ---
+        try:
+            oncall = OnCallService()
+            on_call = await oncall.get_on_call(service_name)
+            if on_call and not on_call.get('error'):
+                logger.info(f"📋 On-call: {on_call.get('primary', {}).get('name')}")
+        except Exception as e:
+            logger.error(f"On-call error: {e}")
+
+        # --- Send Alerts ---
+        try:
+            alert = AlertService()
+            escalation = await oncall.get_escalation_policy(service_name, analysis.get('severity', 'P1'))
+            await alert.send_alerts(incident_data, on_call, escalation)
+            logger.info(f"📢 Alerts sent for {incident_id}")
+        except Exception as e:
+            logger.error(f"Alert error: {e}")
+            
+        # --- Real Rollback Preparation ---
+        try:
+            k8s = KubernetesService()
+            status = await k8s.get_deployment_status(service_name)
+            logger.info(f"☸️ K8s status: {status}")
+        except Exception as e:
+            logger.error(f"K8s error: {e}")
+
         
         # --- Store for future RAG searches ---
         await self.rag.store_incident(incident_data)
