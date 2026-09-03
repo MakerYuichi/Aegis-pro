@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Activity, Clock, CheckCircle, Eye, RotateCcw, AlertTriangle } from 'lucide-react';
+import { Activity, Clock, CheckCircle, Eye, RotateCcw, AlertTriangle, Bell } from 'lucide-react';
 import type { Incident } from '../utils/api';
+import { motion, AnimatePresence } from 'framer-motion';
 
 interface ActivityItem {
   type: string;
@@ -89,68 +90,82 @@ export function ActivityFeed({ websocket, initialIncidents = [] }: ActivityFeedP
 
   const getActionIcon = (action: string) => {
     switch (action) {
-      case 'rollback': return <RotateCcw className="w-4 h-4 text-red-500" />;
-      case 'acknowledge': return <CheckCircle className="w-4 h-4 text-green-500" />;
-      case 'view_details': return <Eye className="w-4 h-4 text-blue-500" />;
-      case 'created': return <AlertTriangle className="w-4 h-4 text-yellow-500" />;
-      default: return <Activity className="w-4 h-4 text-gray-500" />;
+      case 'rollback': return <RotateCcw className="w-4 h-4 text-severity-critical" />;
+      case 'acknowledge': return <CheckCircle className="w-4 h-4 text-brand-success" />;
+      case 'view_details': return <Eye className="w-4 h-4 text-brand-primary" />;
+      case 'created': return <AlertTriangle className="w-4 h-4 text-brand-warning" />;
+      default: return <Activity className="w-4 h-4 text-light-muted dark:text-dark-muted" />;
     }
   };
 
   const getActionColor = (action: string) => {
     switch (action) {
-      case 'rollback': return 'bg-red-50 border-red-200 dark:bg-red-950/20 dark:border-red-900';
-      case 'acknowledge': return 'bg-green-50 border-green-200 dark:bg-green-950/20 dark:border-green-900';
-      case 'view_details': return 'bg-blue-50 border-blue-200 dark:bg-blue-950/20 dark:border-blue-900';
-      case 'created': return 'bg-yellow-50 border-yellow-200 dark:bg-yellow-950/20 dark:border-yellow-900';
-      default: return 'bg-gray-50 border-gray-200 dark:bg-gray-900/20 dark:border-gray-700';
+      case 'rollback': return 'bg-severity-critical/10 border-severity-critical/30';
+      case 'acknowledge': return 'bg-brand-success/10 border-brand-success/30';
+      case 'view_details': return 'bg-brand-primary/10 border-brand-primary/30';
+      case 'created': return 'bg-brand-warning/10 border-brand-warning/30';
+      default: return 'bg-light-surface dark:bg-dark-surface border-light-border dark:border-dark-border';
     }
   };
 
   return (
-    <div className="bg-white dark:bg-dark-surface rounded-xl shadow-lg p-4">
+    <div className="bg-light-card dark:bg-dark-card rounded-2xl border border-light-border dark:border-dark-border shadow-lg p-4">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold dark:text-dark-text flex items-center gap-2">
-          <Activity className="w-5 h-5 text-primary-500" />
+        <h3 className="text-lg font-semibold text-light-text dark:text-dark-text flex items-center gap-2">
+          <Activity className="w-5 h-5 text-brand-primary" />
           Live Activity Feed
         </h3>
-        <span className="text-xs text-gray-500 dark:text-dark-muted">
-          {activities.length} activities
-        </span>
+        <div className="flex items-center gap-2">
+          <Bell className="w-4 h-4 text-brand-primary animate-pulse" />
+          <span className="text-xs text-light-muted dark:text-dark-muted">
+            {activities.length} activities
+          </span>
+        </div>
       </div>
 
-      <div className="space-y-2 max-h-64 overflow-y-auto">
-        {activities.length === 0 ? (
-          <div className="text-center py-8">
-            <Activity className="w-8 h-8 text-gray-300 dark:text-gray-600 mx-auto mb-2" />
-            <p className="text-sm text-gray-400 dark:text-dark-muted">Waiting for activity...</p>
-          </div>
-        ) : (
-          activities.map((activity, index) => (
-            <div
-              key={`${activity.incident_id}-${activity.action}-${activity.timestamp}-${index}`}
-              className={`flex items-center gap-3 p-2 rounded-lg border ${getActionColor(activity.action)}`}
+      <div className="space-y-2 max-h-64 overflow-y-auto custom-scrollbar">
+        <AnimatePresence>
+          {activities.length === 0 ? (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="text-center py-8"
             >
-              <div className="flex-shrink-0">
-                {getActionIcon(activity.action)}
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium dark:text-dark-text truncate">
-                  {activity.message}
-                </p>
-                <p className="text-xs text-gray-500 dark:text-dark-muted flex items-center gap-1">
-                  <Clock className="w-3 h-3" />
-                  {new Date(activity.timestamp).toLocaleTimeString()}
-                </p>
-              </div>
-              <div className="flex-shrink-0">
-                <span className="text-xs bg-gray-100 dark:bg-dark-border px-2 py-0.5 rounded-full text-gray-600 dark:text-dark-muted">
-                  {activity.incident_id}
-                </span>
-              </div>
-            </div>
-          ))
-        )}
+              <Activity className="w-8 h-8 text-light-muted dark:text-dark-muted mx-auto mb-2" />
+              <p className="text-sm text-light-muted dark:text-dark-muted">Waiting for activity...</p>
+            </motion.div>
+          ) : (
+            activities.map((activity, index) => (
+              <motion.div
+                key={`${activity.incident_id}-${activity.action}-${activity.timestamp}-${index}`}
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }}
+                transition={{ duration: 0.3 }}
+                className={`flex items-center gap-3 p-2 rounded-lg border ${getActionColor(activity.action)}`}
+              >
+                <div className="flex-shrink-0">
+                  {getActionIcon(activity.action)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-light-text dark:text-dark-text truncate">
+                    {activity.message}
+                  </p>
+                  <p className="text-xs text-light-muted dark:text-dark-muted flex items-center gap-1">
+                    <Clock className="w-3 h-3" />
+                    {new Date(activity.timestamp).toLocaleTimeString()}
+                  </p>
+                </div>
+                <div className="flex-shrink-0">
+                  <span className="text-xs bg-light-border dark:bg-dark-border px-2 py-0.5 rounded-full text-light-text dark:text-dark-text">
+                    {activity.incident_id}
+                  </span>
+                </div>
+              </motion.div>
+            ))
+          )}
+        </AnimatePresence>
       </div>
     </div>
   );
