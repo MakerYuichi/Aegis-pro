@@ -1,0 +1,12 @@
+name: AEGIS PRO Rollback
+on:
+  repository_dispatch:
+    types: [rollback]
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rollback Deployment
+        run: |
+          kubectl rollout undo deployment/${{ github.event.client_payload.service }} -n production
