@@ -1,46 +1,84 @@
-import { Link } from 'react-router-dom';
-import { AlertTriangle, Shield, Zap, Moon, Sun } from 'lucide-react';
+import { Link, useLocation } from 'react-router-dom';
+import { Shield, Zap, Moon, Sun, LayoutDashboard, AlertTriangle, Server, Users, Settings as SettingsIcon } from 'lucide-react';
 import { useTheme } from './ThemeProvider';
 
 export function Navbar() {
   const { theme, toggleTheme } = useTheme();
+  const location = useLocation();
+
+  const navItems = [
+    { path: '/', label: 'Dashboard', icon: LayoutDashboard },
+    { path: '/incidents', label: 'Incidents', icon: AlertTriangle },
+    { path: '/services', label: 'Services', icon: Server },
+    { path: '/oncall', label: 'On-Call', icon: Users },
+    { path: '/approvals', label: 'Approvals', icon: Zap },
+    { path: '/settings', label: 'Settings', icon: SettingsIcon },
+  ];
 
   return (
-    <nav className="bg-white dark:bg-dark-surface shadow-md border-b border-gray-200 dark:border-dark-border transition-colors">
-      <div className="container mx-auto px-4 py-3 flex items-center justify-between">
-        <Link to="/" className="flex items-center gap-2">
-          <div className="relative">
-            <Shield className="w-8 h-8 text-primary-500" />
-            <Zap className="w-3 h-3 text-yellow-400 absolute -top-0.5 -right-0.5" />
-          </div>
-          <div>
-            <span className="text-xl font-bold text-primary-500">AEGIS PRO</span>
-            <span className="text-xs bg-gray-100 dark:bg-dark-border px-2 py-0.5 rounded-full text-gray-600 dark:text-dark-muted ml-2">v1.0</span>
-          </div>
-        </Link>
-        
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-            <span className="text-xs text-gray-500 dark:text-dark-muted hidden sm:inline">All systems operational</span>
-          </div>
-          <button
-            onClick={toggleTheme}
-            className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-dark-border transition"
-            aria-label="Toggle theme"
-          >
-            {theme === 'dark' ? (
-              <Sun className="w-5 h-5 text-yellow-400" />
-            ) : (
-              <Moon className="w-5 h-5 text-gray-600" />
-            )}
-          </button>
-          <Link
-            to="/"
-            className="text-sm text-gray-500 dark:text-dark-muted hover:text-primary-500 transition"
-          >
-            Dashboard
+    <nav className="bg-white dark:bg-dark-bg border-b border-light-border dark:border-dark-border shadow-sm transition-colors">
+      <div className="container mx-auto px-4">
+        <div className="flex items-center justify-between py-4">
+          {/* Logo */}
+          <Link to="/" className="flex items-center gap-3 group">
+            <div className="relative">
+              <div className="absolute inset-0 bg-brand-primary/20 rounded-lg blur opacity-0 group-hover:opacity-100 transition-opacity"></div>
+              <Shield className="w-10 h-10 text-brand-primary relative z-10" />
+              <Zap className="w-4 h-4 text-brand-accent absolute -top-1 -right-1 z-20 animate-pulse" />
+            </div>
+            <div>
+              <span className="text-2xl font-bold text-light-text dark:text-dark-text gradient-text">
+                AEGIS PRO
+              </span>
+              <span className="text-xs bg-brand-primary/10 text-brand-primary px-2 py-0.5 rounded-full ml-2 font-medium">
+                v2.0
+              </span>
+            </div>
           </Link>
+          
+          {/* Navigation */}
+          <div className="hidden md:flex items-center gap-1">
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              const isActive = location.pathname === item.path;
+              return (
+                <Link
+                  key={item.path}
+                  to={item.path}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all duration-200 font-medium ${
+                    isActive
+                      ? 'bg-brand-primary text-white shadow-md'
+                      : 'text-light-muted dark:text-dark-muted hover:bg-light-surface dark:hover:bg-dark-surface hover:text-light-text dark:hover:text-dark-text'
+                  }`}
+                >
+                  <Icon className="w-4 h-4" />
+                  <span className="text-sm">{item.label}</span>
+                </Link>
+              );
+            })}
+          </div>
+          
+          {/* Right Side */}
+          <div className="flex items-center gap-3">
+            {/* Status Indicator */}
+            <div className="hidden sm:flex items-center gap-2 bg-brand-success/10 px-3 py-1.5 rounded-lg border border-brand-success/20">
+              <span className="w-2 h-2 rounded-full bg-brand-success animate-pulse"></span>
+              <span className="text-xs text-brand-success font-medium">All Systems Operational</span>
+            </div>
+            
+            {/* Theme Toggle */}
+            <button
+              onClick={toggleTheme}
+              className="p-2.5 rounded-lg bg-light-surface dark:bg-dark-surface hover:bg-light-border dark:hover:bg-dark-border text-light-text dark:text-dark-text transition-all duration-200 border border-light-border dark:border-dark-border"
+              aria-label="Toggle theme"
+            >
+              {theme === 'dark' ? (
+                <Sun className="w-5 h-5 text-brand-warning" />
+              ) : (
+                <Moon className="w-5 h-5 text-brand-primary" />
+              )}
+            </button>
+          </div>
         </div>
       </div>
     </nav>
