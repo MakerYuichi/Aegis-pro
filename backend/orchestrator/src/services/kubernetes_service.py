@@ -1,5 +1,5 @@
 from loguru import logger
-import httpx
+import subprocess
 import json
 from src.config import settings
 
@@ -8,28 +8,35 @@ class KubernetesService:
         self.k8s_api_url = settings.K8S_API_URL
         self.k8s_token = settings.K8S_TOKEN
         self.namespace = settings.K8S_NAMESPACE or "production"
-        logger.info("✅ KubernetesService initialized")
+        self.available = bool(self.k8s_api_url and self.k8s_token)
+        
+        if not self.available:
+            logger.warning("⚠️ Kubernetes credentials not configured. Using mock mode.")
+        else:
+            logger.info("✅ KubernetesService initialized")
     
     async def rollback_deployment(self, service_name: str) -> dict:
-        """
-        Rollback a Kubernetes deployment to the previous revision
-        Uses kubectl via subprocess or K8s API
-        """
+        """Rollback a Kubernetes deployment"""
+        if not self.available:
+            logger.info(f"🔧 [MOCK] Rollback {service_name} in {self.namespace}")
+            return {
+                "status": "mock_rollback",
+                "service": service_name,
+                "namespace": self.namespace,
+                "message": f"✅ [MOCK] Rollbacked {service_name} (no K8s credentials)",
+                "command": f"kubectl rollout undo deployment/{service_name} -n {self.namespace}",
+                "mock": True
+            }
+        
         try:
-            # For demo purposes, we'll use kubectl
-            # In production, use the Kubernetes API
-            import subprocess
-            
-            # Get current revision
+            # Real rollback with kubectl
             cmd_get_revision = f"kubectl rollout history deployment/{service_name} -n {self.namespace} --output=json"
             result = subprocess.run(cmd_get_revision, shell=True, capture_output=True, text=True)
             
             if result.returncode != 0:
                 return {"error": f"Failed to get revision: {result.stderr}"}
             
-            # Parse the output to get current revision number
             try:
-                import json
                 data = json.loads(result.stdout)
                 revisions = data.get('status', {}).get('revisions', [])
                 if not revisions:
@@ -41,7 +48,6 @@ class KubernetesService:
                 if previous_revision < 1:
                     return {"error": "No previous revision to rollback to"}
                 
-                # Execute rollback
                 cmd_rollback = f"kubectl rollout undo deployment/{service_name} -n {self.namespace}"
                 result = subprocess.run(cmd_rollback, shell=True, capture_output=True, text=True)
                 
@@ -58,7 +64,7 @@ class KubernetesService:
                 }
                 
             except Exception as e:
-                # Fallback: Try simple kubectl command without JSON parsing
+                # Fallback
                 cmd_rollback = f"kubectl rollout undo deployment/{service_name} -n {self.namespace}"
                 result = subprocess.run(cmd_rollback, shell=True, capture_output=True, text=True)
                 
@@ -69,7 +75,7 @@ class KubernetesService:
                     "status": "rollback_successful",
                     "service": service_name,
                     "namespace": self.namespace,
-                    "message": "✅ Rollbacked to previous revision (kubectl)"
+                    "message": "✅ Rollbacked to previous revision"
                 }
             
         except Exception as e:
@@ -78,9 +84,16 @@ class KubernetesService:
     
     async def get_deployment_status(self, service_name: str) -> dict:
         """Get deployment status"""
+        if not self.available:
+            return {
+                "status": "mock",
+                "service": service_name,
+                "namespace": self.namespace,
+                "message": "Kubernetes credentials not configured",
+                "mock": True
+            }
+        
         try:
-            import subprocess
-            
             cmd = f"kubectl get deployment/{service_name} -n {self.namespace} -o json"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
@@ -88,7 +101,6 @@ class KubernetesService:
                 return {"error": f"Failed to get status: {result.stderr}"}
             
             try:
-                import json
                 data = json.loads(result.stdout)
                 status = data.get('status', {})
                 

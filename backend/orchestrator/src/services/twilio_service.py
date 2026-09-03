@@ -6,13 +6,13 @@ class TwilioService:
         self.account_sid = settings.TWILIO_ACCOUNT_SID
         self.auth_token = settings.TWILIO_AUTH_TOKEN
         self.from_number = settings.TWILIO_FROM_NUMBER
-        self.enabled = bool(self.account_sid and self.auth_token)
+        self.enabled = bool(self.account_sid and self.auth_token and self.from_number)
         logger.info(f"✅ TwilioService initialized (enabled: {self.enabled})")
     
     async def send_sms(self, to_number: str, message: str) -> bool:
-        """Send SMS via Twilio"""
-        if not self.enabled:
-            logger.info(f"📱 [MOCK SMS] To: {to_number} | Message: {message[:50]}...")
+        """Send SMS via Twilio (with mock fallback)"""
+        if not self.enabled or not to_number:
+            logger.info(f"📱 [MOCK SMS] To: {to_number or 'Not configured'} | Message: {message[:50]}...")
             return True
         
         try:
@@ -33,9 +33,9 @@ class TwilioService:
             return False
     
     async def make_call(self, to_number: str, message: str) -> bool:
-        """Make a phone call via Twilio"""
-        if not self.enabled:
-            logger.info(f"📞 [MOCK CALL] To: {to_number} | Message: {message[:50]}...")
+        """Make a phone call via Twilio (with mock fallback)"""
+        if not self.enabled or not to_number:
+            logger.info(f"📞 [MOCK CALL] To: {to_number or 'Not configured'} | Message: {message[:50]}...")
             return True
         
         try:
@@ -44,7 +44,6 @@ class TwilioService:
             
             client = Client(self.account_sid, self.auth_token)
             
-            # Create a simple TwiML response
             response = VoiceResponse()
             response.say(message, voice='alice')
             
