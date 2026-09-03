@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379"
     
-    # LLM - Groq (FREE)
+    # LLM - Groq
     GROQ_API_KEY: Optional[str] = None
     
     # GitHub
@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     SLACK_BOT_TOKEN: Optional[str] = None
     SLACK_SIGNING_SECRET: Optional[str] = None
     SLACK_APP_TOKEN: Optional[str] = None
+    SLACK_WEBHOOK_URL: Optional[str] = None
+    
+    # Kubernetes (optional)
+    K8S_API_URL: Optional[str] = None
+    K8S_TOKEN: Optional[str] = None
+    K8S_NAMESPACE: str = "production"
     
     # App
     SECRET_KEY: str = "dev-secret-key-change-in-production"
@@ -28,6 +34,6 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
-        extra = "ignore"  # Allow extra fields in .env
+        extra = "ignore"
 
 settings = Settings()
