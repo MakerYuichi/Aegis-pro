@@ -129,6 +129,19 @@ curl -X POST http://localhost:8000/webhook/alert \
 | Service dependency graph (D3.js) | ✅ |
 | Dark mode | ✅ |
 | Dockerized — one command setup | ✅ |
+
+---
+
+## 📊 Dashboard Features
+
+The web dashboard provides complete visibility into your incident landscape:
+
+- **Live Activity Feed** — Real-time stream of all user actions: rollbacks, acknowledgments, approvals
+- **Service Health Ring** — Visual health status for every service in your catalog
+- **Service Dependency Graph** — Interactive D3.js visualization showing blast radius
+- **On-Call Rotation** — Current schedule with primary/secondary/tertiary roles
+- **Approval Dashboard** — Pending fixes with diff preview and one-click approve/reject
+- **Git Blame & Code Context** — Shows who changed the code and the exact failing line
  
 ---
  
@@ -147,6 +160,17 @@ When a file path and line number are identified, AEGIS PRO:
 - Gets a diff-based fix with explanation
 - Presents it for human approval
 - Creates the PR on approval
+
+---
+## 👥 On-Call & Team Management
+
+AEGIS PRO includes a complete on-call rotation system:
+
+- Define primary, secondary, and tertiary engineers per service
+- Configure escalation policies with wait times
+- Alert specific engineers or the entire team from the dashboard
+- Visual roster display with role badges
+- Add/remove team members via UI or API
 ---
  
 ## Getting Started
@@ -247,7 +271,14 @@ The auto-fix generation with human approval is what no existing tool does end-to
 - [D3.js](https://d3js.org/) — service dependency visualization
 - [Slack Bolt](https://slack.dev/bolt-python/) — Slack integration
 ---
- 
+
+ ## 🔧 Engineering Challenges & Solutions
+ **Slack 3-Second Timeout** → Slack expects a response within 3 seconds. Our LLM analysis takes 5-10 seconds. Fixed by implementing Slack's `response_url` pattern with background tasks. The command acknowledges immediately, processes asynchronously, and updates the message via webhook.
+
+**GitHub 404 Errors** → The GitHub blame API fails for many repositories. Fixed by falling back to commit history via PyGithub when the blame API returns 404.
+
+**pgvector Syntax Errors** → Parameterized queries don't support `::vector` casting. Fixed by converting embeddings to string format before passing to PostgreSQL.
+
 ## License
  
 MIT — built for the Razorpay AI Buildathon 2026.
