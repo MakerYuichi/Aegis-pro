@@ -9,9 +9,9 @@ from src.services.llm_service import LLMService
 from src.services.rag_service import RAGService
 from src.services.autofix_service import AutoFixService
 from src.services.oncall_service import OnCallService
-from src.services.alert_service import AlertService
 from src.services.kubernetes_service import KubernetesService
 from src.services.slack_service import SlackService
+from src.services.alert_service import AlertService
 from src.config import settings
 from src.websocket import manager
 
@@ -189,8 +189,9 @@ class IncidentService:
         await self.save_incident(incident_data)
         
         # --- Get On-Call Engineers ---
+        oncall = OnCallService()
+        on_call = None
         try:
-            oncall = OnCallService()
             on_call = await oncall.get_on_call(service_name)
             if on_call and not on_call.get('error'):
                 logger.info(f"📋 On-call: {on_call.get('primary', {}).get('name')}")
@@ -200,8 +201,9 @@ class IncidentService:
         # --- Send Alerts ---
         try:
             alert = AlertService()
-            escalation = await oncall.get_escalation_policy(service_name, analysis.get('severity', 'P1'))
-            await alert.send_alerts(incident_data, on_call, escalation)
+            severity = analysis.get('severity', 'P1')
+            escalation = await oncall.get_escalation_policy(service_name, severity)
+            await alert.send_alerts({**incident_data, "severity": severity, "title": analysis.get("title")}, on_call, escalation)
             logger.info(f"📢 Alerts sent for {incident_id}")
         except Exception as e:
             logger.error(f"Alert error: {e}")
@@ -232,37 +234,6 @@ class IncidentService:
         except Exception as e:
             logger.error(f"WebSocket broadcast error: {e}")
                 
-        # --- Auto-Fix Generation (with permission check) ---
-        if stack_analysis and stack_analysis.get("file_path"):
-            try:
-                autofix = AutoFixService()
-                
-                # Get existing metadata
-                existing_metadata = {}
-                if incident_data.get("extra_metadata"):
-                    try:
-                        existing_metadata = json.loads(incident_data["extra_metadata"])
-                    except:
-                        pass
-                
-                # Generate fix
-                fix_result = await autofix.generate_fix({
-                    "incident_id": incident_id,
-                    "service_name": service_name,
-                    "file_path": stack_analysis["file_path"],
-                    "line_number": stack_analysis.get("line_number"),
-                    "exception_type": stack_analysis.get("exception_type"),
-                    "root_cause": analysis.get("root_cause")
-                }, require_permission=True)
-                
-                if fix_result and not fix_result.get("error"):
-                    existing_metadata["auto_fix"] = fix_result
-                    incident_data["extra_metadata"] = json.dumps(existing_metadata)
-                    logger.info(f"✅ Auto-fix generated for {incident_id} (waiting for approval)")
-                else:
-                    logger.warning(f"⚠️ Auto-fix failed: {fix_result.get('error')}")
-            except Exception as e:
-                logger.error(f"Auto-fix error: {e}")
         
         return {
             "incident_id": incident_id,
@@ -309,7 +280,8 @@ class IncidentService:
                             description, 
                             on_call, 
                             dependencies, 
-                            is_critical 
+                            is_critical,
+                            repo_name
                         FROM services 
                         ORDER BY name
                     """)
@@ -321,7 +293,8 @@ class IncidentService:
                         "description": row[1],
                         "on_call": row[2] if row[2] else [],
                         "dependencies": row[3] if row[3] else [],
-                        "is_critical": row[4] if row[4] else False
+                        "is_critical": row[4] if row[4] else False,
+                        "repo_name": row[5],
                     }
                     for row in rows
                 ]
@@ -403,7 +376,8 @@ class IncidentService:
                             rollback_command,
                             confidence_score,
                             affected_services,
-                            declared_at
+                            declared_at,
+                            extra_metadata
                         FROM incidents 
                         ORDER BY declared_at DESC 
                         LIMIT :limit
@@ -438,6 +412,14 @@ class IncidentService:
                             incident["affected_services"] = []
                     else:
                         incident["affected_services"] = []
+                    extra = row[12]
+                    if extra:
+                        if isinstance(extra, str):
+                            try:
+                                extra = json.loads(extra)
+                            except:
+                                extra = {}
+                        incident["extra_metadata"] = extra
                     incidents.append(incident)
                 return incidents
         except Exception as e:
@@ -526,6 +508,37 @@ class IncidentService:
         except Exception as e:
             logger.error(f"Error seeding services: {e}")
             return {"status": "error", "message": str(e)}
+
+    async def add_service(self, service: dict) -> dict:
+        session = await get_db()
+        async with session:
+            deps = service.get("dependencies") or []
+            on_call = service.get("on_call") or []
+            if isinstance(deps, str):
+                deps = [d.strip() for d in deps.split(",") if d.strip()]
+            await session.execute(
+                text("""
+                    INSERT INTO services (name, description, repo_name, on_call, dependencies, is_critical)
+                    VALUES (:name, :description, :repo_name, CAST(:on_call AS jsonb), CAST(:dependencies AS jsonb), :is_critical)
+                """),
+                {
+                    "name": service["name"],
+                    "description": service.get("description") or "",
+                    "repo_name": service.get("repo_name") or service["name"],
+                    "on_call": json.dumps(on_call),
+                    "dependencies": json.dumps(deps),
+                    "is_critical": bool(service.get("is_critical")),
+                }
+            )
+            await session.commit()
+            return {"status": "created", "name": service["name"]}
+
+    async def delete_service(self, name: str) -> dict:
+        session = await get_db()
+        async with session:
+            await session.execute(text("DELETE FROM services WHERE name = :name"), {"name": name})
+            await session.commit()
+            return {"status": "deleted", "name": name}
     
     def _parse_stack_trace(self, stack_trace: str) -> dict:
         """Parse stack trace - handles multiple formats"""
