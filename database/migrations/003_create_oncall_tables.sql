@@ -1,3 +1,4 @@
+-- On-call rotations table
 CREATE TABLE IF NOT EXISTS oncall_rotations (
     id SERIAL PRIMARY KEY,
     service_name VARCHAR(255) NOT NULL,
@@ -5,7 +6,7 @@ CREATE TABLE IF NOT EXISTS oncall_rotations (
     slack_handle VARCHAR(100) NOT NULL,
     email VARCHAR(255),
     phone VARCHAR(20),
-    role VARCHAR(50) DEFAULT 'primary', -- primary, secondary, tertiary
+    role VARCHAR(50) DEFAULT 'primary',
     is_active BOOLEAN DEFAULT TRUE,
     start_date TIMESTAMP,
     end_date TIMESTAMP,
@@ -13,11 +14,11 @@ CREATE TABLE IF NOT EXISTS oncall_rotations (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Escalation policies
+-- Escalation policies table
 CREATE TABLE IF NOT EXISTS escalation_policies (
     id SERIAL PRIMARY KEY,
     service_name VARCHAR(255) NOT NULL,
-    severity VARCHAR(10) NOT NULL, -- P0, P1, P2
+    severity VARCHAR(10) NOT NULL,
     escalation_level INTEGER DEFAULT 1,
     engineer_name VARCHAR(255),
     slack_handle VARCHAR(100),
