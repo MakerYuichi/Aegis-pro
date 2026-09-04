@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, RefreshCw, Brain, Zap, GitCommit, GitPullRequest, Code, User, ThumbsUp, Clock, Activity, XCircle, Copy, AlertTriangle } from 'lucide-react';
-import { getIncident, rollbackIncident, approveFix, rejectFix, isPendingAutoFix, type Incident } from '../utils/api';
+import {
+  ArrowLeft, RefreshCw, Brain, Zap, GitCommit, GitPullRequest, Code,
+  Clock, Activity, Copy, AlertTriangle, ExternalLink, Users, GitMerge,
+} from 'lucide-react';
+import { getIncident, rollbackIncident, isPendingAutoFix, type Incident } from '../utils/api';
 import { motion } from 'framer-motion';
 
 export function IncidentDetail() {
@@ -9,8 +12,6 @@ export function IncidentDetail() {
   const [incident, setIncident] = useState<Incident | null>(null);
   const [loading, setLoading] = useState(true);
   const [rollingBack, setRollingBack] = useState(false);
-  const [approvingFix, setApprovingFix] = useState(false);
-  const [rejectingFix, setRejectingFix] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
@@ -38,63 +39,15 @@ export function IncidentDetail() {
     if (!incident) return;
     try {
       setRollingBack(true);
-      await rollbackIncident(incident.incident_id);
+      setError(null);
+      const result = await rollbackIncident(incident.incident_id);
+      setActionMessage(result.message || 'Rollback initiated');
       await fetchIncident(incident.incident_id);
     } catch (err) {
       console.error('Rollback failed:', err);
+      setError(err instanceof Error ? err.message : 'Rollback failed');
     } finally {
       setRollingBack(false);
-    }
-  };
-
-  const applyAutoFixStatus = (status: 'approved' | 'rejected', extra?: Record<string, unknown>) => {
-    setIncident((prev) => {
-      if (!prev) return prev;
-      const autoFix = { ...(prev.extra_metadata?.auto_fix || {}), ...(extra || {}), status, approved: status === 'approved', rejected: status === 'rejected', requires_approval: false };
-      if (autoFix.pr) {
-        autoFix.pr = { ...autoFix.pr, approval_required: false, status };
-      }
-      return {
-        ...prev,
-        extra_metadata: {
-          ...prev.extra_metadata,
-          auto_fix: autoFix,
-        },
-      };
-    });
-  };
-
-  const handleApproveFix = async () => {
-    if (!incident) return;
-    try {
-      setApprovingFix(true);
-      setActionMessage(null);
-      const result = await approveFix(incident.incident_id);
-      applyAutoFixStatus('approved', result.auto_fix);
-      setActionMessage(result.message || 'Fix approved');
-      await fetchIncident(incident.incident_id);
-    } catch (err) {
-      console.error('Fix approval failed:', err);
-      setActionMessage(err instanceof Error ? err.message : 'Fix approval failed');
-    } finally {
-      setApprovingFix(false);
-    }
-  };
-
-  const handleRejectFix = async () => {
-    if (!incident) return;
-    try {
-      setRejectingFix(true);
-      setActionMessage(null);
-      const result = await rejectFix(incident.incident_id);
-      applyAutoFixStatus('rejected', result.auto_fix);
-      setActionMessage(result.message || 'Fix rejected');
-      await fetchIncident(incident.incident_id);
-    } catch (err) {
-      console.error('Fix rejection failed:', err);
-      setActionMessage(err instanceof Error ? err.message : 'Fix rejection failed');
-    } finally {
-      setRejectingFix(false);
     }
   };
 
@@ -174,10 +127,22 @@ export function IncidentDetail() {
           <div className="bg-light-card dark:bg-dark-card rounded-2xl border border-light-border dark:border-dark-border shadow-lg p-6">
             <h2 className="text-xl font-semibold text-light-text dark:text-dark-text mb-2">{incident.title}</h2>
             <p className="text-light-muted dark:text-dark-muted mb-4">{incident.description}</p>
-            <div className="flex items-center gap-4 text-sm text-light-muted dark:text-dark-muted">
+            <div className="flex flex-wrap items-center gap-3 text-sm text-light-muted dark:text-dark-muted">
               <span>Service: <strong className="text-light-text dark:text-dark-text">{incident.service_name}</strong></span>
               <span>•</span>
               <span>Declared: {new Date(incident.declared_at).toLocaleString()}</span>
+              {incident.extra_metadata?.reported_by && (
+                <>
+                  <span>•</span>
+                  <span>Reported by: <strong className="text-light-text dark:text-dark-text">{incident.extra_metadata.reported_by}</strong></span>
+                </>
+              )}
+              {incident.extra_metadata?.rag_context_used && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-brand-secondary/10 text-brand-secondary border border-brand-secondary/25 rounded-full text-xs font-medium">
+                  <Brain className="w-3 h-3" />
+                  RAG context used
+                </span>
+              )}
             </div>
           </div>
 
@@ -274,63 +239,134 @@ export function IncidentDetail() {
             </div>
           )}
 
-          {/* Git Blame Card - Author avatar, commit, PR */}
+          {/* Git Blame Card — author avatar, commit, PR, contributors */}
           {incident.extra_metadata?.github?.blame && (
-            <div className="bg-light-card dark:bg-dark-card rounded-2xl border border-light-border dark:border-dark-border shadow-lg p-6">
-              <div className="flex items-center gap-2 mb-4">
+            <div className="bg-gradient-to-br from-light-card to-light-surface dark:from-dark-card dark:to-dark-surface rounded-2xl border border-light-border dark:border-dark-border shadow-xl p-6 backdrop-blur-sm">
+              <div className="flex items-center gap-2 mb-6">
                 <GitCommit className="w-5 h-5 text-brand-warning" />
                 <h3 className="text-sm font-semibold text-brand-warning">Git Blame</h3>
+                {incident.extra_metadata?.github?.blame.pr_number && (
+                  <a
+                    href={incident.extra_metadata?.github?.blame.pr_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="ml-auto text-xs bg-brand-primary/20 text-brand-primary px-3 py-1 rounded-full hover:bg-brand-primary/30 transition"
+                  >
+                    View PR #{incident.extra_metadata?.github?.blame.pr_number}
+                  </a>
+                )}
               </div>
-              <div className="space-y-4">
+              <div className="space-y-5">
                 <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-full bg-brand-primary/20 flex items-center justify-center text-brand-primary font-bold text-lg">
-                    {incident.extra_metadata.github.blame.author.charAt(0).toUpperCase()}
-                  </div>
+                  <a
+                    href={`https://github.com/${incident.extra_metadata?.github?.blame?.author}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="relative group flex-shrink-0"
+                  >
+                    <img
+                      src={`https://github.com/${incident.extra_metadata?.github?.blame?.author}.png`}
+                      alt={incident.extra_metadata?.github?.blame?.author}
+                      className="w-14 h-14 rounded-full border-2 border-brand-primary/30 group-hover:border-brand-primary transition-colors"
+                      onError={e => {
+                        e.currentTarget.src = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%233B82F6'/><text x='50' y='65' font-size='50' text-anchor='middle' fill='white' font-family='sans-serif'>${incident.extra_metadata?.github?.blame?.author?.charAt(0).toUpperCase()}</text></svg>`;
+                      }}
+                    />
+                  </a>
                   <div className="flex-1">
-                    <p className="text-sm text-light-muted dark:text-dark-muted">Author</p>
-                    <p className="text-sm font-medium text-light-text dark:text-dark-text">{incident.extra_metadata.github.blame.author}</p>
+                    <p className="text-xs text-light-muted dark:text-dark-muted mb-0.5">Blame Author</p>
+                    <a
+                      href={`https://github.com/${incident.extra_metadata?.github?.blame?.author}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sm font-semibold text-light-text dark:text-dark-text hover:text-brand-primary transition"
+                    >
+                      {incident.extra_metadata?.github?.blame?.author}
+                    </a>
+                    {incident.extra_metadata?.github?.blame?.message && (
+                      <p className="text-xs text-light-muted dark:text-dark-muted mt-1 italic line-clamp-1">
+                        "{incident.extra_metadata.github.blame.message}"
+                      </p>
+                    )}
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <GitCommit className="w-4 h-4 text-light-muted dark:text-dark-muted" />
-                  <div className="flex-1">
-                    <p className="text-xs text-light-muted dark:text-dark-muted">Commit</p>
-                    <code className="text-sm text-light-text dark:text-dark-text bg-light-surface dark:bg-dark-surface px-2 py-0.5 rounded">
-                      {incident.extra_metadata.github.blame.commit_hash}
-                    </code>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="flex items-center gap-3 p-3 bg-light-surface dark:bg-dark-surface rounded-lg border border-light-border dark:border-dark-border">
+                    <GitCommit className="w-4 h-4 text-light-muted dark:text-dark-muted flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-light-muted dark:text-dark-muted">Commit</p>
+                      <code className="text-xs text-light-text dark:text-dark-text bg-light-bg dark:bg-dark-bg px-2 py-0.5 rounded font-mono truncate block">
+                        {incident.extra_metadata?.github?.blame.commit_hash?.slice(0, 8)}
+                      </code>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 p-3 bg-light-surface dark:bg-dark-surface rounded-lg border border-light-border dark:border-dark-border">
+                    <Code className="w-4 h-4 text-light-muted dark:text-dark-muted flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-light-muted dark:text-dark-muted">File & Line</p>
+                      <p className="text-xs text-light-text dark:text-dark-text font-mono truncate">
+                        {incident.extra_metadata?.github?.blame.file}:{incident.extra_metadata?.github?.blame.line}
+                      </p>
+                    </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <Code className="w-4 h-4 text-light-muted dark:text-dark-muted" />
-                  <div className="flex-1">
-                    <p className="text-xs text-light-muted dark:text-dark-muted">File & Line</p>
-                    <p className="text-sm text-light-text dark:text-dark-text">
-                      {incident.extra_metadata.github.blame.file}:{incident.extra_metadata.github.blame.line}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-start gap-3">
-                  <User className="w-4 h-4 text-light-muted dark:text-dark-muted mt-0.5" />
-                  <div className="flex-1">
-                    <p className="text-xs text-light-muted dark:text-dark-muted">Commit Message</p>
-                    <p className="text-sm text-light-text dark:text-dark-text italic">
-                      {incident.extra_metadata.github.blame.message}
-                    </p>
-                  </div>
-                </div>
-                {incident.extra_metadata.github.blame.pr_number && (
+
+                {incident.extra_metadata?.github?.blame.pr_number && (
                   <div className="flex items-center gap-3 pt-4 border-t border-light-border dark:border-dark-border">
-                    <GitPullRequest className="w-4 h-4 text-brand-primary" />
+                    <GitPullRequest className="w-4 h-4 text-brand-primary flex-shrink-0" />
                     <div className="flex-1">
-                      <p className="text-xs text-light-muted dark:text-dark-muted">Associated PR</p>
+                      <p className="text-xs text-light-muted dark:text-dark-muted mb-0.5">Associated PR</p>
                       <a
-                        href={incident.extra_metadata.github.blame.pr_url}
+                        href={incident.extra_metadata?.github?.blame.pr_url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-sm text-brand-primary hover:underline"
+                        className="text-sm text-brand-primary hover:underline font-medium"
                       >
-                        #{incident.extra_metadata.github.blame.pr_number}: {incident.extra_metadata.github.blame.pr_title}
+                        #{incident.extra_metadata?.github?.blame.pr_number}: {incident.extra_metadata?.github?.blame.pr_title}
                       </a>
+                      {incident.extra_metadata?.github?.blame.pr_author && (
+                        <p className="text-xs text-light-muted dark:text-dark-muted mt-0.5">
+                          by {incident.extra_metadata.github.blame.pr_author}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Contributors from blame */}
+                {(incident.extra_metadata?.github?.blame as any)?.contributors?.length > 0 && (
+                  <div className="pt-4 border-t border-light-border dark:border-dark-border">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Users className="w-4 h-4 text-brand-secondary" />
+                      <p className="text-xs font-semibold text-brand-secondary uppercase tracking-wider">Contributors</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {((incident.extra_metadata?.github?.blame as any).contributors as Array<{
+                        username: string;
+                        role: string;
+                        avatar?: string;
+                        url?: string;
+                      }>).map((c) => (
+                        <a
+                          key={c.username}
+                          href={c.url || `https://github.com/${c.username}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-2 px-3 py-1.5 bg-light-surface dark:bg-dark-surface rounded-full border border-light-border dark:border-dark-border hover:border-brand-primary/40 transition group"
+                        >
+                          <img
+                            src={c.avatar || `https://github.com/${c.username}.png`}
+                            alt={c.username}
+                            className="w-5 h-5 rounded-full"
+                            onError={e => { e.currentTarget.style.display = 'none'; }}
+                          />
+                          <span className="text-xs font-medium text-light-text dark:text-dark-text group-hover:text-brand-primary transition">
+                            {c.username}
+                          </span>
+                          <span className="text-xs text-light-muted dark:text-dark-muted capitalize">{c.role}</span>
+                        </a>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -338,24 +374,94 @@ export function IncidentDetail() {
             </div>
           )}
 
+          {/* Recent PRs from GitHub context */}
+          {((incident.extra_metadata?.github?.recent_prs?.length) ?? 0) > 0 ? (
+            <div className="bg-gradient-to-br from-light-card to-light-surface dark:from-dark-card dark:to-dark-surface rounded-2xl border border-light-border dark:border-dark-border shadow-xl p-6 backdrop-blur-sm">
+              <div className="flex items-center gap-2 mb-4">
+                <GitMerge className="w-5 h-5 text-brand-secondary" />
+                <h3 className="text-sm font-semibold text-brand-secondary">Recent PRs — {incident.service_name}</h3>
+                <span className="ml-auto text-xs text-light-muted dark:text-dark-muted">
+                  {incident.extra_metadata!.github!.recent_prs!.length} PRs
+                </span>
+              </div>
+              <div className="space-y-2 max-h-64 overflow-y-auto custom-scrollbar">
+                {incident.extra_metadata!.github!.recent_prs!.map(pr => (
+                      <div className="flex items-start gap-3 p-3 bg-light-surface dark:bg-dark-surface rounded-xl border border-light-border dark:border-dark-border hover:border-brand-primary/30 transition">
+                    <GitPullRequest className="w-4 h-4 text-brand-primary mt-0.5 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <a
+                        href={pr.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm font-medium text-brand-primary hover:underline line-clamp-1"
+                      >
+                        #{pr.number}: {pr.title}
+                      </a>
+                      <div className="flex items-center gap-3 mt-0.5">
+                        <span className="text-xs text-light-muted dark:text-dark-muted">by {pr.author}</span>
+                        {pr.merged_at && (
+                          <span className="text-xs text-light-muted dark:text-dark-muted">
+                            merged {new Date(pr.merged_at).toLocaleDateString()}
+                          </span>
+                        )}
+                      </div>
+                      {pr.files && pr.files.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {pr.files.slice(0, 4).map((f: string) => (
+                            <span key={f} className="text-xs px-1.5 py-0.5 bg-light-bg dark:bg-dark-bg border border-light-border dark:border-dark-border rounded font-mono truncate max-w-[180px]">
+                              {f.split('/').pop()}
+                            </span>
+                          ))}
+                          {pr.files.length > 4 && (
+                            <span className="text-xs text-light-muted dark:text-dark-muted">+{pr.files.length - 4} more</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0 text-xs">
+                      {pr.additions != null && <span className="text-brand-success font-mono">+{pr.additions}</span>}
+                      {pr.deletions != null && <span className="text-severity-critical font-mono">-{pr.deletions}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="bg-light-card dark:bg-dark-card rounded-2xl border border-light-border dark:border-dark-border p-6 text-center">
+              <GitMerge className="w-8 h-8 text-light-muted dark:text-dark-muted mx-auto mb-2 opacity-50" />
+              <p className="text-sm font-medium text-light-muted dark:text-dark-muted">No recent PRs found</p>
+              <p className="text-xs text-light-muted dark:text-dark-muted mt-1">Related pull requests in {incident.service_name} will appear here</p>
+            </div>
+          )}
+
           {/* Auto-Fix Preview - Diff view with approve/reject */}
           {incident.extra_metadata?.auto_fix && (
-            <div className="bg-brand-success/10 border border-brand-success/20 rounded-2xl shadow-lg p-6">
-              <div className="flex items-center gap-2 mb-4">
-                <Zap className="w-5 h-5 text-brand-success" />
-                <h3 className="text-sm font-semibold text-brand-success">Auto-Fix Preview</h3>
-                {(incident.extra_metadata.auto_fix.status === 'approved' || incident.extra_metadata.auto_fix.approved) && (
-                  <span className="text-xs bg-brand-success/20 text-brand-success px-2 py-0.5 rounded-full ml-auto">
-                    Approved
-                  </span>
-                )}
-                {(incident.extra_metadata.auto_fix.status === 'rejected' || incident.extra_metadata.auto_fix.rejected) && (
-                  <span className="text-xs bg-severity-critical/20 text-severity-critical px-2 py-0.5 rounded-full ml-auto">
-                    Rejected
-                  </span>
-                )}
+            <div className="bg-gradient-to-br from-light-card to-light-surface dark:from-dark-card dark:to-dark-surface rounded-2xl border border-light-border dark:border-dark-border shadow-xl overflow-hidden backdrop-blur-sm">
+              <div className="bg-light-bg dark:bg-dark-bg px-4 py-2 flex items-center justify-between border-b border-light-border dark:border-dark-border">
+                <div className="flex items-center gap-2">
+                  <Zap className="w-4 h-4 text-brand-warning" />
+                  <span className="text-sm text-light-muted dark:text-dark-muted font-mono">Auto-Fix Preview</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {(incident.extra_metadata.auto_fix.status === 'approved' || incident.extra_metadata.auto_fix.approved) && (
+                    <span className="text-xs bg-brand-success/20 text-brand-success px-2 py-1 rounded-full border border-brand-success/30">
+                      Approved
+                    </span>
+                  )}
+                  {(incident.extra_metadata.auto_fix.status === 'rejected' || incident.extra_metadata.auto_fix.rejected) && (
+                    <span className="text-xs bg-severity-critical/20 text-severity-critical px-2 py-1 rounded-full border border-severity-critical/30">
+                      Rejected
+                    </span>
+                  )}
+                  {!(incident.extra_metadata.auto_fix.status === 'approved' || incident.extra_metadata.auto_fix.approved || 
+                      incident.extra_metadata.auto_fix.status === 'rejected' || incident.extra_metadata.auto_fix.rejected) && (
+                    <span className="text-xs bg-brand-warning/20 text-brand-warning px-2 py-1 rounded-full border border-brand-warning/30">
+                      Pending Approval
+                    </span>
+                  )}
+                </div>
               </div>
-              <div className="space-y-4">
+              <div className="p-6 space-y-4">
                 <div>
                   <p className="text-xs font-medium text-brand-success uppercase tracking-wider mb-1">Explanation</p>
                   <p className="text-light-text dark:text-dark-text bg-light-card dark:bg-dark-card p-3 rounded-lg border border-light-border dark:border-dark-border">
@@ -377,51 +483,96 @@ export function IncidentDetail() {
                   </div>
                 )}
                 {actionMessage && (
-                  <p className="text-sm text-light-text dark:text-dark-text bg-light-card dark:bg-dark-card p-3 rounded-lg border border-light-border dark:border-dark-border">
-                    {actionMessage}
-                  </p>
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="mt-4 p-4 bg-gradient-to-r from-brand-success/10 to-brand-success/5 border border-brand-success/20 rounded-xl"
+                  >
+                    <p className="text-sm text-brand-success font-medium">{actionMessage}</p>
+                  </motion.div>
                 )}
                 {isPendingAutoFix(incident.extra_metadata.auto_fix) && (
-                  <div className="flex gap-3">
-                    <button
-                      onClick={handleApproveFix}
-                      disabled={approvingFix || rejectingFix}
-                      className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-brand-success hover:bg-brand-success/90 text-white rounded-lg transition disabled:opacity-50"
+                  <div className="space-y-3 pt-4 border-t border-light-border dark:border-dark-border">
+                    <Link
+                      to="/approvals"
+                      className="flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-brand-primary to-brand-primary/90 hover:from-brand-primary/90 hover:to-brand-primary text-white rounded-xl transition-all duration-200 shadow-lg shadow-brand-primary/20 text-lg font-semibold"
                     >
-                      {approvingFix ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin" />
-                          Approving...
-                        </>
-                      ) : (
-                        <>
-                          <ThumbsUp className="w-4 h-4" />
-                          Approve Fix
-                        </>
-                      )}
-                    </button>
-                    <button
-                      onClick={handleRejectFix}
-                      disabled={approvingFix || rejectingFix}
-                      className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-severity-critical hover:bg-severity-critical/90 text-white rounded-lg transition disabled:opacity-50"
-                    >
-                      {rejectingFix ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin" />
-                          Rejecting...
-                        </>
-                      ) : (
-                        <>
-                          <XCircle className="w-4 h-4" />
-                          Reject Fix
-                        </>
-                      )}
-                    </button>
+                      <ExternalLink className="w-5 h-5" />
+                      Review in Approvals
+                    </Link>
+                    <p className="text-xs text-center text-light-muted dark:text-dark-muted">
+                      Go to Approvals page to review and approve/reject this fix
+                    </p>
                   </div>
                 )}
               </div>
             </div>
           )}
+
+          {/* Related PRs Section */}
+          {((incident.extra_metadata?.github?.related_prs?.length) ?? 0) > 0 ? (
+            <div className="bg-gradient-to-br from-light-card to-light-surface dark:from-dark-card dark:to-dark-surface rounded-2xl border border-light-border dark:border-dark-border shadow-xl p-6 backdrop-blur-sm">
+              <div className="flex items-center gap-2 mb-4">
+                <GitPullRequest className="w-5 h-5 text-brand-primary" />
+                <h3 className="text-sm font-semibold text-brand-primary">Related Pull Requests</h3>
+              </div>
+              <div className="space-y-3">
+                {incident.extra_metadata!.github!.related_prs!.map((pr: any, index: number) => (
+                  <motion.div
+                    key={pr.number || index}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: index * 0.1 }}
+                    className="p-4 bg-light-surface dark:bg-dark-surface rounded-xl border border-light-border dark:border-dark-border hover:shadow-md transition-shadow"
+                  >
+                    <div className="flex items-start justify-between mb-2">
+                      <div className="flex-1">
+                        <a
+                          href={pr.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sm font-medium text-brand-primary hover:underline"
+                        >
+                          #{pr.number}: {pr.title}
+                        </a>
+                        <p className="text-xs text-light-muted dark:text-dark-muted mt-1">
+                          by {pr.author} • {new Date(pr.created_at).toLocaleDateString()}
+                        </p>
+                      </div>
+                      {pr.relevance_score && (
+                        <div className="ml-4">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-xs text-light-muted dark:text-dark-muted">Relevance</span>
+                            <span className="text-xs font-semibold text-brand-primary">{Math.round(pr.relevance_score)}%</span>
+                          </div>
+                          <div className="w-20 h-2 bg-light-bg dark:bg-dark-bg rounded-full overflow-hidden">
+                            <div 
+                              className="h-full bg-gradient-to-r from-brand-primary to-brand-secondary"
+                              style={{ width: `${Math.round(pr.relevance_score)}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    {pr.reason && (
+                      <div className="mt-2 p-2 bg-light-bg dark:bg-dark-bg rounded-lg">
+                        <p className="text-xs text-light-muted dark:text-dark-muted">
+                          <span className="font-medium">Why related:</span> {pr.reason}
+                        </p>
+                      </div>
+                    )}
+                  </motion.div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="bg-light-card dark:bg-dark-card rounded-2xl border border-light-border dark:border-dark-border p-6 text-center">
+              <GitPullRequest className="w-8 h-8 text-light-muted dark:text-dark-muted mx-auto mb-2 opacity-50" />
+              <p className="text-sm font-medium text-light-muted dark:text-dark-muted">No related PRs found</p>
+              <p className="text-xs text-light-muted dark:text-dark-muted mt-1">Pull requests related to this incident will appear here</p>
+            </div>
+          )}
+
         </div>
 
         {/* Right Column - Actions & Metadata */}

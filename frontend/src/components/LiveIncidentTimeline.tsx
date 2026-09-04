@@ -54,11 +54,11 @@ export function LiveIncidentTimeline({ incidents, onIncidentClick }: LiveInciden
   ).slice(0, 10);
 
   return (
-    <div className="bg-light-card dark:bg-dark-card rounded-2xl border border-light-border dark:border-dark-border shadow-lg overflow-hidden">
-      <div className="p-6 border-b border-light-border dark:border-dark-border">
+    <div className="bg-gradient-to-br from-light-card to-light-surface dark:from-dark-card dark:to-dark-surface rounded-2xl border border-light-border dark:border-dark-border shadow-xl overflow-hidden backdrop-blur-sm">
+      <div className="p-6 border-b border-light-border/50 dark:border-dark-border/50 bg-gradient-to-r from-brand-primary/5 to-brand-secondary/5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-brand-warning/10 rounded-lg">
+            <div className="p-2.5 bg-gradient-to-br from-brand-warning/20 to-brand-secondary/20 rounded-xl shadow-lg">
               <Clock className="w-5 h-5 text-brand-warning" />
             </div>
             <div>
@@ -67,8 +67,11 @@ export function LiveIncidentTimeline({ incidents, onIncidentClick }: LiveInciden
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-xs text-light-muted dark:text-dark-muted">Live</span>
-            <span className="w-2 h-2 rounded-full bg-brand-success animate-pulse"></span>
+            <div className="relative">
+              <span className="w-2 h-2 rounded-full bg-brand-success animate-ping absolute"></span>
+              <span className="w-2 h-2 rounded-full bg-brand-success relative"></span>
+            </div>
+            <span className="text-xs text-brand-success font-medium">Live</span>
           </div>
         </div>
       </div>
@@ -86,8 +89,9 @@ export function LiveIncidentTimeline({ incidents, onIncidentClick }: LiveInciden
               initial={{ opacity: 0, x: -20 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: index * 0.05 }}
+              whileHover={{ scale: 1.01, x: 4 }}
               onClick={() => onIncidentClick?.(incident)}
-              className={`p-4 rounded-xl border transition-all duration-200 cursor-pointer group ${getSeverityColor(incident.severity)}`}
+              className={`p-4 rounded-xl border transition-all duration-200 cursor-pointer group bg-gradient-to-r from-white/50 to-white/20 dark:from-dark-bg/50 dark:to-dark-bg/20 backdrop-blur-sm shadow-sm hover:shadow-md ${getSeverityColor(incident.severity)}`}
             >
               <div className="flex items-center gap-3">
                 <div className="flex-shrink-0">
@@ -108,7 +112,7 @@ export function LiveIncidentTimeline({ incidents, onIncidentClick }: LiveInciden
                     <span className="text-xs">{formatTimeAgo(incident.declared_at)}</span>
                   </div>
                 </div>
-                <ChevronRight className="w-4 h-4 text-light-muted dark:text-dark-muted group-hover:text-light-text dark:group-hover:text-dark-text transition-colors" />
+                <ChevronRight className="w-4 h-4 text-light-muted dark:text-dark-muted group-hover:text-light-text dark:group-hover:text-dark-text transition-colors group-hover:translate-x-1" />
               </div>
             </motion.div>
           ))
