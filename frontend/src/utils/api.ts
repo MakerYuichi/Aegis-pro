@@ -35,6 +35,94 @@ api.interceptors.response.use(
   }
 );
 
+export type BlastRadius = {
+  root: string;
+  affected: string[];
+  count: number;
+  severity: string;
+};
+
+export type Contributor = {
+  username: string;
+  role: 'author' | 'reviewer' | 'assignee' | 'committer';
+  avatar?: string;
+  url?: string;
+};
+
+export type GitBlame = {
+  commit_hash: string;
+  author: string;
+  author_avatar?: string;
+  message: string;
+  line: number;
+  file: string;
+  pr_number?: number;
+  pr_title?: string;
+  pr_url?: string;
+  pr_author?: string;
+  contributors?: Contributor[];
+};
+
+export type CodeContext = {
+  file_path: string;
+  line_number: number;
+  total_lines: number;
+  code_snippet: string;
+  full_file?: string;
+};
+
+export type AutoFix = {
+  original_code?: string;
+  fixed_code?: string;
+  diff?: string;
+  explanation?: string;
+  file_path?: string;
+  line_number?: number;
+  status?: 'fix_generated' | 'pr_draft' | 'approved' | 'rejected' | 'pr_created';
+  approved?: boolean;
+  requires_approval?: boolean;
+  rejected?: boolean;
+  rejection_reason?: string;
+  pr?: {
+    status?: string;
+    message?: string;
+    fix_preview?: string;
+    approval_url?: string;
+    approval_required?: boolean;
+    pr_number?: number;
+    pr_url?: string;
+    branch_name?: string;
+    title?: string;
+    body?: string;
+  };
+  fix?: string;
+  code_context?: CodeContext;
+};
+
+export type GitHubMetadata = {
+  recent_prs?: Array<{
+    number: number;
+    title: string;
+    author: string;
+    url: string;
+    merged_at: string;
+    additions: number;
+    deletions: number;
+    files: string[];
+  }>;
+  blame?: GitBlame;
+  related_prs?: Array<{
+    number: number;
+    title: string;
+    author: string;
+    url: string;
+    merged_at?: string;
+    relevance_score?: number;
+    reason?: string;
+    files?: string[];
+  }>;
+};
+
 export type Incident = {
   id?: number;
   incident_id: string;
@@ -51,67 +139,13 @@ export type Incident = {
   declared_at: string;
   resolved_at?: string;
   affected_services: string[];
+  blast_radius?: BlastRadius;
   extra_metadata?: {
     rag_context_used?: boolean;
     reported_by?: string;
-    github?: {
-      recent_prs?: Array<{
-        number: number;
-        title: string;
-        author: string;
-        url: string;
-        merged_at: string;
-        additions: number;
-        deletions: number;
-        files: string[];
-      }>;
-      blame?: {
-        commit_hash: string;
-        author: string;
-        message: string;
-        line: number;
-        file: string;
-        pr_number?: number;
-        pr_title?: string;
-        pr_url?: string;
-        pr_author?: string;
-      };
-    };
-    code_context?: {
-      file_path: string;
-      line_number: number;
-      total_lines: number;
-      code_snippet: string;
-      full_file?: string;
-    };
-    auto_fix?: {
-      original_code?: string;
-      fixed_code?: string;
-      diff?: string;
-      explanation?: string;
-      file_path?: string;
-      line_number?: number;
-      status?: string;
-      approved?: boolean;
-      requires_approval?: boolean;
-      pr?: {
-        status?: string;
-        message?: string;
-        fix_preview?: string;
-        approval_url?: string;
-        approval_required?: boolean;
-      };
-      fix?: string;
-      rejected?: boolean;
-      rejection_reason?: string;
-      code_context?: {
-        file_path?: string;
-        line_number?: number;
-        total_lines?: number;
-        code_snippet?: string;
-        full_file?: string;
-      };
-    };
+    github?: GitHubMetadata;
+    code_context?: CodeContext;
+    auto_fix?: AutoFix;
   };
 };
 
@@ -148,6 +182,38 @@ export type PendingFix = {
   created_at: string;
   requires_approval: boolean;
   status: string;
+  service_name?: string;
+  approved_by?: string;
+  approved_at?: string;
+  rejected_by?: string;
+  rejected_at?: string;
+};
+
+export type OnCallMember = {
+  id: number | string;
+  service_name?: string;
+  name: string;
+  slack_handle: string;
+  email?: string;
+  phone?: string;
+  role: string;
+  is_active?: boolean;
+};
+
+export type Alert = {
+  id: number;
+  engineer: string;
+  service: string;
+  message: string;
+  status: string;
+  timestamp: string;
+};
+
+export type AlertRequest = {
+  target?: string;
+  everyone?: boolean;
+  message?: string;
+  incident_id?: string;
   service_name?: string;
 };
 
@@ -228,32 +294,34 @@ export const rejectFix = async (incident_id: string, reason?: string) => {
   return response.data;
 };
 
+export const getOnCallRoster = async (serviceName?: string): Promise<{ roster: OnCallMember[]; count: number }> => {
+  const params = serviceName ? `?service_name=${serviceName}` : '';
+  const response = await api.get(`/api/v1/oncall${params}`);
+  return response.data;
+};
+
+export const addOnCallMember = async (member: Partial<OnCallMember>): Promise<{ id: number; status: string }> => {
+  const response = await api.post('/api/v1/oncall/members', member);
+  return response.data;
+};
+
+export const removeOnCallMember = async (memberId: number): Promise<{ id: number; status: string }> => {
+  const response = await api.delete(`/api/v1/oncall/members/${memberId}`);
+  return response.data;
+};
+
+export const getAlertHistory = async (limit: number = 20): Promise<{ alerts: Alert[]; count: number }> => {
+  const response = await api.get(`/api/v1/oncall/alert/history?limit=${limit}`);
+  return response.data;
+};
+
+export const sendAlert = async (alert: AlertRequest): Promise<any> => {
+  const response = await api.post('/api/v1/oncall/alert', alert);
+  return response.data;
+};
+
 export const getPendingFixes = async (): Promise<{ fixes: PendingFix[]; count: number }> => {
   const response = await api.get('/api/v1/fixes/pending');
-  return response.data;
-};
-
-export const getOnCallRoster = async (serviceName?: string): Promise<{ roster: OnCallPerson[]; count: number }> => {
-  const response = await api.get('/api/v1/oncall', {
-    params: serviceName ? { service_name: serviceName } : undefined,
-  });
-  return response.data;
-};
-
-export const addOnCallMember = async (data: {
-  name: string;
-  email?: string;
-  slack_handle?: string;
-  phone?: string;
-  role?: string;
-  service_name: string;
-}) => {
-  const response = await api.post('/api/v1/oncall/members', data);
-  return response.data;
-};
-
-export const removeOnCallMember = async (id: string | number) => {
-  const response = await api.delete(`/api/v1/oncall/members/${id}`);
   return response.data;
 };
 
