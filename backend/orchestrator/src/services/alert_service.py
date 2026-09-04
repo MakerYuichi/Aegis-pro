@@ -2,6 +2,9 @@ from typing import Optional
 from loguru import logger
 from src.services.slack_service import SlackService
 from src.services.oncall_service import OnCallService
+from sqlalchemy import text
+from src.database import get_db
+from datetime import datetime
 
 class AlertService:
     def __init__(self):
@@ -83,6 +86,27 @@ class AlertService:
         }
         sent = await self.slack.send_message(payload)
         logger.info(f"📣 Alert to {handle} ({channel}) incident={incident_id} sent={sent}")
+        
+        # Record alert in database
+        try:
+            session = await get_db()
+            async with session:
+                await session.execute(
+                    text("""
+                        INSERT INTO alert_history (engineer_name, service_name, message, status)
+                        VALUES (:engineer, :service, :message, :status)
+                    """),
+                    {
+                        "engineer": handle,
+                        "service": incident_id or "unknown",
+                        "message": message[:500],  # Truncate long messages
+                        "status": "sent" if sent else "failed"
+                    }
+                )
+                await session.commit()
+        except Exception as e:
+            logger.error(f"Failed to record alert in database: {e}")
+        
         return {
             "status": "sent" if sent else "failed",
             "target": handle,
@@ -113,3 +137,39 @@ class AlertService:
             "targets": list(unique.keys()),
             "results": results,
         }
+
+    async def get_alert_history(self, limit: int = 20) -> list:
+        """Get recent alert history from database."""
+        try:
+            session = await get_db()
+            async with session:
+                result = await session.execute(
+                    text("""
+                        SELECT
+                            id,
+                            engineer_name,
+                            service_name,
+                            message,
+                            status,
+                            created_at
+                        FROM alert_history
+                        ORDER BY created_at DESC
+                        LIMIT :limit
+                    """),
+                    {"limit": limit}
+                )
+                rows = result.fetchall()
+                return [
+                    {
+                        "id": row[0],
+                        "engineer": row[1],
+                        "service": row[2],
+                        "message": row[3],
+                        "status": row[4],
+                        "timestamp": row[5].isoformat() if row[5] else None
+                    }
+                    for row in rows
+                ]
+        except Exception as e:
+            logger.error(f"Error getting alert history: {e}")
+            return []
