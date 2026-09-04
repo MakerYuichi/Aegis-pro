@@ -160,6 +160,13 @@ async def remove_oncall_member(member_id: int):
     oncall = OnCallService()
     return await oncall.remove_member(member_id)
 
+@router.get("/oncall/alert/history")
+async def get_alert_history(req: Request, limit: int = 20):
+    """Get alert history"""
+    alerts = AlertService()
+    history = await alerts.get_alert_history(limit)
+    return {"alerts": history, "count": len(history)}
+
 @router.post("/oncall/alert")
 async def send_oncall_alert(request: AlertRequest):
     alerts = AlertService()

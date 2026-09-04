@@ -2,6 +2,7 @@ from github import Github, Auth
 from src.config import settings
 from loguru import logger
 import httpx
+import re
 
 class GitHubService:
     def __init__(self):
@@ -85,7 +86,7 @@ class GitHubService:
             return []
     
     async def get_blame_with_pr(self, repo_name: str, file_path: str, line_number: int) -> dict:
-        """Get Git blame AND the associated PR using commit history (most reliable)"""
+        """Get Git blame AND the associated PR using commit history"""
         if not self.client:
             return {}
         
@@ -96,119 +97,217 @@ class GitHubService:
             
             logger.info(f"🔍 Getting blame for: {file_path}:{line_number}")
             
-            # Try multiple approaches to find the commit
-            
             # Approach 1: Get commit history for the file with exact path
             try:
                 commits = repo.get_commits(path=file_path)
                 logger.info(f"📝 Found {commits.totalCount} commits for {file_path}")
+                
                 if commits.totalCount > 0:
-                    commit = commits[0]  # Get the most recent commit
+                    commit = commits[0]
                     pr_info = await self._find_pr_for_commit(repo, commit.sha)
+                    
                     result = {
                         "commit_hash": commit.sha[:8],
                         "author": commit.author.login if commit.author else "Unknown",
+                        "author_avatar": commit.author.avatar_url if commit.author else None,
                         "message": commit.commit.message.split("\n")[0][:100],
                         "line": line_number,
                         "file": file_path,
                     }
+                    
                     if pr_info:
+                        pr_number = pr_info.get("number")
+                        contributors = await self._get_pr_contributors(repo, pr_number)
                         result.update({
-                            "pr_number": pr_info.get("number"),
+                            "pr_number": pr_number,
                             "pr_title": pr_info.get("title"),
                             "pr_url": pr_info.get("url"),
-                            "pr_author": pr_info.get("author")
+                            "pr_author": pr_info.get("author"),
+                            "contributors": contributors,
                         })
-                        logger.info(f"✅ Found PR #{pr_info.get('number')} for commit {commit.sha[:8]}")
+                        logger.info(f"✅ Found PR #{pr_number} for commit {commit.sha[:8]}")
                     else:
                         logger.info(f"✅ Found commit {commit.sha[:8]} but no PR associated")
+                    
                     return result
+                    
             except Exception as e:
                 logger.error(f"Error getting commits: {e}")
             
-            return{}
-        
+            return {}
+            
         except Exception as e:
             logger.error(f"Git blame error: {e}")
             return {}
+    
+    async def get_related_prs(self, repo_name: str, file_path: str, line_number: int, limit: int = 5) -> list:
+        """Find PRs that are related to a specific file/line"""
+        try:
+            repo = await self._get_repo(repo_name)
+            if not repo:
+                return []
             
-            # Approach 2: Try with different path variants
-            path_variants = [
-                file_path,
-                file_path.replace('fastapi/', ''),
-                file_path.split('/')[-1] if '/' in file_path else file_path
-            ]
+            related_prs = []
+            seen_prs = set()
             
-            for variant in path_variants:
-                try:
-                    commits = repo.get_commits(path=variant)
-                    if commits.totalCount > 0:
-                        commit = commits[0]
-                        pr_info = await self._find_pr_for_commit(repo, commit.sha)
-                        result = {
-                            "commit_hash": commit.sha[:8],
-                            "author": commit.author.login if commit.author else "Unknown",
-                            "message": commit.commit.message.split("\n")[0][:100],
-                            "line": line_number,
-                            "file": file_path,
-                        }
-                        if pr_info:
-                            result.update({
-                                "pr_number": pr_info.get("number"),
-                                "pr_title": pr_info.get("title"),
-                                "pr_url": pr_info.get("url"),
-                                "pr_author": pr_info.get("author")
-                            })
-                            logger.info(f"✅ Found PR #{pr_info.get('number')} for commit {commit.sha[:8]} (variant: {variant})")
-                        return result
-                except Exception as e:
-                    continue
-            
-            # Approach 3: Try blame API as fallback
+            # 1. Get PRs that modified this file
             try:
-                full_repo = repo.full_name
-                url = f"https://api.github.com/repos/{full_repo}/blame/{file_path}"
-                headers = {"Authorization": f"Bearer {settings.GITHUB_TOKEN}"}
-                
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    response = await client.get(url, headers=headers)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        for entry in data:
-                            start = entry.get("start", 0)
-                            end = entry.get("end", 0)
-                            if start <= line_number <= end:
-                                commit = entry.get("commit", {})
-                                commit_sha = commit.get("sha", "")
-                                author = commit.get("author", {}).get("name", "Unknown")
-                                message = commit.get("commit", {}).get("message", "").split("\n")[0]
-                                
-                                pr_info = await self._find_pr_for_commit(repo, commit_sha)
-                                result = {
-                                    "commit_hash": commit_sha[:8],
-                                    "author": author,
-                                    "message": message,
-                                    "line": line_number,
-                                    "file": file_path,
-                                }
-                                if pr_info:
-                                    result.update({
-                                        "pr_number": pr_info.get("number"),
-                                        "pr_title": pr_info.get("title"),
-                                        "pr_url": pr_info.get("url"),
-                                        "pr_author": pr_info.get("author")
-                                    })
-                                logger.info(f"✅ Found blame via API for {file_path}")
-                                return result
+                commits = repo.get_commits(path=file_path)
+                for commit in commits[:20]:
+                    prs = commit.get_pulls()
+                    for pr in prs:
+                        if pr.number not in seen_prs:
+                            seen_prs.add(pr.number)
+                            relevance = await self._calculate_relevance(pr, file_path, line_number)
+                            related_prs.append({
+                                "number": pr.number,
+                                "title": pr.title,
+                                "author": pr.user.login,
+                                "url": pr.html_url,
+                                "merged_at": pr.merged_at.isoformat() if pr.merged_at else None,
+                                "relevance_score": relevance,
+                                "reason": f"Modified {file_path}",
+                                "files": [f.filename for f in pr.get_files()[:5]]
+                            })
             except Exception as e:
-                logger.debug(f"Blame API approach failed: {e}")
+                logger.debug(f"Error getting file PRs: {e}")
             
-            return {}
+            # 2. Get PRs with similar commit messages
+            try:
+                for pr in repo.get_pulls(state='closed', sort='updated', direction='desc')[:30]:
+                    if pr.number in seen_prs:
+                        continue
+                    
+                    relevance = await self._calculate_message_relevance(pr, file_path)
+                    if relevance > 0.5:
+                        seen_prs.add(pr.number)
+                        related_prs.append({
+                            "number": pr.number,
+                            "title": pr.title,
+                            "author": pr.user.login,
+                            "url": pr.html_url,
+                            "merged_at": pr.merged_at.isoformat() if pr.merged_at else None,
+                            "relevance_score": relevance,
+                            "reason": f"Related keywords",
+                            "files": [f.filename for f in pr.get_files()[:5]]
+                        })
+            except Exception as e:
+                logger.debug(f"Error getting message PRs: {e}")
+            
+            # Sort by relevance score
+            related_prs.sort(key=lambda x: x['relevance_score'], reverse=True)
+            return related_prs[:limit]
             
         except Exception as e:
-            logger.error(f"Git blame error: {e}")
-            return {}
+            logger.error(f"Error getting related PRs: {e}")
+            return []
+    
+    async def _calculate_relevance(self, pr, file_path: str, line_number: int) -> float:
+        """Calculate how relevant a PR is to a specific line"""
+        score = 0.0
+        
+        # Check if PR modified the exact file
+        try:
+            files = pr.get_files()
+            for f in files:
+                if f.filename == file_path:
+                    score += 0.6
+                    if f.patch:
+                        import re
+                        lines = re.findall(r'@@ -\d+,\d+ \+(\d+),', f.patch)
+                        for line in lines:
+                            if abs(int(line) - line_number) < 20:
+                                score += 0.3
+                                break
+                    break
+        except:
+            pass
+        
+        return min(score, 1.0)
+    
+    async def _calculate_message_relevance(self, pr, file_path: str) -> float:
+        """Calculate relevance based on PR title/body"""
+        score = 0.0
+        keywords = file_path.split('/')[-1].replace('.', ' ').split()
+        
+        title_lower = pr.title.lower()
+        for kw in keywords:
+            if kw.lower() in title_lower:
+                score += 0.3
+        
+        if pr.body:
+            body_lower = pr.body.lower()
+            for kw in keywords:
+                if kw.lower() in body_lower:
+                    score += 0.2
+        
+        return min(score, 1.0)
+    
+    async def _get_pr_contributors(self, repo, pr_number: int) -> list:
+        """Get ALL contributors for a PR: author, reviewers, assignees, committers"""
+        try:
+            logger.info(f"🔍 Fetching contributors for PR #{pr_number}")
+            pr = repo.get_pull(pr_number)
+            contributors = []
+            added_usernames = set()
+            
+            if pr.user:
+                contributors.append({
+                    "username": pr.user.login,
+                    "role": "author",
+                    "avatar": pr.user.avatar_url,
+                    "url": pr.user.html_url
+                })
+                added_usernames.add(pr.user.login)
+                logger.info(f"   Author: {pr.user.login}")
+            
+            try:
+                reviews = pr.get_reviews()
+                for review in reviews:
+                    if review.user and review.user.login not in added_usernames:
+                        contributors.append({
+                            "username": review.user.login,
+                            "role": "reviewer",
+                            "avatar": review.user.avatar_url,
+                            "url": review.user.html_url
+                        })
+                        added_usernames.add(review.user.login)
+                        logger.info(f"   Reviewer: {review.user.login}")
+            except Exception as e:
+                logger.debug(f"Error getting reviewers: {e}")
+            
+            for assignee in pr.assignees:
+                if assignee.login not in added_usernames:
+                    contributors.append({
+                        "username": assignee.login,
+                        "role": "assignee",
+                        "avatar": assignee.avatar_url,
+                        "url": assignee.html_url
+                    })
+                    added_usernames.add(assignee.login)
+                    logger.info(f"   Assignee: {assignee.login}")
+            
+            try:
+                commits = pr.get_commits()
+                for commit in commits:
+                    if commit.author and commit.author.login not in added_usernames:
+                        contributors.append({
+                            "username": commit.author.login,
+                            "role": "committer",
+                            "avatar": commit.author.avatar_url,
+                            "url": commit.author.html_url
+                        })
+                        added_usernames.add(commit.author.login)
+                        logger.info(f"   Committer: {commit.author.login}")
+            except Exception as e:
+                logger.debug(f"Error getting commit authors: {e}")
+            
+            logger.info(f"✅ Found {len(contributors)} contributors for PR #{pr_number}")
+            return contributors
+            
+        except Exception as e:
+            logger.error(f"Error getting PR contributors: {e}")
+            return []
     
     async def _find_pr_for_commit(self, repo, commit_sha: str) -> dict:
         """Find the PR that introduced a commit"""
@@ -228,9 +327,7 @@ class GitHubService:
             return {}
         
     async def get_file_content(self, repo_name: str, file_path: str, line_number: int, context_lines: int = 5) -> dict:
-        """
-        Fetch the actual code around the error line from GitHub
-        """
+        """Fetch the actual code around the error line from GitHub"""
         if not self.client:
             return {}
         
@@ -239,15 +336,12 @@ class GitHubService:
             if not repo:
                 return {}
             
-            # Get the file content
             content = repo.get_contents(file_path)
             lines = content.decoded_content.decode().split('\n')
             
-            # Calculate context window
             start = max(0, line_number - context_lines - 1)
             end = min(len(lines), line_number + context_lines)
             
-            # Extract code snippet
             code_snippet = []
             for i in range(start, end):
                 line_num = i + 1
@@ -265,6 +359,3 @@ class GitHubService:
         except Exception as e:
             logger.error(f"Error fetching file content: {e}")
             return {}
-        
-    
-    

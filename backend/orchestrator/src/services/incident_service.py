@@ -572,7 +572,7 @@ class IncidentService:
             return {"status": "deleted", "name": name}
     
     def _parse_stack_trace(self, stack_trace: str) -> dict:
-        """Parse stack trace - handles multiple formats"""
+        """Parse stack trace - handles multiple formats including Java, Python, and generic"""
         import re
         
         result = {
@@ -583,36 +583,61 @@ class IncidentService:
         }
         
         # Try to extract exception type
-        exception_pattern = r"([A-Za-z]+Exception|Error):"
-        exception_match = re.search(exception_pattern, stack_trace)
-        if exception_match:
-            result["exception_type"] = exception_match.group(1)
+        exception_patterns = [
+            r"([A-Za-z]+Exception|Error):",
+            r"([A-Za-z]+Exception|Error)\s+at",
+        ]
+        for pattern in exception_patterns:
+            exception_match = re.search(pattern, stack_trace)
+            if exception_match:
+                result["exception_type"] = exception_match.group(1)
+                break
         
         # Try multiple file/line patterns
         patterns = [
-            # Pattern 1: "at fastapi/applications.py:10" or "at File.java:123"
+            # Java style: at com.Class.method(File.java:123)
+            r"at\s+[\w.]+\.(\w+)\(([\w./-]+\.\w+):(\d+)\)",
+            # Java style: at File.java:123
             r"at\s+([\w./-]+\.\w+):(\d+)",
-            # Pattern 2: File "path/to/file.py", line 123
+            # Python style: File "path/to/file.py", line 123
             r'File "([^"]+)", line (\d+)',
-            # Pattern 3: (File.java:123)
-            r"\(([\w./-]+\.\w+):(\d+)\)",
-            # Pattern 4: simple file:line
+            # Python style: at path/to/file.py:123
+            r"at\s+([\w./-]+\.\w+):(\d+)",
+            # Simple: file.py:123
             r"([\w./-]+\.\w+):(\d+)",
-            # Pattern 5: Java style: com.Class.method(File.java:123)
-            r"\(([\w./-]+\.\w+):(\d+)\)"
+            # Method style: com.Class.method(File.java:123)
+            r"\(([\w./-]+\.\w+):(\d+)\)",
+            # Generic: at file:line
+            r"at\s+([\w./-]+\.\w+):(\d+)",
+            # Generic: file:line (anywhere)
+            r"([\w./-]+\.\w+):(\d+)",
         ]
         
         for pattern in patterns:
             match = re.search(pattern, stack_trace)
             if match:
-                result["file_path"] = match.group(1)
-                result["line_number"] = int(match.group(2))
+                if len(match.groups()) == 3:
+                    # Java style: method, file, line
+                    result["file_path"] = match.group(2)
+                    result["line_number"] = int(match.group(3))
+                elif len(match.groups()) == 2:
+                    result["file_path"] = match.group(1)
+                    result["line_number"] = int(match.group(2))
                 break
         
-        # If file_path contains spaces or is None, try to find a valid path
+        # If file_path contains spaces or is None, try a more aggressive search
         if not result["file_path"] or " " in str(result["file_path"]):
-            # Look for any valid file path pattern
+            # Try to find a valid file path pattern anywhere
             path_pattern = r'([\w./-]+\.\w+):(\d+)'
+            match = re.search(path_pattern, stack_trace)
+            if match:
+                result["file_path"] = match.group(1)
+                result["line_number"] = int(match.group(2))
+        
+        # If still no file_path, try to find anything that looks like a file
+        if not result["file_path"]:
+            # Look for patterns like "src/lib/rnp.cpp:100"
+            path_pattern = r'([\w./-]+\.(?:cpp|java|py|js|ts|go|rs)):(\d+)'
             match = re.search(path_pattern, stack_trace)
             if match:
                 result["file_path"] = match.group(1)
@@ -646,3 +671,25 @@ class IncidentService:
         ]
         
     
+    async def save_incident_metadata(self, incident_id: str, extra_metadata: dict) -> dict:
+        """Update only the extra_metadata field of an incident"""
+        try:
+            session = await get_db()
+            async with session:
+                await session.execute(
+                    text("""
+                        UPDATE incidents 
+                        SET extra_metadata = :extra_metadata::jsonb
+                        WHERE incident_id = :incident_id
+                    """),
+                    {
+                        "extra_metadata": json.dumps(extra_metadata),
+                        "incident_id": incident_id
+                    }
+                )
+                await session.commit()
+                logger.info(f"✅ Updated metadata for {incident_id}")
+                return {"status": "updated", "incident_id": incident_id}
+        except Exception as e:
+            logger.error(f"Error updating incident metadata: {e}")
+            return {"error": str(e)}
