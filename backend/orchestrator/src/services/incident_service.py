@@ -152,6 +152,37 @@ class IncidentService:
             except Exception as e:
                 logger.error(f"Code context error: {e}")
                 
+        # --- Related PRs (GitHub) ---
+        if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
+            try:
+                from src.services.github_service import GitHubService
+                github = GitHubService()
+                
+                related_prs = await github.get_related_prs(
+                    repo_name=service["repo_name"],
+                    file_path=stack_analysis["file_path"],
+                    line_number=stack_analysis.get("line_number", 1),
+                    limit=5
+                )
+                
+                if related_prs:
+                    logger.info(f"🔗 Found {len(related_prs)} related PRs for {stack_analysis['file_path']}")
+                    # Update metadata
+                    if incident_data.get("extra_metadata"):
+                        try:
+                            metadata = json.loads(incident_data["extra_metadata"])
+                        except:
+                            metadata = {}
+                    else:
+                        metadata = {}
+                    
+                    if "github" not in metadata:
+                        metadata["github"] = {}
+                    metadata["github"]["related_prs"] = related_prs
+                    incident_data["extra_metadata"] = json.dumps(metadata)
+                    
+            except Exception as e:
+                logger.error(f"Related PRs error: {e}")
                 
          # --- Auto-Fix Generation (with permission check) ---
         if stack_analysis and stack_analysis.get("file_path"):
