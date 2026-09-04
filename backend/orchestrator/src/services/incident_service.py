@@ -60,7 +60,7 @@ class IncidentService:
             rag_context=rag_context
         )
         
-        # --- Build incident_data FIRST ---
+        # --- Build incident_data ---
         extra_metadata_json = json.dumps({"rag_context_used": rag_used})
         affected_services_json = json.dumps(blast_radius.get("affected", []))
         
@@ -84,17 +84,15 @@ class IncidentService:
             "affected_services": affected_services_json
         }
         
-        # --- GitHub Context (AFTER incident_data is defined) ---
+        # --- GitHub Context ---
         github_context = {}
         try:
             if service.get("repo_name") and settings.GITHUB_TOKEN:
                 from src.services.github_service import GitHubService
                 github = GitHubService()
                 
-                # Get recent PRs
                 github_context["recent_prs"] = await github.get_recent_prs(service["repo_name"])
                 
-                # Get specific blame if we have file and line number
                 if stack_analysis and stack_analysis.get("file_path"):
                     logger.info(f"🔍 Getting blame for: {stack_analysis['file_path']}:{stack_analysis.get('line_number', 'unknown')}")
                     blame_info = await github.get_blame_with_pr(
@@ -111,9 +109,6 @@ class IncidentService:
                         logger.warning("⚠️ No blame info found for this file/line")
                 
                 if github_context:
-                    logger.info(f"🔗 GitHub context: {len(github_context.get('recent_prs', []))} PRs found")
-                    
-                    # Update extra_metadata with GitHub context and reported_by
                     incident_data["extra_metadata"] = json.dumps({
                         "rag_context_used": rag_used,
                         "reported_by": reported_by if reported_by else None,
@@ -121,38 +116,34 @@ class IncidentService:
                     })
         except Exception as e:
             logger.error(f"GitHub integration error: {e}")
-            
-        # --- Code-Level Diagnosis (Fetch actual code from GitHub) ---
-        code_context = {}
+        
+        # --- Code-Level Diagnosis ---
         if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
             try:
                 from src.services.github_service import GitHubService
                 github = GitHubService()
-                        
+                
                 code_context = await github.get_file_content(
                     repo_name=service["repo_name"],
                     file_path=stack_analysis["file_path"],
                     line_number=stack_analysis.get("line_number", 1)
                 )
-                        
+                
                 if code_context:
                     logger.info(f"✅ Code context fetched: {code_context.get('file_path')}:{code_context.get('line_number')}")
-                    # Update the incident_data directly
                     if incident_data.get("extra_metadata"):
                         try:
                             metadata = json.loads(incident_data["extra_metadata"])
                         except:
                             metadata = {}
-
                     else:
                         metadata = {}
                     metadata["code_context"] = code_context
                     incident_data["extra_metadata"] = json.dumps(metadata)
-                        
             except Exception as e:
                 logger.error(f"Code context error: {e}")
-                
-        # --- Related PRs (GitHub) ---
+        
+        # --- Related PRs (Top 5) ---
         if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
             try:
                 from src.services.github_service import GitHubService
@@ -167,7 +158,6 @@ class IncidentService:
                 
                 if related_prs:
                     logger.info(f"🔗 Found {len(related_prs)} related PRs for {stack_analysis['file_path']}")
-                    # Update metadata
                     if incident_data.get("extra_metadata"):
                         try:
                             metadata = json.loads(incident_data["extra_metadata"])
@@ -180,11 +170,10 @@ class IncidentService:
                         metadata["github"] = {}
                     metadata["github"]["related_prs"] = related_prs
                     incident_data["extra_metadata"] = json.dumps(metadata)
-                    
             except Exception as e:
                 logger.error(f"Related PRs error: {e}")
-                
-         # --- Auto-Fix Generation (with permission check) ---
+        
+        # --- Auto-Fix Generation ---
         if stack_analysis and stack_analysis.get("file_path"):
             try:
                 from src.services.autofix_service import AutoFixService
@@ -196,18 +185,17 @@ class IncidentService:
                     "line_number": stack_analysis.get("line_number"),
                     "exception_type": stack_analysis.get("exception_type"),
                     "root_cause": analysis.get("root_cause")
-                }, require_permission=True)  # Always require permission
-                        
+                }, require_permission=True)
+                
                 if fix_result and not fix_result.get("error"):
-                    # Parse existing metadata
-                    existing_metadata = {}
                     if incident_data.get("extra_metadata"):
                         try:
                             existing_metadata = json.loads(incident_data["extra_metadata"])
                         except:
-                            pass
-                            
-                    # Update metadata with auto-fix
+                            existing_metadata = {}
+                    else:
+                        existing_metadata = {}
+                    
                     existing_metadata["auto_fix"] = fix_result
                     incident_data["extra_metadata"] = json.dumps(existing_metadata)
                     logger.info(f"✅ Auto-fix generated for {incident_id} (waiting for approval)")
@@ -228,7 +216,7 @@ class IncidentService:
                 logger.info(f"📋 On-call: {on_call.get('primary', {}).get('name')}")
         except Exception as e:
             logger.error(f"On-call error: {e}")
-
+        
         # --- Send Alerts ---
         try:
             alert = AlertService()
@@ -238,7 +226,7 @@ class IncidentService:
             logger.info(f"📢 Alerts sent for {incident_id}")
         except Exception as e:
             logger.error(f"Alert error: {e}")
-            
+        
         # --- Real Rollback Preparation ---
         try:
             k8s = KubernetesService()
@@ -246,7 +234,6 @@ class IncidentService:
             logger.info(f"☸️ K8s status: {status}")
         except Exception as e:
             logger.error(f"K8s error: {e}")
-
         
         # --- Store for future RAG searches ---
         await self.rag.store_incident(incident_data)
@@ -264,7 +251,6 @@ class IncidentService:
             })
         except Exception as e:
             logger.error(f"WebSocket broadcast error: {e}")
-                
         
         return {
             "incident_id": incident_id,
@@ -280,7 +266,6 @@ class IncidentService:
             "rag_context_used": rag_used,
             "timestamp": datetime.utcnow().isoformat()
         }
-        
     
     async def get_service(self, service_name: str) -> dict:
         """Get service from catalog"""
@@ -371,7 +356,6 @@ class IncidentService:
                 row = result.fetchone()
                 if row:
                     data = dict(row._mapping)
-                    # Parse JSONB fields back to Python objects
                     if data.get('extra_metadata') and isinstance(data['extra_metadata'], str):
                         try:
                             data['extra_metadata'] = json.loads(data['extra_metadata'])
@@ -388,7 +372,7 @@ class IncidentService:
             logger.error(f"Error getting incident: {e}")
             return None
     
-    async def get_all_incidents(self, limit: int = 50) -> list:
+    async def get_all_incidents(self, limit: int = 200) -> list:
         """Get all incidents with proper parsing"""
         try:
             session = await get_db()
@@ -539,7 +523,7 @@ class IncidentService:
         except Exception as e:
             logger.error(f"Error seeding services: {e}")
             return {"status": "error", "message": str(e)}
-
+    
     async def add_service(self, service: dict) -> dict:
         session = await get_db()
         async with session:
@@ -563,7 +547,7 @@ class IncidentService:
             )
             await session.commit()
             return {"status": "created", "name": service["name"]}
-
+    
     async def delete_service(self, name: str) -> dict:
         session = await get_db()
         async with session:
@@ -572,7 +556,7 @@ class IncidentService:
             return {"status": "deleted", "name": name}
     
     def _parse_stack_trace(self, stack_trace: str) -> dict:
-        """Parse stack trace - handles multiple formats including Java, Python, and generic"""
+        """Parse stack trace - handles multiple formats"""
         import re
         
         result = {
@@ -582,7 +566,6 @@ class IncidentService:
             "full_trace": stack_trace[:500]
         }
         
-        # Try to extract exception type
         exception_patterns = [
             r"([A-Za-z]+Exception|Error):",
             r"([A-Za-z]+Exception|Error)\s+at",
@@ -593,23 +576,14 @@ class IncidentService:
                 result["exception_type"] = exception_match.group(1)
                 break
         
-        # Try multiple file/line patterns
         patterns = [
-            # Java style: at com.Class.method(File.java:123)
             r"at\s+[\w.]+\.(\w+)\(([\w./-]+\.\w+):(\d+)\)",
-            # Java style: at File.java:123
             r"at\s+([\w./-]+\.\w+):(\d+)",
-            # Python style: File "path/to/file.py", line 123
             r'File "([^"]+)", line (\d+)',
-            # Python style: at path/to/file.py:123
             r"at\s+([\w./-]+\.\w+):(\d+)",
-            # Simple: file.py:123
             r"([\w./-]+\.\w+):(\d+)",
-            # Method style: com.Class.method(File.java:123)
             r"\(([\w./-]+\.\w+):(\d+)\)",
-            # Generic: at file:line
             r"at\s+([\w./-]+\.\w+):(\d+)",
-            # Generic: file:line (anywhere)
             r"([\w./-]+\.\w+):(\d+)",
         ]
         
@@ -617,7 +591,6 @@ class IncidentService:
             match = re.search(pattern, stack_trace)
             if match:
                 if len(match.groups()) == 3:
-                    # Java style: method, file, line
                     result["file_path"] = match.group(2)
                     result["line_number"] = int(match.group(3))
                 elif len(match.groups()) == 2:
@@ -625,18 +598,14 @@ class IncidentService:
                     result["line_number"] = int(match.group(2))
                 break
         
-        # If file_path contains spaces or is None, try a more aggressive search
         if not result["file_path"] or " " in str(result["file_path"]):
-            # Try to find a valid file path pattern anywhere
             path_pattern = r'([\w./-]+\.\w+):(\d+)'
             match = re.search(path_pattern, stack_trace)
             if match:
                 result["file_path"] = match.group(1)
                 result["line_number"] = int(match.group(2))
         
-        # If still no file_path, try to find anything that looks like a file
         if not result["file_path"]:
-            # Look for patterns like "src/lib/rnp.cpp:100"
             path_pattern = r'([\w./-]+\.(?:cpp|java|py|js|ts|go|rs)):(\d+)'
             match = re.search(path_pattern, stack_trace)
             if match:
@@ -669,7 +638,6 @@ class IncidentService:
             {"name": "user", "description": "User management", "on_call": ["@arjun"], "dependencies": [], "is_critical": False},
             {"name": "database", "description": "Database ops", "on_call": ["@shreya"], "dependencies": [], "is_critical": True},
         ]
-        
     
     async def save_incident_metadata(self, incident_id: str, extra_metadata: dict) -> dict:
         """Update only the extra_metadata field of an incident"""
