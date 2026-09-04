@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 import { useState } from 'react';
 import { type Incident } from '../utils/api';
-import { ChevronRight, Search, CheckCircle } from 'lucide-react';
+import { ChevronRight, Search, CheckCircle, Layers } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 interface IncidentListProps {
@@ -15,12 +15,12 @@ export function IncidentList({ incidents }: IncidentListProps) {
   const [search, setSearch] = useState('');
 
   const severityColors: Record<string, string> = {
-    P0: 'border-severity-critical bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-400',
-    P1: 'border-severity-high bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400',
-    P2: 'border-severity-medium bg-yellow-50 dark:bg-yellow-950/20 text-yellow-700 dark:text-yellow-400',
+    P0: 'border-severity-critical bg-severity-critical/10 text-severity-critical',
+    P1: 'border-severity-high bg-severity-high/10 text-severity-high',
+    P2: 'border-severity-medium bg-severity-medium/10 text-severity-medium',
   };
 
-  const filters = [
+  const filters: { label: string; value: FilterType }[] = [
     { label: 'All', value: 'all' },
     { label: 'P0', value: 'P0' },
     { label: 'P1', value: 'P1' },
@@ -29,47 +29,51 @@ export function IncidentList({ incidents }: IncidentListProps) {
     { label: 'Resolved', value: 'resolved' },
   ];
 
-  const filteredIncidents = incidents.filter((incident) => {
-    if (filter === 'all') return true;
-    if (filter === 'active') return incident.status === 'active';
-    if (filter === 'resolved') return incident.status === 'resolved';
-    return incident.severity === filter;
-  }).filter((incident) => {
-    if (!search) return true;
-    const query = search.toLowerCase();
-    return incident.title.toLowerCase().includes(query) ||
-           incident.service_name.toLowerCase().includes(query) ||
-           incident.incident_id.toLowerCase().includes(query);
-  });
+  const filteredIncidents = incidents
+    .filter((incident) => {
+      if (filter === 'all') return true;
+      if (filter === 'active') return incident.status === 'active';
+      if (filter === 'resolved') return incident.status !== 'active';
+      return incident.severity === filter;
+    })
+    .filter((incident) => {
+      if (!search) return true;
+      const query = search.toLowerCase();
+      return (
+        incident.title.toLowerCase().includes(query) ||
+        incident.service_name.toLowerCase().includes(query) ||
+        incident.incident_id.toLowerCase().includes(query)
+      );
+    });
 
   return (
-    <div className="bg-white dark:bg-dark-surface rounded-xl shadow-lg p-4">
+    <div className="bg-light-card dark:bg-dark-card rounded-xl shadow-lg p-4">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold dark:text-dark-text">Recent Incidents</h3>
-        <span className="text-xs text-gray-500 dark:text-dark-muted">{filteredIncidents.length} total</span>
+        <h3 className="text-lg font-semibold text-light-text dark:text-dark-text">Recent Incidents</h3>
+        <span className="text-xs text-light-muted dark:text-dark-muted">{filteredIncidents.length} total</span>
       </div>
 
       {/* Search and Filter Bar */}
       <div className="flex flex-col sm:flex-row gap-3 mb-4">
         <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-light-muted dark:text-dark-muted" />
           <input
             type="text"
             placeholder="Search incidents..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-10 pr-3 py-2 border border-gray-200 dark:border-dark-border rounded-lg bg-white dark:bg-dark-bg text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent dark:text-dark-text"
+            className="w-full pl-10 pr-3 py-2 border border-light-border dark:border-dark-border rounded-lg bg-light-bg dark:bg-dark-bg text-sm focus:ring-2 focus:ring-brand-primary focus:border-transparent text-light-text dark:text-dark-text"
           />
         </div>
         <div className="flex gap-1 overflow-x-auto">
           {filters.map((f) => (
             <button
               key={f.value}
-              onClick={() => setFilter(f.value as FilterType)}
+              onClick={() => setFilter(f.value)}
               className={`px-3 py-1.5 text-xs font-medium rounded-lg transition whitespace-nowrap ${
                 filter === f.value
-                  ? 'bg-primary-500 text-white'
-                  : 'bg-gray-100 dark:bg-dark-border text-gray-600 dark:text-dark-muted hover:bg-gray-200 dark:hover:bg-gray-700'
+                  ? 'bg-brand-primary text-white'
+                  : 'bg-light-surface dark:bg-dark-surface text-light-muted dark:text-dark-muted hover:bg-light-border dark:hover:bg-dark-border'
               }`}
             >
               {f.label}
@@ -78,53 +82,83 @@ export function IncidentList({ incidents }: IncidentListProps) {
         </div>
       </div>
 
-      <div className="space-y-2 max-h-96 overflow-y-auto">
+      <div className="space-y-2 max-h-96 overflow-y-auto custom-scrollbar">
         {filteredIncidents.length === 0 ? (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             className="text-center py-12"
           >
-            <CheckCircle className="w-12 h-12 text-green-500 mx-auto mb-3" />
-            <p className="text-gray-500 dark:text-dark-muted">No incidents found</p>
-            <p className="text-gray-400 dark:text-dark-muted text-sm mt-1">Everything is healthy! 🎉</p>
+            <CheckCircle className="w-12 h-12 text-brand-success mx-auto mb-3" />
+            <p className="text-light-muted dark:text-dark-muted">No incidents found</p>
+            <p className="text-light-muted dark:text-dark-muted text-sm mt-1">Everything is healthy! 🎉</p>
           </motion.div>
         ) : (
-          filteredIncidents.slice(0, 20).map((incident, index) => (
-            <motion.div
-              key={incident.incident_id}
-              initial={{ opacity: 0, x: -20 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: index * 0.05 }}
-            >
-              <Link
-                to={`/incident/${incident.incident_id}`}
-                className="block border border-gray-200 dark:border-dark-border rounded-lg p-3 hover:bg-gray-50 dark:hover:bg-dark-bg/50 hover:border-primary-300 dark:hover:border-primary-700 transition group"
+          filteredIncidents.slice(0, 20).map((incident, index) => {
+            const affectedCount = incident.affected_services?.length || 0;
+            const confidence = Math.round(incident.confidence_score * 100);
+            
+            return (
+              <motion.div
+                key={incident.incident_id}
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: index * 0.05 }}
               >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium border ${severityColors[incident.severity] || 'bg-gray-100 text-gray-800'}`}>
-                      {incident.severity}
-                    </span>
-                    <span className="text-sm font-medium dark:text-dark-text">{incident.service_name}</span>
-                    {incident.status === 'active' && (
-                      <span className="flex items-center gap-1">
-                        <span className="w-2 h-2 rounded-full bg-severity-critical animate-pulse"></span>
-                        <span className="text-xs text-severity-critical">active</span>
+                <Link
+                  to={`/incident/${incident.incident_id}`}
+                  className="block border border-light-border dark:border-dark-border rounded-lg p-4 hover:bg-light-surface dark:hover:bg-dark-surface hover:border-brand-primary/40 hover:shadow-md transition group space-y-2"
+                >
+                  {/* Header: Severity, Service, Status */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${severityColors[incident.severity] ?? 'bg-light-surface dark:bg-dark-surface text-light-text dark:text-dark-text border-light-border dark:border-dark-border'}`}>
+                        {incident.severity}
                       </span>
+                      <span className="text-sm font-semibold text-light-text dark:text-dark-text">{incident.service_name}</span>
+                      {incident.status === 'active' && (
+                        <span className="flex items-center gap-1 px-2 py-0.5 bg-severity-critical/10 border border-severity-critical/20 rounded-full">
+                          <span className="w-2 h-2 rounded-full bg-severity-critical animate-pulse"></span>
+                          <span className="text-xs font-semibold text-severity-critical">active</span>
+                        </span>
+                      )}
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-light-muted dark:text-dark-muted group-hover:text-brand-primary transition flex-shrink-0" />
+                  </div>
+
+                  {/* Title */}
+                  <p className="text-sm font-medium text-light-text dark:text-dark-text line-clamp-1">{incident.title}</p>
+
+                  {/* Incident ID */}
+                  <p className="text-xs text-light-muted dark:text-dark-muted font-mono">{incident.incident_id}</p>
+
+                  {/* Metadata Row: Confidence, Affected Services, Date */}
+                  <div className="flex items-center gap-3 flex-wrap pt-1">
+                    {/* Confidence Score */}
+                    <div className="flex items-center gap-1.5 text-xs px-2 py-1 bg-light-surface/50 dark:bg-dark-surface/50 rounded">
+                      <div className="w-4 h-4 rounded-full bg-gradient-to-r from-brand-primary to-brand-secondary flex items-center justify-center text-white font-bold text-xs">
+                        {confidence > 0 ? '✓' : '?'}
+                      </div>
+                      <span className="text-light-muted dark:text-dark-muted">{confidence}%</span>
+                    </div>
+
+                    {/* Affected Services */}
+                    {affectedCount > 0 && (
+                      <div className="flex items-center gap-1.5 text-xs px-2 py-1 bg-light-surface/50 dark:bg-dark-surface/50 rounded">
+                        <Layers className="w-3.5 h-3.5 text-brand-warning" />
+                        <span className="text-light-muted dark:text-dark-muted">{affectedCount} affected</span>
+                      </div>
                     )}
+
+                    {/* Date */}
+                    <div className="ml-auto text-xs text-light-muted dark:text-dark-muted">
+                      {new Date(incident.declared_at).toLocaleDateString()} {new Date(incident.declared_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-400 dark:text-dark-muted">
-                      {new Date(incident.declared_at).toLocaleDateString()}
-                    </span>
-                    <ChevronRight className="w-4 h-4 text-gray-400 group-hover:text-primary-500 transition" />
-                  </div>
-                </div>
-                <p className="text-sm text-gray-600 dark:text-dark-muted mt-1 truncate">{incident.title}</p>
-              </Link>
-            </motion.div>
-          ))
+                </Link>
+              </motion.div>
+            );
+          })
         )}
       </div>
     </div>
