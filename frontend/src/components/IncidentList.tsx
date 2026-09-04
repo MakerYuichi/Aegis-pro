@@ -46,6 +46,33 @@ export function IncidentList({ incidents }: IncidentListProps) {
       );
     });
 
+  // Format date helper
+  const formatDate = (dateString: string) => {
+    const date = new Date(dateString);
+    // Format: DD/MM/YYYY HH:MM
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const year = date.getFullYear();
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    return `${day}/${month}/${year} ${hours}:${minutes}`;
+  };
+
+  // Get relative time (e.g., "2 hours ago")
+  const getRelativeTime = (dateString: string) => {
+    const now = new Date();
+    const past = new Date(dateString);
+    const diffMs = now.getTime() - past.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    return `${diffDays}d ago`;
+  };
+
   return (
     <div className="bg-light-card dark:bg-dark-card rounded-xl shadow-lg p-4">
       <div className="flex items-center justify-between mb-4">
@@ -94,9 +121,10 @@ export function IncidentList({ incidents }: IncidentListProps) {
             <p className="text-light-muted dark:text-dark-muted text-sm mt-1">Everything is healthy! 🎉</p>
           </motion.div>
         ) : (
-          filteredIncidents.slice(0, 20).map((incident, index) => {
+          filteredIncidents.slice(0,100).map((incident, index) => {
             const affectedCount = incident.affected_services?.length || 0;
             const confidence = Math.round(incident.confidence_score * 100);
+            const relativeTime = getRelativeTime(incident.declared_at);
             
             return (
               <motion.div
@@ -135,12 +163,17 @@ export function IncidentList({ incidents }: IncidentListProps) {
                   {/* Metadata Row: Confidence, Affected Services, Date */}
                   <div className="flex items-center gap-3 flex-wrap pt-1">
                     {/* Confidence Score */}
-                    <div className="flex items-center gap-1.5 text-xs px-2 py-1 bg-light-surface/50 dark:bg-dark-surface/50 rounded">
-                      <div className="w-4 h-4 rounded-full bg-gradient-to-r from-brand-primary to-brand-secondary flex items-center justify-center text-white font-bold text-xs">
-                        {confidence > 0 ? '✓' : '?'}
+                    {confidence > 0 && (
+                      <div className="flex items-center gap-1.5 text-xs px-2 py-1 bg-light-surface/50 dark:bg-dark-surface/50 rounded">
+                        <div className={`w-4 h-4 rounded-full flex items-center justify-center text-white font-bold text-xs ${
+                          confidence >= 80 ? 'bg-brand-success' :
+                          confidence >= 60 ? 'bg-brand-warning' : 'bg-severity-critical'
+                        }`}>
+                          ✓
+                        </div>
+                        <span className="text-light-muted dark:text-dark-muted">{confidence}%</span>
                       </div>
-                      <span className="text-light-muted dark:text-dark-muted">{confidence}%</span>
-                    </div>
+                    )}
 
                     {/* Affected Services */}
                     {affectedCount > 0 && (
@@ -150,9 +183,9 @@ export function IncidentList({ incidents }: IncidentListProps) {
                       </div>
                     )}
 
-                    {/* Date */}
+                    {/* Time */}
                     <div className="ml-auto text-xs text-light-muted dark:text-dark-muted">
-                      {new Date(incident.declared_at).toLocaleDateString()} {new Date(incident.declared_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {relativeTime}
                     </div>
                   </div>
                 </Link>
