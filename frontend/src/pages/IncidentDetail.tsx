@@ -510,68 +510,75 @@ export function IncidentDetail() {
           )}
 
           {/* Related PRs Section */}
-          {((incident.extra_metadata?.github?.related_prs?.length) ?? 0) > 0 ? (
-            <div className="bg-gradient-to-br from-light-card to-light-surface dark:from-dark-card dark:to-dark-surface rounded-2xl border border-light-border dark:border-dark-border shadow-xl p-6 backdrop-blur-sm">
-              <div className="flex items-center gap-2 mb-4">
-                <GitPullRequest className="w-5 h-5 text-brand-primary" />
-                <h3 className="text-sm font-semibold text-brand-primary">Related Pull Requests</h3>
+{((incident.extra_metadata?.github?.related_prs?.length) ?? 0) > 0 ? (
+  <div className="bg-gradient-to-br from-light-card to-light-surface dark:from-dark-card dark:to-dark-surface rounded-2xl border border-light-border dark:border-dark-border shadow-xl p-6 backdrop-blur-sm">
+    <div className="flex items-center gap-2 mb-4">
+      <GitPullRequest className="w-5 h-5 text-brand-primary" />
+      <h3 className="text-sm font-semibold text-brand-primary">Related Pull Requests</h3>
+    </div>
+    <div className="space-y-3">
+      {incident.extra_metadata!.github!.related_prs!.map((pr: any, index: number) => {
+        // FIX: Multiply by 100 before rounding
+        const relevancePercentage = typeof pr.relevance_score === 'number' 
+          ? Math.round(pr.relevance_score * 100) 
+          : 0;
+        
+        return (
+          <motion.div
+            key={pr.number || index}
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ delay: index * 0.1 }}
+            className="p-4 bg-light-surface dark:bg-dark-surface rounded-xl border border-light-border dark:border-dark-border hover:shadow-md transition-shadow"
+          >
+            <div className="flex items-start justify-between mb-2">
+              <div className="flex-1">
+                <a
+                  href={pr.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm font-medium text-brand-primary hover:underline"
+                >
+                  #{pr.number}: {pr.title}
+                </a>
+                <p className="text-xs text-light-muted dark:text-dark-muted mt-1">
+                  by {pr.author} • {pr.merged_at ? new Date(pr.merged_at).toLocaleDateString() : 'Invalid Date'}
+                </p>
               </div>
-              <div className="space-y-3">
-                {incident.extra_metadata!.github!.related_prs!.map((pr: any, index: number) => (
-                  <motion.div
-                    key={pr.number || index}
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: index * 0.1 }}
-                    className="p-4 bg-light-surface dark:bg-dark-surface rounded-xl border border-light-border dark:border-dark-border hover:shadow-md transition-shadow"
-                  >
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex-1">
-                        <a
-                          href={pr.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-sm font-medium text-brand-primary hover:underline"
-                        >
-                          #{pr.number}: {pr.title}
-                        </a>
-                        <p className="text-xs text-light-muted dark:text-dark-muted mt-1">
-                          by {pr.author} • {new Date(pr.created_at).toLocaleDateString()}
-                        </p>
-                      </div>
-                      {pr.relevance_score && (
-                        <div className="ml-4">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-xs text-light-muted dark:text-dark-muted">Relevance</span>
-                            <span className="text-xs font-semibold text-brand-primary">{Math.round(pr.relevance_score)}%</span>
-                          </div>
-                          <div className="w-20 h-2 bg-light-bg dark:bg-dark-bg rounded-full overflow-hidden">
-                            <div 
-                              className="h-full bg-gradient-to-r from-brand-primary to-brand-secondary"
-                              style={{ width: `${Math.round(pr.relevance_score)}%` }}
-                            />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                    {pr.reason && (
-                      <div className="mt-2 p-2 bg-light-bg dark:bg-dark-bg rounded-lg">
-                        <p className="text-xs text-light-muted dark:text-dark-muted">
-                          <span className="font-medium">Why related:</span> {pr.reason}
-                        </p>
-                      </div>
-                    )}
-                  </motion.div>
-                ))}
+              {pr.relevance_score !== undefined && (
+                <div className="ml-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs text-light-muted dark:text-dark-muted">Relevance</span>
+                    <span className="text-xs font-semibold text-brand-primary">{relevancePercentage}%</span>
+                  </div>
+                  <div className="w-20 h-2 bg-light-bg dark:bg-dark-bg rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-gradient-to-r from-brand-primary to-brand-secondary"
+                      style={{ width: `${relevancePercentage}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+            {pr.reason && (
+              <div className="mt-2 p-2 bg-light-bg dark:bg-dark-bg rounded-lg">
+                <p className="text-xs text-light-muted dark:text-dark-muted">
+                  <span className="font-medium">Why related:</span> {pr.reason}
+                </p>
               </div>
-            </div>
-          ) : (
-            <div className="bg-light-card dark:bg-dark-card rounded-2xl border border-light-border dark:border-dark-border p-6 text-center">
-              <GitPullRequest className="w-8 h-8 text-light-muted dark:text-dark-muted mx-auto mb-2 opacity-50" />
-              <p className="text-sm font-medium text-light-muted dark:text-dark-muted">No related PRs found</p>
-              <p className="text-xs text-light-muted dark:text-dark-muted mt-1">Pull requests related to this incident will appear here</p>
-            </div>
-          )}
+            )}
+          </motion.div>
+        );
+      })}
+    </div>
+  </div>
+) : (
+  <div className="bg-light-card dark:bg-dark-card rounded-2xl border border-light-border dark:border-dark-border p-6 text-center">
+    <GitPullRequest className="w-8 h-8 text-light-muted dark:text-dark-muted mx-auto mb-2 opacity-50" />
+    <p className="text-sm font-medium text-light-muted dark:text-dark-muted">No related PRs found</p>
+    <p className="text-xs text-light-muted dark:text-dark-muted mt-1">Pull requests related to this incident will appear here</p>
+  </div>
+)}
 
         </div>
 
