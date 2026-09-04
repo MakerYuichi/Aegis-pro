@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import { type Incident, type Service } from '../utils/api';
+import { motion } from 'framer-motion';
 
 interface ServiceGraphProps {
   services: Service[];
@@ -8,9 +9,20 @@ interface ServiceGraphProps {
   onNodeClick?: (serviceName: string) => void;
 }
 
+interface TooltipData {
+  serviceName: string;
+  hasIncident: boolean;
+  incidentCount: number;
+  severity: string | null;
+  dependencies: string[];
+  isCritical: boolean;
+}
+
 export function ServiceGraph({ services, incidents, onNodeClick }: ServiceGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [tooltip, setTooltip] = useState<TooltipData | null>(null);
+  const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 });
   
   useEffect(() => {
     if (!svgRef.current || !services.length) return;
@@ -32,7 +44,9 @@ export function ServiceGraph({ services, incidents, onNodeClick }: ServiceGraphP
       id: s.name, 
       critical: s.is_critical || false,
       hasIncident: incidents.some(i => i.service_name === s.name),
-      severity: incidents.find(i => i.service_name === s.name)?.severity || null
+      incidentCount: incidents.filter(i => i.service_name === s.name).length,
+      severity: incidents.find(i => i.service_name === s.name)?.severity || null,
+      dependencies: s.dependencies || []
     }));
     
     const links = services.flatMap(s =>
@@ -73,6 +87,28 @@ export function ServiceGraph({ services, incidents, onNodeClick }: ServiceGraphP
       .on('click', (_event, d: any) => {
         if (onNodeClick) onNodeClick(d.id);
       })
+      .on('mouseenter', (_event, d: any) => {
+        setTooltip({
+          serviceName: d.id,
+          hasIncident: d.hasIncident,
+          incidentCount: d.incidentCount,
+          severity: d.severity,
+          dependencies: d.dependencies,
+          isCritical: d.critical
+        });
+      })
+      .on('mousemove', (event) => {
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (rect) {
+          setTooltipPosition({
+            x: event.clientX - rect.left + 10,
+            y: event.clientY - rect.top + 10
+          });
+        }
+      })
+      .on('mouseleave', () => {
+        setTooltip(null);
+      })
       .call(d3.drag<any, any>()
         .on('start', (event, d) => {
           if (!event.active) simulation.alphaTarget(0.3).restart();
@@ -99,7 +135,14 @@ export function ServiceGraph({ services, incidents, onNodeClick }: ServiceGraphP
         return '#3B82F6';
       })
       .attr('stroke', '#fff')
-      .attr('stroke-width', 3);
+      .attr('stroke-width', 3)
+      .attr('filter', 'drop-shadow(0 4px 6px rgba(0,0,0,0.3))')
+      .transition()
+      .duration(200)
+      .attr('r', (d: any) => {
+        const baseR = d.critical ? 28 : 22;
+        return tooltip?.serviceName === d.id ? baseR + 4 : baseR;
+      });
 
     nodeGroup.append('text')
       .text((d: any) => d.id)
@@ -128,7 +171,7 @@ export function ServiceGraph({ services, incidents, onNodeClick }: ServiceGraphP
   }, [services, incidents, onNodeClick]);
 
   return (
-    <div ref={containerRef} className="bg-light-card dark:bg-dark-card rounded-2xl border border-light-border dark:border-dark-border shadow-lg p-4">
+    <div ref={containerRef} className="bg-gradient-to-br from-light-card to-light-surface dark:from-dark-card dark:to-dark-surface rounded-2xl border border-light-border dark:border-dark-border shadow-xl p-4 backdrop-blur-sm relative">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-semibold text-light-text dark:text-dark-text">Service Dependency Graph</h3>
         <div className="flex gap-4 text-xs text-light-muted dark:text-dark-muted">
@@ -139,6 +182,64 @@ export function ServiceGraph({ services, incidents, onNodeClick }: ServiceGraphP
         </div>
       </div>
       <svg ref={svgRef} className="w-full h-96"></svg>
+      
+      {tooltip && (
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="absolute bg-white dark:bg-dark-bg border border-light-border dark:border-dark-border rounded-lg shadow-xl p-4 z-10 max-w-xs"
+          style={{
+            left: tooltipPosition.x,
+            top: tooltipPosition.y,
+          }}
+        >
+          <h4 className="font-semibold text-light-text dark:text-dark-text mb-2">{tooltip.serviceName}</h4>
+          <div className="space-y-1 text-sm">
+            <div className="flex justify-between">
+              <span className="text-light-muted dark:text-dark-muted">Status:</span>
+              <span className={tooltip.hasIncident ? 'text-severity-critical' : 'text-brand-success'}>
+                {tooltip.hasIncident ? 'Incident' : 'Healthy'}
+              </span>
+            </div>
+            {tooltip.hasIncident && (
+              <>
+                <div className="flex justify-between">
+                  <span className="text-light-muted dark:text-dark-muted">Incidents:</span>
+                  <span className="text-light-text dark:text-dark-text">{tooltip.incidentCount}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-light-muted dark:text-dark-muted">Severity:</span>
+                  <span className={`font-medium ${
+                    tooltip.severity === 'P0' ? 'text-severity-critical' :
+                    tooltip.severity === 'P1' ? 'text-severity-high' :
+                    'text-brand-warning'
+                  }`}>
+                    {tooltip.severity}
+                  </span>
+                </div>
+              </>
+            )}
+            <div className="flex justify-between">
+              <span className="text-light-muted dark:text-dark-muted">Critical:</span>
+              <span className={tooltip.isCritical ? 'text-severity-critical' : 'text-light-text dark:text-dark-muted'}>
+                {tooltip.isCritical ? 'Yes' : 'No'}
+              </span>
+            </div>
+            {tooltip.dependencies.length > 0 && (
+              <div>
+                <span className="text-light-muted dark:text-dark-muted block mb-1">Dependencies:</span>
+                <div className="flex flex-wrap gap-1">
+                  {tooltip.dependencies.map((dep) => (
+                    <span key={dep} className="text-xs bg-light-surface dark:bg-dark-surface px-2 py-0.5 rounded">
+                      {dep}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </motion.div>
+      )}
     </div>
   );
 }
