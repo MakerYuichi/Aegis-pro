@@ -14,7 +14,6 @@ export const api = axios.create({
 api.interceptors.response.use(
   (response) => response,
   (error: AxiosError) => {
-    // Normalize error messages
     if (error.code === 'ECONNABORTED') {
       throw new Error('Request timeout - backend might be slow or unavailable');
     }
@@ -232,9 +231,9 @@ export const isPendingAutoFix = (autoFix?: NonNullable<Incident['extra_metadata'
   );
 };
 
-// API functions
-export const getIncidents = async () => {
-  const response = await api.get('/api/v1/incidents');
+// API functions - Updated with 200 limit
+export const getIncidents = async (limit: number = 200) => {
+  const response = await api.get(`/api/v1/incidents?limit=${limit}`);
   return response.data;
 };
 
