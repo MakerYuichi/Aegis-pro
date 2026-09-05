@@ -22,7 +22,6 @@ class IncidentService:
         logger.info("✅ IncidentService initialized with RAG")
     
     async def declare_incident(self, service_name: str, message: str, stack_trace: str = None, reported_by: str = None) -> dict:
-        """Declare a new incident with RAG context"""
         incident_id = f"INC-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
         
         logger.info(f"🚨 Declaring incident: {incident_id} for service: {service_name}")
@@ -43,7 +42,6 @@ class IncidentService:
             dependencies=service.get("dependencies", [])
         )
         
-        # RAG: Search for similar past incidents
         rag_context = await self.rag.generate_context_prompt(message)
         rag_used = bool(rag_context)
         if rag_used:
@@ -51,7 +49,6 @@ class IncidentService:
         else:
             logger.info("📚 No similar past incidents found yet")
         
-        # Use LLM with RAG context
         analysis = await self.llm.analyze_incident(
             service_name=service_name,
             message=message,
@@ -60,7 +57,6 @@ class IncidentService:
             rag_context=rag_context
         )
         
-        # --- Build incident_data ---
         extra_metadata_json = json.dumps({"rag_context_used": rag_used})
         affected_services_json = json.dumps(blast_radius.get("affected", []))
         
@@ -84,7 +80,6 @@ class IncidentService:
             "affected_services": affected_services_json
         }
         
-        # --- GitHub Context ---
         github_context = {}
         try:
             if service.get("repo_name") and settings.GITHUB_TOKEN:
@@ -117,7 +112,6 @@ class IncidentService:
         except Exception as e:
             logger.error(f"GitHub integration error: {e}")
         
-        # --- Code-Level Diagnosis ---
         if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
             try:
                 from src.services.github_service import GitHubService
@@ -143,7 +137,6 @@ class IncidentService:
             except Exception as e:
                 logger.error(f"Code context error: {e}")
         
-        # --- Related PRs (Top 5) ---
         if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
             try:
                 from src.services.github_service import GitHubService
@@ -173,7 +166,6 @@ class IncidentService:
             except Exception as e:
                 logger.error(f"Related PRs error: {e}")
         
-        # --- Auto-Fix Generation ---
         if stack_analysis and stack_analysis.get("file_path"):
             try:
                 from src.services.autofix_service import AutoFixService
@@ -204,10 +196,8 @@ class IncidentService:
             except Exception as e:
                 logger.error(f"Auto-fix error: {e}")
         
-        # --- Save incident ---
         await self.save_incident(incident_data)
         
-        # --- Get On-Call Engineers ---
         oncall = OnCallService()
         on_call = None
         try:
@@ -217,7 +207,6 @@ class IncidentService:
         except Exception as e:
             logger.error(f"On-call error: {e}")
         
-        # --- Send Alerts ---
         try:
             alert = AlertService()
             severity = analysis.get('severity', 'P1')
@@ -227,7 +216,6 @@ class IncidentService:
         except Exception as e:
             logger.error(f"Alert error: {e}")
         
-        # --- Real Rollback Preparation ---
         try:
             k8s = KubernetesService()
             status = await k8s.get_deployment_status(service_name)
@@ -235,10 +223,8 @@ class IncidentService:
         except Exception as e:
             logger.error(f"K8s error: {e}")
         
-        # --- Store for future RAG searches ---
         await self.rag.store_incident(incident_data)
         
-        # --- Broadcast via WebSocket ---
         try:
             await manager.broadcast({
                 "type": "new_incident",
@@ -268,7 +254,6 @@ class IncidentService:
         }
     
     async def get_service(self, service_name: str) -> dict:
-        """Get service from catalog"""
         try:
             session = await get_db()
             async with session:
@@ -285,7 +270,6 @@ class IncidentService:
             return self._mock_service(service_name)
     
     async def list_services(self) -> list:
-        """List all services with full details"""
         try:
             session = await get_db()
             async with session:
@@ -319,7 +303,6 @@ class IncidentService:
             return self._mock_services_list()
     
     async def save_incident(self, incident_data: dict):
-        """Save incident to database"""
         try:
             session = await get_db()
             async with session:
@@ -345,7 +328,6 @@ class IncidentService:
             logger.error(f"Error saving incident: {e}")
     
     async def get_incident(self, incident_id: str) -> dict:
-        """Get incident by ID"""
         try:
             session = await get_db()
             async with session:
@@ -373,7 +355,6 @@ class IncidentService:
             return None
     
     async def get_all_incidents(self, limit: int = 200) -> list:
-        """Get all incidents with proper parsing"""
         try:
             session = await get_db()
             async with session:
@@ -556,7 +537,7 @@ class IncidentService:
             return {"status": "deleted", "name": name}
     
     def _parse_stack_trace(self, stack_trace: str) -> dict:
-        """Parse stack trace - handles multiple formats"""
+        """Parse stack trace - handles multiple formats including Java"""
         import re
         
         result = {
@@ -566,9 +547,11 @@ class IncidentService:
             "full_trace": stack_trace[:500]
         }
         
+        # Extract exception type
         exception_patterns = [
             r"([A-Za-z]+Exception|Error):",
             r"([A-Za-z]+Exception|Error)\s+at",
+            r"([A-Za-z]+Exception|Error)\s+at\s+[\w.]+\.(\w+)\(([\w./-]+\.\w+):(\d+)\)",
         ]
         for pattern in exception_patterns:
             exception_match = re.search(pattern, stack_trace)
@@ -576,15 +559,22 @@ class IncidentService:
                 result["exception_type"] = exception_match.group(1)
                 break
         
+        # Try multiple patterns for file:line
         patterns = [
+            # Java format: at com.example.Class.method(File.java:123)
             r"at\s+[\w.]+\.(\w+)\(([\w./-]+\.\w+):(\d+)\)",
+            # Java format: at File.java:123
             r"at\s+([\w./-]+\.\w+):(\d+)",
+            # Python format: File "file.py", line 123
             r'File "([^"]+)", line (\d+)',
-            r"at\s+([\w./-]+\.\w+):(\d+)",
+            # Simple format: file.py:123
             r"([\w./-]+\.\w+):(\d+)",
-            r"\(([\w./-]+\.\w+):(\d+)\)",
-            r"at\s+([\w./-]+\.\w+):(\d+)",
-            r"([\w./-]+\.\w+):(\d+)",
+            # Java class format: ClassName.java:123
+            r"([A-Z][a-zA-Z]+\.java):(\d+)",
+            # Service format: DBConnection.java:123
+            r"([A-Za-z]+\.java):(\d+)",
+            # No extension: AuthService:123
+            r"([A-Za-z]+Service):(\d+)",
         ]
         
         for pattern in patterns:
@@ -598,19 +588,24 @@ class IncidentService:
                     result["line_number"] = int(match.group(2))
                 break
         
-        if not result["file_path"] or " " in str(result["file_path"]):
-            path_pattern = r'([\w./-]+\.\w+):(\d+)'
-            match = re.search(path_pattern, stack_trace)
-            if match:
-                result["file_path"] = match.group(1)
-                result["line_number"] = int(match.group(2))
-        
+        # If still not found, try to extract any file:line pattern
         if not result["file_path"]:
-            path_pattern = r'([\w./-]+\.(?:cpp|java|py|js|ts|go|rs)):(\d+)'
-            match = re.search(path_pattern, stack_trace)
-            if match:
-                result["file_path"] = match.group(1)
-                result["line_number"] = int(match.group(2))
+            patterns = [
+                r'([A-Za-z]+\.java):(\d+)',
+                r'([A-Za-z]+Service):(\d+)',
+                r'([A-Za-z]+\.py):(\d+)',
+                r'([\w./-]+\.\w+):(\d+)',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, stack_trace)
+                if match:
+                    result["file_path"] = match.group(1)
+                    result["line_number"] = int(match.group(2))
+                    break
+        
+        # Clean up file path
+        if result["file_path"] and " " in result["file_path"]:
+            result["file_path"] = result["file_path"].strip()
         
         return result
     
@@ -640,7 +635,6 @@ class IncidentService:
         ]
     
     async def save_incident_metadata(self, incident_id: str, extra_metadata: dict) -> dict:
-        """Update only the extra_metadata field of an incident"""
         try:
             session = await get_db()
             async with session:
@@ -660,4 +654,29 @@ class IncidentService:
                 return {"status": "updated", "incident_id": incident_id}
         except Exception as e:
             logger.error(f"Error updating incident metadata: {e}")
+            return {"error": str(e)}
+    
+    async def update_incident(self, incident_id: str, update_data: dict) -> dict:
+        try:
+            session = await get_db()
+            async with session:
+                from sqlalchemy import update
+                from src.models import Incident
+                
+                stmt = update(Incident).where(Incident.incident_id == incident_id)
+                
+                for key, value in update_data.items():
+                    stmt = stmt.values({key: value})
+                
+                result = await session.execute(stmt.returning(Incident.incident_id))
+                await session.commit()
+                
+                row = result.fetchone()
+                if row:
+                    logger.info(f"✅ Updated incident {incident_id}")
+                    return {"status": "updated", "incident_id": incident_id}
+                else:
+                    return {"error": "Incident not found"}
+        except Exception as e:
+            logger.error(f"Error updating incident: {e}")
             return {"error": str(e)}
