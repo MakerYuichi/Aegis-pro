@@ -3,13 +3,20 @@ from typing import Optional
 
 class Settings(BaseSettings):
     # Database
-    DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/aegis"
+    DATABASE_URL: str = "postgresql://postgres:postgres@postgres:5432/aegis"
     
     # Redis
-    REDIS_URL: str = "redis://localhost:6379"
+    REDIS_URL: str = "redis://redis:6379/0"
     
     # LLM - Groq
     GROQ_API_KEY: Optional[str] = None
+    
+    # LLM - OpenRouter
+    OPENROUTER_API_KEY: Optional[str] = None
+    OPENROUTER_MODEL: Optional[str] = None
+    
+    # LLM - Google Gemini
+    GOOGLE_API_KEY: Optional[str] = None
     
     # GitHub
     GITHUB_TOKEN: Optional[str] = None
