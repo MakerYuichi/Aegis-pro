@@ -162,11 +162,10 @@ class GitHubService:
             if not repo:
                 return []
             
-            related_prs = []
             seen_prs = set()
             candidates = []
             
-            # Get PRs that modified this file (from commit history) - LIMIT TO 10
+            # Get PRs that modified this file (from commit history)
             try:
                 commits = repo.get_commits(path=file_path)
                 for commit in commits[:10]:
@@ -185,7 +184,7 @@ class GitHubService:
             except Exception as e:
                 logger.debug(f"Error getting file PRs: {e}")
             
-            # If not enough candidates, get recent PRs from the repo - LIMIT TO 15
+            # If not enough candidates, get recent PRs from the repo
             if len(candidates) < 3:
                 try:
                     for pr in repo.get_pulls(state='closed', sort='updated', direction='desc')[:15]:
@@ -216,8 +215,8 @@ class GitHubService:
                 else:
                     candidates = candidates[:8]
             
-            # Score candidates using LLM
-            scored = await self._score_candidates(candidates, file_path, line_number)
+            # Score candidates using LLM - USE THE LLM SERVICE!
+            scored = await self._score_candidates_with_llm_service(candidates, file_path, line_number)
             
             # Filter and return top 5
             scored = [c for c in scored if c.get('relevance_score', 0) > 0.3]
@@ -227,139 +226,169 @@ class GitHubService:
             logger.error(f"Error getting related PRs: {e}")
             return []
     
-    async def _score_candidates(self, candidates: list, file_path: str, line_number: int) -> list:
-        """Score candidates using LLM first, then fallback to heuristics"""
+    async def _score_candidates_with_llm_service(self, candidates: list, file_path: str, line_number: int) -> list:
+        """Score candidates using the LLM service (which handles fallbacks)"""
         
-        # Try LLM if available
-        if self.llm and self.llm.client:
-            try:
-                scored = await self._score_with_llm(candidates, file_path, line_number)
-                if scored:
-                    logger.info(f"✅ LLM scored {len(scored)} PRs")
-                    return scored
-            except Exception as e:
-                logger.warning(f"⚠️ LLM scoring failed: {e}")
+        if not self.llm:
+            logger.warning("LLM service not available, using heuristics")
+            return self._score_with_heuristics(candidates, file_path)
         
-        # Fallback to heuristics
-        logger.info("Using heuristic fallback for relevance scoring")
-        return self._score_with_heuristics(candidates, file_path)
-    
-    async def _score_with_llm(self, candidates: list, file_path: str, line_number: int) -> list:
-        """Score PRs using LLM with detailed context and specific reasons"""
         try:
-            # Limit to 6 candidates for LLM to avoid timeout
-            candidates_small = candidates[:6]
-            
-            # Build detailed PR list with more context
+            # Build PR list for scoring
             pr_list = []
-            for p in candidates_small:
-                pr_details = {
+            for p in candidates[:6]:
+                pr_list.append({
                     "number": p["number"],
                     "title": p["title"][:200],
-                    "files": p["files"][:5],
+                    "files": p["files"][:3],
                     "author": p.get("author", "unknown")
-                }
-                
-                # Try to get PR description and more details
-                try:
-                    repo = await self._get_repo("fastapi/fastapi")
-                    if repo:
-                        pr = repo.get_pull(p["number"])
-                        pr_details["description"] = pr.body[:500] if pr.body else "No description provided"
-                        pr_details["additions"] = pr.additions
-                        pr_details["deletions"] = pr.deletions
-                        pr_details["changed_files"] = [f.filename for f in pr.get_files()[:5]]
-                        pr_details["modified_target_file"] = any(f.filename == file_path for f in pr.get_files()[:10])
-                except Exception as e:
-                    logger.debug(f"Could not fetch PR details for #{p['number']}: {e}")
-                
-                pr_list.append(pr_details)
+                })
             
             prompt = f"""
-You are a senior software engineer analyzing which GitHub Pull Request (PR) most likely caused a NullPointerException.
+You are a senior software engineer analyzing which GitHub Pull Request most likely caused a NullPointerException.
 
 **Error Location:** {file_path}, line {line_number}
 
-**What happened:** A NullPointerException occurred at line {line_number} in {file_path}. This means code tried to access a method/property on an object that was null.
+**Context:** A NullPointerException means code tried to access a method or property on a null object at line {line_number} in {file_path}.
 
 **PRs that modified this file or related files:**
 {json.dumps(pr_list, indent=2)}
 
-**Analysis Criteria:**
-1. Did the PR modify the exact file `{file_path}`?
-2. Did the PR change code around line {line_number} specifically?
-3. Did the PR remove a null check, add a new dependency, or change data structures?
-4. Did the PR introduce new code that could create null values?
+**Analyze each PR based on:**
+1. Did it modify the exact file `{file_path}`?
+2. Did it change code around line {line_number} specifically?
+3. Did it remove, add, or modify null checks?
+4. Did it change data structures, imports, or initialization?
 5. How large was the change? (additions/deletions)
 
 **Scoring Guidelines:**
-- **0.90-1.00**: PR directly modified the exact line or function where the error occurred
-- **0.70-0.89**: PR modified the same file but different function/area
-- **0.50-0.69**: PR modified a related file or dependency
-- **0.30-0.49**: PR touched the same repo but seems unrelated
-- **0.00-0.29**: PR is completely unrelated
+- 0.90-1.00: Directly modified the exact line or function where error occurred
+- 0.70-0.89: Modified the same file but different function/area
+- 0.50-0.69: Modified a related file or dependency
+- 0.30-0.49: Touched same repo but seems unrelated
 
-**Return ONLY JSON array with ALL PRs scored. Include specific, detailed reasons:**
-
+**Return ONLY JSON array with ALL PRs scored. Use exact scores (e.g., 0.87, 0.93, 0.76):**
 [
-    {{"number": 123, "score": 0.95, "reason": "This PR modified the exact file {file_path} at line {line_number}, removing a null check that was critical. This directly caused the NullPointerException."}},
-    {{"number": 456, "score": 0.78, "reason": "This PR modified {file_path} but in a different function. It likely changed the data structure used at line {line_number}, making the null check fail."}},
-    {{"number": 789, "score": 0.45, "reason": "This PR modified a different file but the change affects how the function at line {line_number} is called."}}
+    {{"number": 123, "score": 0.87, "reason": "PR #123 modified the exact file {file_path} at line {line_number} and removed a critical null check, directly causing the NullPointerException."}},
+    {{"number": 456, "score": 0.73, "reason": "PR #456 modified the same file {file_path} but in a different function. The change likely affected the data structure used at line {line_number}, making the null check fail."}}
 ]
 
-Score ALL {len(pr_list)} PRs. Be specific about what changed and why it might cause the error. Include the file name and line number in your reasoning.
+Provide specific, detailed reasons for each PR. Mention the file name, line number, and what specifically changed.
 """
             
-            # Use groq/compound which we know works
-            response = self.llm.client.chat.completions.create(
-                model="groq/compound",
-                messages=[
-                    {"role": "system", "content": "You are a senior software engineer analyzing code changes. Return ONLY valid JSON array with specific, detailed reasons. Include file names and line numbers in your reasoning. No other text."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=1500
-            )
-            
-            content = response.choices[0].message.content
-            logger.info(f"LLM response length: {len(content)}")
-            
-            # Try to parse JSON
-            json_match = re.search(r'\[.*\]', content, re.DOTALL)
-            if json_match:
+            # Try Gemini first (if available)
+            if self.llm.gemini_client:
+                logger.info("Using Google Gemini for PR scoring...")
                 try:
-                    scores = json.loads(json_match.group())
-                    if not isinstance(scores, list):
-                        raise ValueError("Not a list")
-                    
-                    score_map = {s["number"]: s for s in scores if "number" in s}
-                    
-                    for candidate in candidates:
-                        if candidate["number"] in score_map:
-                            sc = score_map[candidate["number"]]
-                            candidate["relevance_score"] = round(max(0.1, min(1.0, float(sc.get("score", 0.5)))), 2)
-                            candidate["reason"] = sc.get("reason", "LLM analyzed")[:300]
-                        else:
-                            candidate["relevance_score"] = 0.3
-                            candidate["reason"] = "Not scored by LLM"
-                    
-                    candidates.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
-                    return candidates
-                    
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON decode error: {e}")
-                    logger.error(f"Content: {content[:500]}")
-                    return None
-            else:
-                logger.warning(f"No JSON array found in: {content[:100] if content else 'empty'}")
-                return None
+                    response = self.llm.gemini_client.generate_content(prompt)
+                    content = response.text
+                    json_match = re.search(r'\[.*\]', content, re.DOTALL)
+                    if json_match:
+                        result = json.loads(json_match.group())
+                        logger.info("✅ Gemini PR scoring succeeded")
+                        return self._process_llm_result(candidates, result)
+                except Exception as e:
+                    logger.warning(f"Gemini PR scoring failed: {e}")
+            
+            # Try OpenRouter
+            if self.llm.openrouter_api_key:
+                logger.info("Using OpenRouter for PR scoring...")
+                result = await self._call_openrouter_for_scoring(prompt)
+                if result:
+                    return self._process_llm_result(candidates, result)
+            
+            # Fallback to Groq
+            if self.llm.client:
+                logger.info("Using Groq for PR scoring...")
+                result = await self._call_groq_for_scoring(prompt)
+                if result:
+                    return self._process_llm_result(candidates, result)
+            
+            # Final fallback to heuristics
+            logger.info("Using heuristic fallback for relevance scoring")
+            return self._score_with_heuristics(candidates, file_path)
             
         except Exception as e:
             logger.error(f"LLM scoring error: {e}")
-            return None
+            return self._score_with_heuristics(candidates, file_path)
+    
+    async def _call_openrouter_for_scoring(self, prompt):
+        """Call OpenRouter for PR scoring"""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.llm.openrouter_api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "http://localhost:8000",
+                        "X-Title": "AEGIS PRO"
+                    },
+                    json={
+                        "model": self.llm.openrouter_model,
+                        "messages": [
+                            {"role": "system", "content": "You are a senior software engineer. Return ONLY valid JSON array with specific, detailed reasons for each score."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 800
+                    }
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    json_match = re.search(r'\[.*\]', content, re.DOTALL)
+                    if json_match:
+                        return json.loads(json_match.group())
+        except Exception as e:
+            logger.warning(f"OpenRouter scoring failed: {e}")
+        return None
+    
+    async def _call_groq_for_scoring(self, prompt):
+        """Call Groq for PR scoring through LLM service"""
+        try:
+            for model in self.llm.models:
+                try:
+                    response = self.llm.client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "Return ONLY valid JSON array with specific, detailed reasons."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.3,
+                        max_tokens=800
+                    )
+                    content = response.choices[0].message.content
+                    json_match = re.search(r'\[.*\]', content, re.DOTALL)
+                    if json_match:
+                        return json.loads(json_match.group())
+                except Exception as e:
+                    continue
+        except Exception as e:
+            logger.warning(f"Groq scoring failed: {e}")
+        return None
+    
+    def _process_llm_result(self, candidates, scores):
+        """Process LLM result and update candidates"""
+        if not scores:
+            return self._score_with_heuristics(candidates, "")
+        
+        score_map = {s["number"]: s for s in scores if "number" in s}
+        
+        for candidate in candidates:
+            if candidate["number"] in score_map:
+                sc = score_map[candidate["number"]]
+                candidate["relevance_score"] = float(sc.get("score", 0.5))
+                candidate["reason"] = sc.get("reason", "LLM analyzed")[:400]
+            else:
+                candidate["relevance_score"] = 0.3
+                candidate["reason"] = "Not scored by LLM"
+        
+        candidates.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
+        return candidates
     
     def _score_with_heuristics(self, candidates: list, file_path: str) -> list:
-        """Fallback heuristic scoring - only used when LLM fails"""
+        """Fallback heuristic scoring"""
         file_name = file_path.split('/')[-1]
         file_base = file_name.split('.')[0]
         
