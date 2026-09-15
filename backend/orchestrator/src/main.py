@@ -1,8 +1,9 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi_plugin import Auth0FastAPI
 from contextlib import asynccontextmanager
-from loguru import logger
 import redis.asyncio as redis
+from loguru import logger
 
 from src.api.routes import router
 from src.api.slack import router as slack_router
@@ -59,6 +60,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+auth0 = Auth0FastAPI(
+    domain=settings.AUTH0_DOMAIN,
+    audience=settings.AUTH0_AUDIENCE,
+)
+logger.info("🔐 Auth0 initialized")
 
 # Include routes
 app.include_router(router, prefix="/api/v1")
