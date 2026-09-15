@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from loguru import logger
 import redis.asyncio as redis
+import os
 
 from src.api.routes import router
 from src.api.slack import router as slack_router
@@ -52,11 +53,17 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+_cors_env = os.getenv("CORS_ORIGINS", "*")
+allow_origins = (
+    ["*"] if _cors_env.strip() == "*"
+    else [o.strip() for o in _cors_env.split(",") if o.strip()]
+)
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
