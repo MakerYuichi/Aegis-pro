@@ -1,9 +1,9 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi_plugin import Auth0FastAPI
 from contextlib import asynccontextmanager
-import redis.asyncio as redis
 from loguru import logger
+import redis.asyncio as redis
+import os
 
 from src.api.routes import router
 from src.api.slack import router as slack_router
@@ -12,6 +12,7 @@ from src.services.incident_service import IncidentService
 from src.api.webhook import router as webhook_router
 from src.config import settings
 from src.websocket import manager
+from src.auth import auth0
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -52,20 +53,20 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+_cors_env = os.getenv("CORS_ORIGINS", "*")
+allow_origins = (
+    ["*"] if _cors_env.strip() == "*"
+    else [o.strip() for o in _cors_env.split(",") if o.strip()]
+)
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-auth0 = Auth0FastAPI(
-    domain=settings.AUTH0_DOMAIN,
-    audience=settings.AUTH0_AUDIENCE,
-)
-logger.info("🔐 Auth0 initialized")
 
 # Include routes
 app.include_router(router, prefix="/api/v1")
