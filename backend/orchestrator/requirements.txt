@@ -1,3 +1,5 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 # Core
 fastapi==0.115.11
 uvicorn>=0.34.0
@@ -15,6 +17,7 @@ redis==5.0.1
 celery==5.3.6
 
 # AI/ML
+torch==2.2.2
 sentence-transformers==2.2.2
 huggingface-hub==0.19.4
 groq==0.4.2
