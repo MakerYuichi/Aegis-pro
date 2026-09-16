@@ -50,17 +50,15 @@ class AutoFixService:
             2. A short explanation of the fix
             """
             
-            response = self.llm.client.chat.completions.create(
-                model="openai/gpt-oss-20b",
-                messages=[
-                    {"role": "system", "content": "You are an expert software engineer. Provide code fixes in diff format."},
-                    {"role": "user", "content": prompt}
-                ],
+            fix_result = await self.llm.complete_raw(
+                prompt=prompt,
+                system="You are an expert software engineer. Provide code fixes in diff format.",
                 temperature=0.2,
-                max_tokens=1000
+                max_tokens=1000,
             )
             
-            fix_result = response.choices[0].message.content
+            if not fix_result:
+                return {"error": "All LLM providers failed to generate a fix"}
             
             pr_info = await self.create_pr(
                 repo_name=repo_name,

@@ -14,13 +14,28 @@ class Settings(BaseSettings):
 
     # LLM - Groq
     GROQ_API_KEY: Optional[str] = None
+    GROQ_MODEL: Optional[str] = None  
 
     # LLM - OpenRouter
     OPENROUTER_API_KEY: Optional[str] = None
     OPENROUTER_MODEL: Optional[str] = None
+    
+    # LLM provider selection
+    LLM_PROVIDER: str = "groq"           # groq | azure | ollama | gemini | openrouter | mock
+    LLM_FALLBACKS: str = "gemini,openrouter" 
 
     # LLM - Google Gemini
     GOOGLE_API_KEY: Optional[str] = None
+    
+    # Azure OpenAI
+    AZURE_OPENAI_API_KEY: Optional[str] = None
+    AZURE_OPENAI_ENDPOINT: Optional[str] = None
+    AZURE_OPENAI_DEPLOYMENT: Optional[str] = None
+    AZURE_OPENAI_API_VERSION: str = "2024-10-21"
+    
+    # Ollama
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "llama3.1"
 
     # GitHub
     GITHUB_TOKEN: Optional[str] = None

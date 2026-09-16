@@ -1,70 +1,21 @@
-from groq import Groq
 from src.config import settings
 from loguru import logger
 import json
 import re
-import httpx
 
-# Try to import Google Gemini
-try:
-    import google.generativeai as genai
-    GEMINI_AVAILABLE = True
-except ImportError:
-    GEMINI_AVAILABLE = False
-    logger.warning("⚠️ Google Gemini SDK not installed. Install: pip install google-generativeai")
+from src.llm.base import LLMProviderError
+from src.llm.factory import get_provider_chain
+
 
 class LLMService:
     def __init__(self):
-        self.client = None
-        self.openrouter_api_key = None
-        self.gemini_client = None
-        
-        # Initialize Groq
-        if settings.GROQ_API_KEY and settings.GROQ_API_KEY != "":
-            try:
-                self.client = Groq(api_key=settings.GROQ_API_KEY)
-                self.models = [
-                    "openai/gpt-oss-20b",
-                    "groq/compound",
-                    "qwen/qwen3.6-27b",
-                ]
-                logger.info(f"✅ Groq LLM initialized with {len(self.models)} models")
-            except Exception as e:
-                logger.warning(f"⚠️ Groq initialization failed: {e}")
-                self.client = None
-        else:
-            logger.warning("⚠️ No GROQ_API_KEY found.")
-        
-        # Initialize Google Gemini
-        if getattr(settings, 'GOOGLE_API_KEY', None):
-            try:
-                if GEMINI_AVAILABLE:
-                    genai.configure(api_key=settings.GOOGLE_API_KEY)
-                    self.gemini_client = genai.GenerativeModel('models/gemini-3.5-flash-lite')
-                    logger.info("✅ Google Gemini initialized (model: models/gemini-3.5-flash-lite)")
-                else:
-                    logger.warning("⚠️ Google Gemini SDK not installed")
-            except Exception as e:
-                logger.warning(f"⚠️ Gemini initialization failed: {e}")
-                self.gemini_client = None
-        else:
-            logger.warning("⚠️ No GOOGLE_API_KEY found.")
-        
-        # Initialize OpenRouter
-        self.openrouter_api_key = getattr(settings, 'OPENROUTER_API_KEY', None)
-        self.openrouter_model = getattr(settings, 'OPENROUTER_MODEL', "google/gemma-4-31b-it:free")
-        self.openrouter_fallback_models = [
-            "google/gemma-4-26b-a4b-it:free",
-            "nvidia/nemotron-3-ultra-550b-a55b:free",
-            "cohere/north-mini-code:free",
-            "z-ai/glm-5.2:free"
-        ]
-        if self.openrouter_api_key:
-            logger.info(f"✅ OpenRouter initialized (primary model: {self.openrouter_model})")
-            logger.info(f"   Fallback models: {len(self.openrouter_fallback_models)} available")
-        else:
-            logger.warning("⚠️ No OPENROUTER_API_KEY found")
-    
+        self.chain = None
+        try:
+            self.chain = get_provider_chain()
+            logger.info(f"✅ LLMService chain: {self.chain.provider_names()}")
+        except LLMProviderError as e:
+            logger.warning(f"⚠️ No LLM providers configured: {e}")
+
     async def analyze_incident(
         self,
         service_name: str,
@@ -73,179 +24,49 @@ class LLMService:
         blast_radius: dict,
         rag_context: str = ""
     ) -> dict:
-        """Analyze incident using Groq first, then Gemini, then OpenRouter as fallback"""
-        
-        # Try Groq first
-        if self.client:
-            result = await self._try_llm_analysis(
-                service_name, message, stack_analysis, blast_radius, rag_context, provider="groq"
-            )
-            if result:
-                return result
-        
-        # Try Gemini as second fallback
-        if self.gemini_client:
-            logger.info("🔄 Groq failed or unavailable, trying Google Gemini...")
-            result = await self._try_llm_analysis(
-                service_name, message, stack_analysis, blast_radius, rag_context, provider="gemini"
-            )
-            if result:
-                return result
-        
-        # Try OpenRouter as third fallback
-        if self.openrouter_api_key:
-            logger.info("🔄 Gemini failed, trying OpenRouter...")
-            result = await self._try_llm_analysis(
-                service_name, message, stack_analysis, blast_radius, rag_context, provider="openrouter"
-            )
-            if result:
-                return result
-        
-        # Final fallback to intelligent mock
+        """Analyze incident using the configured provider chain."""
+        prompt = self._build_prompt(
+            service_name, message, stack_analysis, blast_radius, rag_context
+        )
+        system = (
+            "You are an expert SRE. Use the provided context (similar past incidents) "
+            "to respond with ONLY valid JSON:\n"
+            "{\n"
+            '    "severity": "P0" or "P1" or "P2",\n'
+            '    "title": "Short title",\n'
+            '    "root_cause": "2-3 sentence explanation",\n'
+            '    "suggested_fix": "1-2 sentence fix",\n'
+            '    "rollback_command": "kubectl command",\n'
+            '    "confidence": 0.0-1.0\n'
+            "}"
+        )
+
+        if self.chain:
+            resp = await self.chain.complete(prompt=prompt, system=system)
+            if resp:
+                parsed = self._extract_json(resp.content)
+                if parsed:
+                    logger.info(
+                        f"✅ Incident analyzed via {resp.provider}/{resp.model}"
+                    )
+                    return parsed
+                logger.warning(
+                    f"⚠️ Provider {resp.provider} returned unparseable content; "
+                    f"falling back to intelligent mock"
+                )
+
         logger.warning("⚠️ All LLM providers failed. Using intelligent mock.")
         return self._intelligent_mock(service_name, message, stack_analysis, blast_radius)
-    
-    async def _try_llm_analysis(self, service_name, message, stack_analysis, blast_radius, rag_context, provider="groq"):
-        """Try LLM analysis with Groq, Gemini, or OpenRouter"""
-        prompt = self._build_prompt(service_name, message, stack_analysis, blast_radius, rag_context)
-        
-        if provider == "groq":
-            return await self._call_groq(prompt)
-        elif provider == "gemini":
-            return await self._call_gemini(prompt)
-        elif provider == "openrouter":
-            return await self._call_openrouter_with_fallback(prompt)
-        
-        return None
-    
-    async def _call_groq(self, prompt):
-        """Call Groq API"""
-        for model in self.models:
-            try:
-                logger.info(f"🔄 Trying Groq model: {model}")
-                response = self.client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": """You are an expert SRE. Use the provided context (similar past incidents) to respond with ONLY valid JSON:
-{
-    "severity": "P0" or "P1" or "P2",
-    "title": "Short title",
-    "root_cause": "2-3 sentence explanation",
-    "suggested_fix": "1-2 sentence fix",
-    "rollback_command": "kubectl command",
-    "confidence": 0.0-1.0
-}"""
-                        },
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.1,
-                    max_tokens=300
-                )
-                
-                content = response.choices[0].message.content
-                json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                if json_match:
-                    result = json.loads(json_match.group())
-                    logger.info(f"✅ Groq succeeded with {model}")
-                    return result
-                    
-            except Exception as e:
-                logger.warning(f"❌ Groq model {model} failed: {e}")
-                continue
-        
-        return None
-    
-    async def _call_gemini(self, prompt):
-        """Call Google Gemini API"""
+
+    @staticmethod
+    def _extract_json(content: str) -> dict | None:
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        if not match:
+            return None
         try:
-            logger.info(f"🔄 Trying Google Gemini...")
-            
-            # Gemini uses a different API format
-            response = self.gemini_client.generate_content(prompt)
-            content = response.text
-            
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-                logger.info("✅ Google Gemini succeeded")
-                return result
-            else:
-                logger.warning(f"❌ Gemini returned no JSON: {content[:100]}")
-                
-        except Exception as e:
-            logger.warning(f"❌ Google Gemini failed: {e}")
-        
-        return None
-    
-    async def _call_openrouter_with_fallback(self, prompt):
-        """Call OpenRouter API with fallback models"""
-        models_to_try = [self.openrouter_model] + self.openrouter_fallback_models
-        
-        for model in models_to_try:
-            try:
-                logger.info(f"🔄 Trying OpenRouter model: {model}")
-                result = await self._call_openrouter(prompt, model)
-                if result:
-                    logger.info(f"✅ OpenRouter succeeded with {model}")
-                    return result
-            except Exception as e:
-                logger.warning(f"❌ OpenRouter model {model} failed: {e}")
-                continue
-        
-        return None
-    
-    async def _call_openrouter(self, prompt, model=None):
-        """Call OpenRouter API with specific model"""
-        try:
-            if model is None:
-                model = self.openrouter_model
-            
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.openrouter_api_key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "http://localhost:8000",
-                        "X-Title": "AEGIS PRO"
-                    },
-                    json={
-                        "model": model,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": """You are an expert SRE. Use the provided context (similar past incidents) to respond with ONLY valid JSON:
-{
-    "severity": "P0" or "P1" or "P2",
-    "title": "Short title",
-    "root_cause": "2-3 sentence explanation",
-    "suggested_fix": "1-2 sentence fix",
-    "rollback_command": "kubectl command",
-    "confidence": 0.0-1.0
-}"""
-                            },
-                            {"role": "user", "content": prompt}
-                        ],
-                        "temperature": 0.1,
-                        "max_tokens": 300
-                    }
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                    json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                    if json_match:
-                        return json.loads(json_match.group())
-                else:
-                    logger.warning(f"OpenRouter failed: {response.status_code}")
-                    
-        except Exception as e:
-            logger.warning(f"OpenRouter error: {e}")
-        
-        return None
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            return None
     
     def _build_prompt(self, service_name, message, stack_analysis, blast_radius, rag_context):
         """Build prompt for LLM with RAG context"""
@@ -297,3 +118,21 @@ class LLMService:
             "rollback_command": f"kubectl rollout undo deploy/{service_name} -n production",
             "confidence": confidence
         }
+        
+    async def complete_raw(
+        self,
+        prompt: str,
+        system: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 1000,
+    ) -> str | None:
+        """Call the chain with a raw prompt. Returns the raw text, or None."""
+        if not self.chain:
+            return None
+        resp = await self.chain.complete(
+            prompt=prompt,
+            system=system,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return resp.content if resp else None
