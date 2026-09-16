@@ -34,4 +34,4 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test
           REDIS_URL: redis://localhost:6379/0
         run: |
-          pytest tests/test_llm_providers.py -v --tb=short
+          pytest tests/ -v --tb=short
