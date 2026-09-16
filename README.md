@@ -2,8 +2,6 @@
  
 > **Detects payment failures, finds who broke it, generates the fix, creates the PR. In under 10 seconds.**
  
-Built for the [Razorpay AI Buildathon](https://razorpay.com) · Track 02: AI Risk Manager
- 
 ---
  
 ## The Problem
