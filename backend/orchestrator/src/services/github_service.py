@@ -15,7 +15,6 @@ class GitHubService:
         # Initialize LLM
         try:
             self.llm = LLMService()
-            # CHANGED: was `if self.llm.client:` — that attribute no longer exists.
             # LLMService now exposes a `chain` attribute (LLMChain | None).
             if self.llm.chain:
                 logger.info(f"✅ GitHub service initialized with LLM chain: "
@@ -26,7 +25,7 @@ class GitHubService:
             logger.warning(f"⚠️ LLM not available: {e}")
             self.llm = None
 
-        # Initialize GitHub (unchanged)
+        # Initialize GitHub
         if settings.GITHUB_TOKEN:
             try:
                 auth = Auth.Token(settings.GITHUB_TOKEN)
@@ -37,7 +36,192 @@ class GitHubService:
         else:
             logger.warning("⚠️ GitHub token not configured")
 
-    # ... _get_repo, get_recent_prs, get_blame_with_pr, get_related_prs unchanged ...
+    async def _get_repo(self, repo_name: str):
+        """Find a repository dynamically"""
+        if not self.client:
+            return None
+
+        if '/' in repo_name:
+            try:
+                return self.client.get_repo(repo_name)
+            except Exception:
+                pass
+
+        if settings.GITHUB_ORG:
+            try:
+                return self.client.get_repo(f"{settings.GITHUB_ORG}/{repo_name}")
+            except Exception:
+                pass
+
+        try:
+            query = f"{repo_name} in:name"
+            result = self.client.search_repositories(query, sort='stars', order='desc')
+            for repo in result[:5]:
+                if repo.name.lower() == repo_name.lower() or repo_name.lower() in repo.full_name.lower():
+                    logger.info(f"Found repository: {repo.full_name}")
+                    return repo
+                if repo.name.lower().startswith(repo_name.lower()) or repo.full_name.lower().endswith(f"/{repo_name.lower()}"):
+                    logger.info(f"Found repository: {repo.full_name}")
+                    return repo
+            for repo in result[:5]:
+                logger.info(f"Found repository via search: {repo.full_name}")
+                return repo
+        except Exception as e:
+            logger.debug(f"Search failed: {e}")
+
+        return None
+
+    async def get_recent_prs(self, repo_name: str, hours: int = 24) -> list:
+        """Get recent merged PRs from ANY public repo"""
+        if not self.client:
+            logger.warning("GitHub client not initialized")
+            return []
+
+        try:
+            repo = await self._get_repo(repo_name)
+            if not repo:
+                logger.warning(f"Repository {repo_name} not found")
+                return []
+
+            prs = []
+            for pr in repo.get_pulls(state='closed', sort='updated', direction='desc')[:10]:
+                if pr.merged:
+                    prs.append({
+                        "number": pr.number,
+                        "title": pr.title,
+                        "author": pr.user.login,
+                        "url": pr.html_url,
+                        "merged_at": pr.merged_at.isoformat() if pr.merged_at else None,
+                        "additions": pr.additions,
+                        "deletions": pr.deletions,
+                        "files": [f.filename for f in pr.get_files()[:5]]
+                    })
+
+            logger.info(f"Found {len(prs)} recent PRs for {repo_name}")
+            return prs
+
+        except Exception as e:
+            logger.error(f"GitHub error fetching {repo_name}: {e}")
+            return []
+
+    async def get_blame_with_pr(self, repo_name: str, file_path: str, line_number: int) -> dict:
+        """Get Git blame AND the associated PR using commit history"""
+        if not self.client:
+            return {}
+
+        try:
+            repo = await self._get_repo(repo_name)
+            if not repo:
+                return {}
+
+            logger.info(f"🔍 Getting blame for: {file_path}:{line_number}")
+
+            try:
+                commits = repo.get_commits(path=file_path)
+                logger.info(f"📝 Found {commits.totalCount} commits for {file_path}")
+
+                if commits.totalCount > 0:
+                    commit = commits[0]
+                    pr_info = await self._find_pr_for_commit(repo, commit.sha)
+
+                    result = {
+                        "commit_hash": commit.sha[:8],
+                        "author": commit.author.login if commit.author else "Unknown",
+                        "author_avatar": commit.author.avatar_url if commit.author else None,
+                        "message": commit.commit.message.split("\n")[0][:100],
+                        "line": line_number,
+                        "file": file_path,
+                    }
+
+                    if pr_info:
+                        pr_number = pr_info.get("number")
+                        contributors = await self._get_pr_contributors(repo, pr_number)
+                        result.update({
+                            "pr_number": pr_number,
+                            "pr_title": pr_info.get("title"),
+                            "pr_url": pr_info.get("url"),
+                            "pr_author": pr_info.get("author"),
+                            "contributors": contributors,
+                        })
+                        logger.info(f"✅ Found PR #{pr_number} for commit {commit.sha[:8]}")
+                    else:
+                        logger.info(f"✅ Found commit {commit.sha[:8]} but no PR associated")
+
+                    return result
+
+            except Exception as e:
+                logger.error(f"Error getting commits: {e}")
+
+            return {}
+
+        except Exception as e:
+            logger.error(f"Git blame error: {e}")
+            return {}
+
+    async def get_related_prs(self, repo_name: str, file_path: str, line_number: int, limit: int = 5) -> list:
+        """Find TOP 5 PRs related to a specific file/line using LLM scoring"""
+        try:
+            repo = await self._get_repo(repo_name)
+            if not repo:
+                return []
+
+            seen_prs = set()
+            candidates = []
+
+            try:
+                commits = repo.get_commits(path=file_path)
+                for commit in commits[:10]:
+                    prs = commit.get_pulls()
+                    for pr in prs:
+                        if pr.number not in seen_prs:
+                            seen_prs.add(pr.number)
+                            candidates.append({
+                                "number": pr.number,
+                                "title": pr.title,
+                                "author": pr.user.login,
+                                "url": pr.html_url,
+                                "merged_at": pr.merged_at.isoformat() if pr.merged_at else None,
+                                "files": [f.filename for f in pr.get_files()[:5]]
+                            })
+            except Exception as e:
+                logger.debug(f"Error getting file PRs: {e}")
+
+            if len(candidates) < 3:
+                try:
+                    for pr in repo.get_pulls(state='closed', sort='updated', direction='desc')[:15]:
+                        if pr.number in seen_prs:
+                            continue
+                        seen_prs.add(pr.number)
+                        candidates.append({
+                            "number": pr.number,
+                            "title": pr.title,
+                            "author": pr.user.login,
+                            "url": pr.html_url,
+                            "merged_at": pr.merged_at.isoformat() if pr.merged_at else None,
+                            "files": [f.filename for f in pr.get_files()[:5]]
+                        })
+                        if len(candidates) >= 8:
+                            break
+                except:
+                    pass
+
+            if not candidates:
+                return []
+
+            if len(candidates) > 8:
+                filtered = [c for c in candidates if any(f == file_path for f in c.get('files', []))]
+                if len(filtered) >= 3:
+                    candidates = filtered[:8]
+                else:
+                    candidates = candidates[:8]
+
+            scored = await self._score_candidates_with_llm_service(candidates, file_path, line_number)
+            scored = [c for c in scored if c.get('relevance_score', 0) > 0.3]
+            return scored[:limit]
+
+        except Exception as e:
+            logger.error(f"Error getting related PRs: {e}")
+            return []
 
     async def _score_candidates_with_llm_service(
         self, candidates: list, file_path: str, line_number: int
@@ -48,7 +232,6 @@ class GitHubService:
             logger.warning("LLM chain not available, using heuristics")
             return self._score_with_heuristics(candidates, file_path)
 
-        # Build PR list for scoring
         pr_list = []
         for p in candidates[:6]:
             pr_list.append({
@@ -96,7 +279,6 @@ Provide specific, detailed reasons for each PR. Mention the file name, line numb
         )
 
         try:
-            # Single call — the chain handles provider fallback internally.
             content = await self.llm.complete_raw(
                 prompt=prompt,
                 system=system,
@@ -119,14 +301,14 @@ Provide specific, detailed reasons for each PR. Mention the file name, line numb
         except Exception as e:
             logger.error(f"LLM scoring error: {e}")
             return self._score_with_heuristics(candidates, file_path)
-    
+
     def _process_llm_result(self, candidates, scores):
         """Process LLM result and update candidates"""
         if not scores:
             return self._score_with_heuristics(candidates, "")
-        
+
         score_map = {s["number"]: s for s in scores if "number" in s}
-        
+
         for candidate in candidates:
             if candidate["number"] in score_map:
                 sc = score_map[candidate["number"]]
@@ -135,41 +317,41 @@ Provide specific, detailed reasons for each PR. Mention the file name, line numb
             else:
                 candidate["relevance_score"] = 0.3
                 candidate["reason"] = "Not scored by LLM"
-        
+
         candidates.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
         return candidates
-    
+
     def _score_with_heuristics(self, candidates: list, file_path: str) -> list:
         """Fallback heuristic scoring"""
         file_name = file_path.split('/')[-1]
         file_base = file_name.split('.')[0]
-        
+
         for c in candidates:
             score = 0.3
             reason = "General relevance"
-            
+
             if any(f == file_path for f in c.get('files', [])):
                 score = 0.7
                 reason = f"Modified {file_path}"
-                
+
                 if file_base in c.get('title', ''):
                     score = 0.85
                     reason = f"Modified {file_path} and title mentions {file_base}"
-            
+
             elif any(file_base in f for f in c.get('files', [])):
                 score = 0.5
                 reason = f"Modified related file (contains {file_base})"
-            
+
             elif file_base in c.get('title', ''):
                 score = 0.45
                 reason = f"Title mentions {file_base}"
-            
+
             c['relevance_score'] = score
             c['reason'] = reason
-        
+
         candidates.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
         return candidates
-    
+
     async def _get_pr_contributors(self, repo, pr_number: int) -> list:
         """Get ALL contributors for a PR"""
         try:
@@ -177,7 +359,7 @@ Provide specific, detailed reasons for each PR. Mention the file name, line numb
             pr = repo.get_pull(pr_number)
             contributors = []
             added_usernames = set()
-            
+
             if pr.user:
                 contributors.append({
                     "username": pr.user.login,
@@ -186,7 +368,7 @@ Provide specific, detailed reasons for each PR. Mention the file name, line numb
                     "url": pr.user.html_url
                 })
                 added_usernames.add(pr.user.login)
-            
+
             try:
                 reviews = pr.get_reviews()
                 for review in reviews:
@@ -200,7 +382,7 @@ Provide specific, detailed reasons for each PR. Mention the file name, line numb
                         added_usernames.add(review.user.login)
             except:
                 pass
-            
+
             for assignee in pr.assignees:
                 if assignee.login not in added_usernames:
                     contributors.append({
@@ -210,7 +392,7 @@ Provide specific, detailed reasons for each PR. Mention the file name, line numb
                         "url": assignee.html_url
                     })
                     added_usernames.add(assignee.login)
-            
+
             try:
                 commits = pr.get_commits()
                 for commit in commits:
@@ -224,14 +406,14 @@ Provide specific, detailed reasons for each PR. Mention the file name, line numb
                         added_usernames.add(commit.author.login)
             except:
                 pass
-            
+
             logger.info(f"✅ Found {len(contributors)} contributors for PR #{pr_number}")
             return contributors
-            
+
         except Exception as e:
             logger.error(f"Error getting PR contributors: {e}")
             return []
-    
+
     async def _find_pr_for_commit(self, repo, commit_sha: str) -> dict:
         """Find the PR that introduced a commit"""
         try:
@@ -248,29 +430,29 @@ Provide specific, detailed reasons for each PR. Mention the file name, line numb
         except Exception as e:
             logger.debug(f"PR lookup error: {e}")
             return {}
-        
+
     async def get_file_content(self, repo_name: str, file_path: str, line_number: int, context_lines: int = 5) -> dict:
         """Fetch the actual code around the error line from GitHub"""
         if not self.client:
             return {}
-        
+
         try:
             repo = await self._get_repo(repo_name)
             if not repo:
                 return {}
-            
+
             content = repo.get_contents(file_path)
             lines = content.decoded_content.decode().split('\n')
-            
+
             start = max(0, line_number - context_lines - 1)
             end = min(len(lines), line_number + context_lines)
-            
+
             code_snippet = []
             for i in range(start, end):
                 line_num = i + 1
                 marker = ">>> " if i == line_number - 1 else "    "
                 code_snippet.append(f"{line_num:4d} {marker}{lines[i]}")
-            
+
             return {
                 "file_path": file_path,
                 "line_number": line_number,
@@ -278,7 +460,7 @@ Provide specific, detailed reasons for each PR. Mention the file name, line numb
                 "code_snippet": "\n".join(code_snippet),
                 "full_file": "\n".join(lines) if len(lines) < 100 else None
             }
-            
+
         except Exception as e:
             logger.error(f"Error fetching file content: {e}")
             return {}
