@@ -285,7 +285,7 @@ AEGIS PRO is **source-available** under the [Business Source License 1.1](LICENS
 - **Commercial license required** for competing products or hosted resale
 - **Converts to Apache 2.0** four years after each release
 
-For commercial licensing, contact [your email] or [request a demo](https://aegis-pro-six.vercel.app/).
+For commercial licensing, contact makeryuichii@gmail.com or [request a demo](https://aegis-pro-six.vercel.app/).
  
 ---
  
