@@ -1,10 +1,12 @@
 import { Link, useLocation } from 'react-router-dom';
-import { Shield, Zap, Moon, Sun, LayoutDashboard, AlertTriangle, Server, Users, Settings as SettingsIcon } from 'lucide-react';
+import { Shield, Zap, Moon, Sun, LayoutDashboard, AlertTriangle, Server, Users, Settings as SettingsIcon, LogOut } from 'lucide-react';
+import { useAuth0 } from '@auth0/auth0-react';
 import { useTheme } from './ThemeProvider';
 
 export function Navbar() {
   const { theme, toggleTheme } = useTheme();
   const location = useLocation();
+  const { user, logout } = useAuth0();
 
   const navItems = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -14,6 +16,9 @@ export function Navbar() {
     { path: '/approvals', label: 'Approvals', icon: Zap },
     { path: '/settings', label: 'Settings', icon: SettingsIcon },
   ];
+
+  const handleLogout = () =>
+    logout({ logoutParams: { returnTo: window.location.origin } });
 
   return (
     <nav className="bg-white dark:bg-dark-bg border-b border-light-border dark:border-dark-border shadow-sm transition-colors">
@@ -35,7 +40,7 @@ export function Navbar() {
               </span>
             </div>
           </Link>
-          
+
           {/* Navigation */}
           <div className="hidden md:flex items-center gap-1">
             {navItems.map((item) => {
@@ -57,15 +62,15 @@ export function Navbar() {
               );
             })}
           </div>
-          
+
           {/* Right Side */}
           <div className="flex items-center gap-3">
             {/* Status Indicator */}
-            <div className="hidden sm:flex items-center gap-2 bg-brand-success/10 px-3 py-1.5 rounded-lg border border-brand-success/20">
+            <div className="hidden lg:flex items-center gap-2 bg-brand-success/10 px-3 py-1.5 rounded-lg border border-brand-success/20">
               <span className="w-2 h-2 rounded-full bg-brand-success animate-pulse"></span>
               <span className="text-xs text-brand-success font-medium">All Systems Operational</span>
             </div>
-            
+
             {/* Theme Toggle */}
             <button
               onClick={toggleTheme}
@@ -78,6 +83,28 @@ export function Navbar() {
                 <Moon className="w-5 h-5 text-brand-primary" />
               )}
             </button>
+
+            {/* === NEW: User + Logout === */}
+            {user && (
+              <div className="flex items-center gap-2 pl-3 border-l border-light-border dark:border-dark-border">
+                <div className="hidden sm:flex flex-col items-end">
+                  <span className="text-xs font-medium text-light-text dark:text-dark-text">
+                    {user.name || user.email}
+                  </span>
+                  <span className="text-[10px] text-light-muted dark:text-dark-muted">
+                    {user.email}
+                  </span>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  className="p-2.5 rounded-lg bg-light-surface dark:bg-dark-surface hover:bg-red-50 dark:hover:bg-red-900/20 text-light-text dark:text-dark-text hover:text-red-600 dark:hover:text-red-400 transition-all duration-200 border border-light-border dark:border-dark-border"
+                  aria-label="Logout"
+                  title="Logout"
+                >
+                  <LogOut className="w-5 h-5" />
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>

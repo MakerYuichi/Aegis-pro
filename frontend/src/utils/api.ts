@@ -1,4 +1,6 @@
 import axios, { AxiosError } from 'axios';
+import { useAuth0 } from '@auth0/auth0-react';
+import { useMemo } from 'react';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -7,7 +9,7 @@ export const api = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 10000,
+  timeout: 60000,
 });
 
 // Add response interceptor for error handling
@@ -242,54 +244,9 @@ export const getIncident = async (id: string) => {
   return response.data;
 };
 
-export const declareIncident = async (data: {
-  service_name: string;
-  message: string;
-  stack_trace?: string;
-}) => {
-  const response = await api.post('/api/v1/incident/declare', data);
-  return response.data;
-};
-
-export const rollbackIncident = async (incident_id: string) => {
-  const response = await api.post('/api/v1/incident/rollback', { incident_id });
-  return response.data;
-};
 
 export const getServices = async () => {
   const response = await api.get('/api/v1/services');
-  return response.data;
-};
-
-export const seedServices = async () => {
-  const response = await api.post('/api/v1/services/seed');
-  return response.data;
-};
-
-export const createService = async (data: {
-  name: string;
-  description?: string;
-  repo_name?: string;
-  dependencies?: string[];
-  is_critical?: boolean;
-  on_call?: string[];
-}) => {
-  const response = await api.post('/api/v1/services', data);
-  return response.data;
-};
-
-export const deleteService = async (name: string) => {
-  const response = await api.delete(`/api/v1/services/${encodeURIComponent(name)}`);
-  return response.data;
-};
-
-export const approveFix = async (incident_id: string) => {
-  const response = await api.post(`/api/v1/incident/${incident_id}/approve`);
-  return response.data;
-};
-
-export const rejectFix = async (incident_id: string, reason?: string) => {
-  const response = await api.post(`/api/v1/incident/${incident_id}/reject`, { reason });
   return response.data;
 };
 
@@ -299,23 +256,8 @@ export const getOnCallRoster = async (serviceName?: string): Promise<{ roster: O
   return response.data;
 };
 
-export const addOnCallMember = async (member: Partial<OnCallMember>): Promise<{ id: number; status: string }> => {
-  const response = await api.post('/api/v1/oncall/members', member);
-  return response.data;
-};
-
-export const removeOnCallMember = async (memberId: number): Promise<{ id: number; status: string }> => {
-  const response = await api.delete(`/api/v1/oncall/members/${memberId}`);
-  return response.data;
-};
-
 export const getAlertHistory = async (limit: number = 20): Promise<{ alerts: Alert[]; count: number }> => {
   const response = await api.get(`/api/v1/oncall/alert/history?limit=${limit}`);
-  return response.data;
-};
-
-export const sendAlert = async (alert: AlertRequest): Promise<any> => {
-  const response = await api.post('/api/v1/oncall/alert', alert);
   return response.data;
 };
 
@@ -324,13 +266,128 @@ export const getPendingFixes = async (): Promise<{ fixes: PendingFix[]; count: n
   return response.data;
 };
 
-export const sendOnCallAlert = async (data: {
-  target?: string;
-  everyone?: boolean;
-  message?: string;
-  incident_id?: string;
-  service_name?: string;
-}) => {
-  const response = await api.post('/api/v1/oncall/alert', data);
-  return response.data;
-};
+/**
+ * Returns an axios instance wired with the current Auth0 access token.
+ * Use for protected (mutating) endpoints only.
+ */
+export function useApiClient() {
+  const { getAccessTokenSilently, isAuthenticated } = useAuth0();
+
+  return useMemo(() => {
+    const instance = axios.create({
+      baseURL: API_URL,
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 60000,
+    });
+
+    instance.interceptors.request.use(async (config) => {
+      if (!isAuthenticated) {
+        throw new Error('Not authenticated — cannot make API call');
+      }
+      try {
+        const token = await getAccessTokenSilently({
+          authorizationParams: {
+            audience: import.meta.env.VITE_AUTH0_AUDIENCE,
+          },
+        });
+        config.headers = config.headers || {};
+        config.headers.Authorization = `Bearer ${token}`;
+      } catch (err) {
+        console.error('Failed to get Auth0 token:', err);
+        throw new Error('Failed to obtain authentication token');
+      }
+      return config;
+    });
+
+    instance.interceptors.response.use(
+      (response) => response,
+      (error: AxiosError) => {
+        if (error.code === 'ECONNABORTED') {
+          throw new Error('Request timeout - backend might be slow or unavailable');
+        }
+        if (!error.response) {
+          throw new Error('Network error - cannot reach backend');
+        }
+        const status = error.response.status;
+        const data = error.response.data as any;
+        const message = data?.detail || data?.message || error.message;
+
+        if (status === 401) throw new Error('Unauthorized — please log in again');
+        if (status === 403) throw new Error('Forbidden — you do not have access');
+        if (status === 404) throw new Error('Resource not found');
+        if (status === 500) throw new Error('Server error - check backend logs');
+        throw new Error(message || `Request failed with status ${status}`);
+      }
+    );
+
+    return instance;
+  }, [getAccessTokenSilently, isAuthenticated]);
+}
+
+/**
+ * Hook exposing all protected (mutating) API calls with auth.
+ * Read-only calls stay on the module-level `api` export above.
+ */
+export function useProtectedApi() {
+  const api = useApiClient();
+
+  return useMemo(() => ({
+    declareIncident: async (data: { service_name: string; message: string; stack_trace?: string }) => {
+      const res = await api.post('/api/v1/incident/declare', data);
+      return res.data;
+    },
+    rollbackIncident: async (incident_id: string) => {
+      const res = await api.post('/api/v1/incident/rollback', { incident_id });
+      return res.data;
+    },
+    approveFix: async (incident_id: string) => {
+      const res = await api.post(`/api/v1/incident/${incident_id}/approve`);
+      return res.data;
+    },
+    rejectFix: async (incident_id: string, reason?: string) => {
+      const res = await api.post(`/api/v1/incident/${incident_id}/reject`, { reason });
+      return res.data;
+    },
+    createService: async (data: {
+      name: string;
+      description?: string;
+      repo_name?: string;
+      dependencies?: string[];
+      is_critical?: boolean;
+      on_call?: string[];
+    }) => {
+      const res = await api.post('/api/v1/services', data);
+      return res.data;
+    },
+    deleteService: async (name: string) => {
+      const res = await api.delete(`/api/v1/services/${encodeURIComponent(name)}`);
+      return res.data;
+    },
+    seedServices: async () => {
+      const res = await api.post('/api/v1/services/seed');
+      return res.data;
+    },
+    addOnCallMember: async (member: Partial<OnCallMember>) => {
+      const res = await api.post('/api/v1/oncall/members', member);
+      return res.data;
+    },
+    removeOnCallMember: async (memberId: number) => {
+      const res = await api.delete(`/api/v1/oncall/members/${memberId}`);
+      return res.data;
+    },
+    sendAlert: async (alert: AlertRequest) => {
+      const res = await api.post('/api/v1/oncall/alert', alert);
+      return res.data;
+    },
+    sendOnCallAlert: async (data: {
+      target?: string;
+      everyone?: boolean;
+      message?: string;
+      incident_id?: string;
+      service_name?: string;
+    }) => {
+      const res = await api.post('/api/v1/oncall/alert', data);
+      return res.data;
+    },
+  }), [api]);
+}

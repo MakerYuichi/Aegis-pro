@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { X, Loader2 } from 'lucide-react';
-import { declareIncident, type Service } from '../utils/api';
+import { useProtectedApi, type Service } from '../utils/api';
 
 interface DeclareIncidentModalProps {
   isOpen: boolean;
@@ -15,6 +15,7 @@ export function DeclareIncidentModal({ isOpen, onClose, onSuccess, services }: D
   const [stackTrace, setStackTrace] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { declareIncident } = useProtectedApi();
 
   if (!isOpen) return null;
 

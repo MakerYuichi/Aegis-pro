@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Users, Clock, RotateCcw, Shield, Bell, BellRing, CheckCircle, AlertCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { type OnCallMember, sendAlert } from '../utils/api';
+import { type OnCallMember, useProtectedApi } from '../utils/api';
 
 interface OnCallRotationProps {
   roster: OnCallMember[];
@@ -9,6 +9,7 @@ interface OnCallRotationProps {
 }
 
 export function OnCallRotation({ roster, onAlert }: OnCallRotationProps) {
+  const { sendAlert } = useProtectedApi();
   const [alertingId, setAlertingId] = useState<string | null>(null);
   const [alertingAll, setAlertingAll] = useState(false);
   const [toastMsg, setToastMsg] = useState<{ text: string; ok: boolean } | null>(null);

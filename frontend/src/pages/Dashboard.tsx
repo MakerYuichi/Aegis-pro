@@ -5,18 +5,18 @@ import { DeclareIncidentModal } from '../components/DeclareIncidentModal';
 import { ActivityFeed } from '../components/ActivityFeed';
 import { OnCallSummary } from '../components/OnCallSummary';
 import {
-  getIncidents, getServices, seedServices, sendAlert, getOnCallRoster,
+  getIncidents, getServices, useProtectedApi, getOnCallRoster,
   type Incident, type Service, type OnCallMember,
 } from '../utils/api';
-import { 
-  PlusCircle, Database, RefreshCw, Zap, BellRing, AlertTriangle, 
-  ChevronRight, Clock, AlertCircle, CheckCircle, TrendingUp, 
-  TrendingDown, Minus, Shield, Activity, Server, Users,
-  BarChart3, Gauge, Timer, Flame, LayoutGrid, List
+import {
+  PlusCircle, Database, RefreshCw, Zap, BellRing,
+  ChevronRight, AlertCircle, CheckCircle, Server, Users,
+  Gauge, Timer, Flame
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export function Dashboard() {
+  const { seedServices, sendAlert } = useProtectedApi();
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [services, setServices] = useState<Service[]>([]);
   const [roster, setRoster] = useState<OnCallMember[]>([]);
@@ -142,8 +142,6 @@ export function Dashboard() {
   const activeIncidents = incidents.filter(i => i.status === 'active');
   const resolvedIncidents = incidents.filter(i => i.status === 'resolved');
   const criticalIncidents = incidents.filter(i => i.severity === 'P0');
-  const highIncidents = incidents.filter(i => i.severity === 'P1');
-  const mediumIncidents = incidents.filter(i => i.severity === 'P2');
   
   // Calculate metrics
   const resolutionRate = incidents.length > 0 

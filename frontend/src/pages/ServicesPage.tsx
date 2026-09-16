@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { ServiceHealthRing } from '../components/ServiceHealthRing';
-import { getServices, getIncidents, createService, deleteService, type Service, type Incident } from '../utils/api';
+import { getServices, getIncidents, useProtectedApi, type Service, type Incident } from '../utils/api';
 import { RefreshCw, Plus, Server, AlertTriangle, Activity, User, Edit, Trash2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 export function ServicesPage() {
+  const { createService, deleteService } = useProtectedApi();
   const [services, setServices] = useState<Service[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [loading, setLoading] = useState(true);
