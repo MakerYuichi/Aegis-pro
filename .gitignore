@@ -78,6 +78,5 @@ logs/
 coverage/
 .nyc_output/
 .vercel
-.env*
 
 backup.sql
