@@ -280,8 +280,14 @@ The auto-fix generation with human approval is what no existing tool does end-to
 **pgvector Syntax Errors** → Parameterized queries don't support `::vector` casting. Fixed by converting embeddings to string format before passing to PostgreSQL.
 
 ## License
- 
-MIT — built for the Razorpay AI Buildathon 2026.
+
+AEGIS PRO is **source-available** under the [Business Source License 1.1](LICENSE.md).
+
+- **Free** for internal use, evaluation, research, and personal projects
+- **Commercial license required** for competing products or hosted resale
+- **Converts to Apache 2.0** four years after each release
+
+For commercial licensing, contact [your email] or [request a demo](https://aegis-pro-six.vercel.app/).
  
 ---
  
