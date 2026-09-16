@@ -1,14 +1,7 @@
 import { useState, useEffect } from 'react';
-import {
-  getOnCallRoster, getAlertHistory, sendAlert,
-  addOnCallMember, removeOnCallMember, getServices,
-  type OnCallMember, type Alert, type Service,
-} from '../utils/api';
-import {
-  RefreshCw, Users, BellRing, Bell, RotateCcw, Plus, Trash2, X,
-  CheckCircle, AlertCircle, ChevronDown, ChevronUp, MessageSquare,
-  Shield, Zap, Clock, User, Mail, Phone,
-} from 'lucide-react';
+import { getOnCallRoster, getAlertHistory, useProtectedApi, getServices, type OnCallMember, type Alert, type Service, } from '../utils/api';
+import { RefreshCw, Users, BellRing, Bell, RotateCcw, Plus, Trash2, X, CheckCircle, AlertCircle, ChevronDown, ChevronUp, MessageSquare, 
+  Shield, Zap, Clock, User, Mail, Phone } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 type Role = 'primary' | 'secondary' | 'tertiary';
@@ -26,6 +19,7 @@ const ROLE_DOT: Record<Role, string> = {
 };
 
 export function OnCallPage() {
+  const { sendAlert, addOnCallMember, removeOnCallMember } = useProtectedApi();
   const [roster, setRoster] = useState<OnCallMember[]>([]);
   const [services, setServices] = useState<Service[]>([]);
   const [alertHistory, setAlertHistory] = useState<Alert[]>([]);

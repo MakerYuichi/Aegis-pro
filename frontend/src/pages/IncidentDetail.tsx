@@ -4,10 +4,11 @@ import {
   ArrowLeft, RefreshCw, Brain, Zap, GitCommit, GitPullRequest, Code,
   Clock, Activity, Copy, AlertTriangle, ExternalLink, Users, GitMerge,
 } from 'lucide-react';
-import { getIncident, rollbackIncident, isPendingAutoFix, type Incident } from '../utils/api';
+import { getIncident, isPendingAutoFix, useProtectedApi, type Incident } from '../utils/api';
 import { motion } from 'framer-motion';
 
 export function IncidentDetail() {
+  const { rollbackIncident } = useProtectedApi();
   const { id } = useParams<{ id: string }>();
   const [incident, setIncident] = useState<Incident | null>(null);
   const [loading, setLoading] = useState(true);

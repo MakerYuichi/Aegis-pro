@@ -7,13 +7,14 @@ import { useState } from 'react';
 import { Shield, Bell, BellRing, RotateCcw, CheckCircle, AlertCircle, ChevronRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { type OnCallMember, sendAlert } from '../utils/api';
+import { type OnCallMember, useProtectedApi } from '../utils/api';
 
 interface OnCallSummaryProps {
   roster: OnCallMember[];
 }
 
 export function OnCallSummary({ roster }: OnCallSummaryProps) {
+  const { sendAlert } = useProtectedApi();
   const [alertingId, setAlertingId] = useState<string | null>(null);
   const [alertingAll, setAlertingAll] = useState(false);
   const [toast, setToast] = useState<{ text: string; ok: boolean } | null>(null);

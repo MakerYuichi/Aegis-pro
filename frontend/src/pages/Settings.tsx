@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Users, Server, Plus, Trash2, Save, Search, Edit, X, Database, AlertCircle, Clock } from 'lucide-react';
-import { getServices, getOnCallRoster, addOnCallMember, removeOnCallMember, createService, deleteService, type OnCallMember } from '../utils/api';
+import { getServices, getOnCallRoster, useProtectedApi, type OnCallMember } from '../utils/api';
 import { motion } from 'framer-motion';
 
 interface TeamMemberSettings {
@@ -33,6 +33,7 @@ interface EscalationPolicy {
 }
 
 export function Settings() {
+  const { addOnCallMember, removeOnCallMember, createService, deleteService } = useProtectedApi();
   const [teamMembers, setTeamMembers] = useState<TeamMemberSettings[]>([]);
   const [services, setServices] = useState<ServiceSettings[]>([]);
   const [escalationPolicies, setEscalationPolicies] = useState<EscalationPolicy[]>([

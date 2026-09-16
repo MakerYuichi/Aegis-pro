@@ -17,7 +17,7 @@ import {
   Search, Clock, Code, Eye, Zap, ChevronDown, ChevronUp, X,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { getIncidents, approveFix, rejectFix, type Incident } from '../utils/api';
+import { getIncidents, useProtectedApi, type Incident } from '../utils/api';
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -273,6 +273,7 @@ function ApprovalModal({
 // ── Main page ──────────────────────────────────────────────────────────────
 
 export function ApprovalDashboard() {
+  const { approveFix, rejectFix } = useProtectedApi();
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState<string | null>(null);

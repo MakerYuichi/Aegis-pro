@@ -2,7 +2,7 @@
 
 # Core
 fastapi==0.115.11
-uvicorn>=0.34.0
+uvicorn[standard]>=0.34.0
 pydantic==2.5.3
 pydantic-settings==2.1.0
 python-dotenv==1.0.1
@@ -20,7 +20,7 @@ celery==5.3.6
 torch==2.2.2
 sentence-transformers==2.2.2
 huggingface-hub==0.19.4
-groq==0.4.2
+groq>=0.13.0
 transformers==4.36.2
 
 # HTTP

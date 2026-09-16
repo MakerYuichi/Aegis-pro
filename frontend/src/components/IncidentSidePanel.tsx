@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { X, RefreshCw, Brain, Zap, GitCommit, GitPullRequest, User, ThumbsUp, Shield, AlertTriangle } from 'lucide-react';
-import { getIncident, rollbackIncident, approveFix, type Incident } from '../utils/api';
+import { getIncident, useProtectedApi, type Incident } from '../utils/api';
 import { motion, AnimatePresence } from 'framer-motion';
 
 interface IncidentSidePanelProps {
@@ -9,6 +9,7 @@ interface IncidentSidePanelProps {
 }
 
 export function IncidentSidePanel({ incidentId, onClose }: IncidentSidePanelProps) {
+  const { rollbackIncident, approveFix } = useProtectedApi();
   const [incident, setIncident] = useState<Incident | null>(null);
   const [loading, setLoading] = useState(false);
   const [rollingBack, setRollingBack] = useState(false);
