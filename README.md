@@ -121,7 +121,8 @@ curl -X POST http://localhost:8000/webhook/alert \
 | Groq LLM root cause analysis + confidence scoring | ✅ |
 | GitHub integration — fetches failing code + git blame | ✅ |
 | Auto-fix generation — AI diff with human approval flow | ✅ |
-| Automatic PR creation post-approval | ✅ |
+| PR payload staging + approval dashboard | ✅ |
+| Real GitHub PR creation | 🚧 [#30](https://github.com/MakerYuichi/Aegis-pro/issues/30) |
 | Real-time WebSocket dashboard | ✅ |
 | On-call rotation management | ✅ |
 | Service dependency graph (D3.js) | ✅ |
@@ -199,28 +200,6 @@ curl -X POST http://localhost:8000/api/v1/services/seed
 # API: http://localhost:8000
 # Dashboard: http://localhost:5173
 # API Docs: http://localhost:8000/docs
-```
- 
-### Environment Variables
-```env
-# Slack
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_SIGNING_SECRET=...
-SLACK_WEBHOOK_URL=https://hooks.slack.com/...
- 
-# GitHub
-GITHUB_TOKEN=ghp_...
-GITHUB_ORG=your-org
- 
-# LLM
-GROQ_API_KEY=gsk_...
- 
-# Database (auto-configured in Docker)
-DATABASE_URL=postgresql+asyncpg://aegis:aegis@localhost/aegis
-REDIS_URL=redis://localhost:6379
-```
- 
----
  
 ## API Reference
  
@@ -257,6 +236,48 @@ Existing tools like PagerDuty and Datadog tell you *that* something broke. AEGIS
  
 The auto-fix generation with human approval is what no existing tool does end-to-end: detect → diagnose → fetch code → generate fix → create PR.
  
+---
+
+## Security Controls
+
+### Authentication
+All mutating endpoints (`/rollback`, `/declare`, `/approve`, `/seed`) require a valid Auth0 JWT. Read-only endpoints remain public. Token validation is enforced server-side via the `auth0-fastapi-api` SDK — see `src/auth.py`.
+
+### Auto-Fix Safety Mode
+
+AEGIS PRO can generate fix diffs without ever writing to your GitHub repos. Control this with `AUTO_FIX_MODE`:
+
+| Mode | Behavior | Use Case |
+|---|---|---|
+| `read_only` **(default)** | Generates diff, never touches GitHub write APIs | Compliance, audits, read-only environments |
+| `pr_draft` | Stages PR payload, requires dashboard approval to push | Standard production deployment |
+| `auto_pr` | Creates PR immediately (requires real GitHub integration — see [#30](https://github.com/MakerYuichi/Aegis-pro/issues/30)) | Trusted dev/staging environments |
+
+**Default is `read_only`.** A fresh install will never modify your repos until you explicitly opt in. Verified by [`tests/test_autofix_modes.py`](backend/orchestrator/tests/test_autofix_modes.py).
+
+### LLM Data Residency
+
+Your codebase and incident data never have to leave your infrastructure. Set `LLM_PROVIDER` to route analysis to your own model:
+
+| Provider | Env | Notes |
+|---|---|---|
+| `groq` (default) | `GROQ_API_KEY` | Fast hosted inference |
+| `azure` | `AZURE_OPENAI_*` | Your Azure OpenAI tenant |
+| `ollama` | `OLLAMA_BASE_URL` | Fully self-hosted, air-gapped |
+| `gemini` | `GOOGLE_API_KEY` | Google Gemini |
+| `openrouter` | `OPENROUTER_API_KEY` | OpenRouter |
+| `mock` | none | Deterministic — for CI and DEMO_MODE |
+
+Configure `LLM_FALLBACKS=gemini,openrouter` to add a resilience chain.
+
+### Read-Only by Default
+
+Two controls are safe-by-default on a fresh install:
+- `AUTO_FIX_MODE=read_only` — no GitHub writes
+- `LLM_PROVIDER` must be set explicitly if you don't want Groq
+
+This means cloning the repo and running `docker-compose up` cannot modify your infrastructure or leak code without your explicit opt-in.
+
 ---
  
 ## Built With
