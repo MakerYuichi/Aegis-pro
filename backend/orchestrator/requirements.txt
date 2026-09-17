@@ -13,7 +13,7 @@ asyncpg==0.29.0
 pgvector==0.2.5
 
 # Cache & Queue
-redis==5.0.1
+redis==8.1.0
 celery==5.3.6
 
 # AI/ML
