@@ -33,5 +33,7 @@ jobs:
           LLM_FALLBACKS: ""
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test
           REDIS_URL: redis://localhost:6379/0
+          AUTH0_DOMAIN: test-tenant.us.auth0.com
+          AUTH0_AUDIENCE: https://test-api
         run: |
           pytest tests/ -v --tb=short
