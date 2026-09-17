@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI):
     app.state.db_connected = db_connected
     app.state.redis_connected = redis_connected
     app.state.incident_service = IncidentService()
+    logger.info(f"🔒 AUTO_FIX_MODE={settings.AUTO_FIX_MODE}")
     
     logger.info("✅ AEGIS PRO is ready!")
     yield
@@ -107,6 +108,7 @@ async def health_check():
     return {
         "status": "healthy" if db_status and redis_status else "degraded",
         "version": "1.0.0",
+        "auto_fix_mode": settings.AUTO_FIX_MODE,
         "services": {
             "database": "connected" if db_status else "disconnected",
             "redis": "connected" if redis_status else "disconnected"
