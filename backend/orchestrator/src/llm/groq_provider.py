@@ -29,28 +29,48 @@ class GroqProvider(LLMProvider):
             self._client = AsyncGroq(api_key=settings.GROQ_API_KEY)
         return self._client
 
+    @staticmethod
+    def _native_response_format(response_format: str) -> Optional[dict]:
+        """
+        Map our cross-provider response_format to Groq's native format.
+
+        Groq follows OpenAI's JSON mode: both objects and arrays must be
+        requested as {"type": "json_object"}. The caller is responsible for
+        knowing whether the content is an object or an array.
+        """
+        if response_format in ("json_object", "json_array"):
+            return {"type": "json_object"}
+        return None
+
     async def complete(
         self,
         prompt: str,
         system: Optional[str] = None,
         temperature: float = 0.2,
         max_tokens: int = 2048,
+        response_format: str = "text",
     ) -> LLMResponse:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        native_format = self._native_response_format(response_format)
+
         last_error: Optional[Exception] = None
         for model in self._models:
             try:
                 logger.info(f"🔄 Groq trying model: {model}")
-                resp = await self._client_instance().chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+                kwargs = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                }
+                if native_format:
+                    kwargs["response_format"] = native_format
+
+                resp = await self._client_instance().chat.completions.create(**kwargs)
                 content = resp.choices[0].message.content or ""
                 return LLMResponse(
                     content=content,

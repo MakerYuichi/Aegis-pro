@@ -25,6 +25,7 @@ class LLMChain:
         system: str | None = None,
         temperature: float = 0.2,
         max_tokens: int = 2048,
+        response_format: str = "text",
     ) -> LLMResponse | None:
         errors = []
         for provider in self._providers:
@@ -35,6 +36,7 @@ class LLMChain:
                     system=system,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    response_format=response_format,
                 )
                 logger.info(f"✅ Provider {provider.name} succeeded ({resp.model})")
                 return resp
