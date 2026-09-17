@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     SLACK_SIGNING_SECRET: Optional[str] = None
     SLACK_APP_TOKEN: Optional[str] = None
     SLACK_WEBHOOK_URL: Optional[str] = None
+    
+    # Auto-fix safety
+    AUTO_FIX_MODE: str = "read_only"
 
     # Kubernetes (optional)
     K8S_API_URL: Optional[str] = None
