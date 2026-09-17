@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/backend/orchestrator"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    ignore:
+      # sentence-transformers==2.2.2 requires transformers<5.0.0
+      - dependency-name: "transformers"
+        versions: [">=5.0.0"]
+      # Major bumps need manual review
+      - dependency-name: "torch"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "groq"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "openai"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

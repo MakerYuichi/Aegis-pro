@@ -4,8 +4,6 @@ from src.services.llm_service import LLMService
 from loguru import logger
 import re
 import json
-# NOTE: httpx import removed — no longer needed after LLM chain refactor
-
 
 class GitHubService:
     def __init__(self):
