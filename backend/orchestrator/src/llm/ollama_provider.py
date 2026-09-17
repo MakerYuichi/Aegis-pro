@@ -22,6 +22,7 @@ class OllamaProvider(LLMProvider):
         system: Optional[str] = None,
         temperature: float = 0.2,
         max_tokens: int = 2048,
+        response_format: str = "text",
     ) -> LLMResponse:
         payload = {
             "model": self._model,
@@ -31,6 +32,12 @@ class OllamaProvider(LLMProvider):
         }
         if system:
             payload["system"] = system
+
+        # Ollama supports format: "json" for structured output. It does not
+        # distinguish object vs array — both produce valid JSON. Map both
+        # json_* values to "json".
+        if response_format in ("json_object", "json_array"):
+            payload["format"] = "json"
 
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
