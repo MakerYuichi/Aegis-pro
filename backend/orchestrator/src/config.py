@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     
     # Auto-fix safety
     AUTO_FIX_MODE: str = "read_only"
+    
+    # Demo mode — enables public demo endpoints and mock services
+    DEMO_MODE: bool = False
 
     # Kubernetes (optional)
     K8S_API_URL: Optional[str] = None
