@@ -10,7 +10,7 @@ from src.services.rag_service import RAGService
 from src.services.autofix_service import AutoFixService
 from src.services.oncall_service import OnCallService
 from src.services.kubernetes_service import KubernetesService
-from src.services.slack_service import SlackService
+from src.services.factory import get_github_service
 from src.services.alert_service import AlertService
 from src.config import settings
 from src.websocket import manager
@@ -82,9 +82,8 @@ class IncidentService:
         
         github_context = {}
         try:
-            if service.get("repo_name") and settings.GITHUB_TOKEN:
-                from src.services.github_service import GitHubService
-                github = GitHubService()
+            if service.get("repo_name"):
+                github = get_github_service()
                 
                 github_context["recent_prs"] = await github.get_recent_prs(service["repo_name"])
                 
@@ -114,8 +113,7 @@ class IncidentService:
         
         if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
             try:
-                from src.services.github_service import GitHubService
-                github = GitHubService()
+                github = get_github_service()
                 
                 code_context = await github.get_file_content(
                     repo_name=service["repo_name"],
@@ -139,8 +137,7 @@ class IncidentService:
         
         if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
             try:
-                from src.services.github_service import GitHubService
-                github = GitHubService()
+                github = get_github_service()
                 
                 related_prs = await github.get_related_prs(
                     repo_name=service["repo_name"],
