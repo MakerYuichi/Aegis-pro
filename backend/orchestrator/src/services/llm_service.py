@@ -42,7 +42,11 @@ class LLMService:
         )
 
         if self.chain:
-            resp = await self.chain.complete(prompt=prompt, system=system)
+            resp = await self.chain.complete(
+                prompt=prompt,
+                system=system,
+                response_format="json_object",
+            )
             if resp:
                 parsed = self._extract_json(resp.content)
                 if parsed:
@@ -125,14 +129,79 @@ class LLMService:
         system: str | None = None,
         temperature: float = 0.2,
         max_tokens: int = 1000,
+        response_format: str = "text",
     ) -> str | None:
-        """Call the chain with a raw prompt. Returns the raw text, or None."""
+        """
+        Call the chain with a raw prompt. Returns the raw text, or None.
+
+        response_format:
+            "text"        — free-form
+            "json_object" — caller expects a JSON object
+            "json_array"  — caller expects a JSON array. Because OpenAI-compatible
+                            JSON mode only emits top-level objects, we wrap the
+                            prompt on the way in and unwrap the response on the
+                            way out so callers get the array they asked for.
+        """
         if not self.chain:
             return None
+
+        effective_format = response_format
+        wrap_array = False
+        if response_format == "json_array":
+            wrap_array = True
+            effective_format = "json_object"
+            prompt = (
+                prompt
+                + "\n\nIMPORTANT: Return the array wrapped in a JSON object "
+                'with a single key "items". Example: {"items": [...]}'
+            )
+
         resp = await self.chain.complete(
             prompt=prompt,
             system=system,
             temperature=temperature,
             max_tokens=max_tokens,
+            response_format=effective_format,
         )
-        return resp.content if resp else None
+        if not resp:
+            return None
+
+        content = resp.content
+
+        if wrap_array:
+            content = self._unwrap_items_array(content)
+
+        return content
+
+    @staticmethod
+    def _unwrap_items_array(content: str) -> str:
+        """
+        Extract the array from {"items": [...]} if the LLM honored the wrapper
+        instruction. If the content is already a bare array, return it as-is.
+        If parsing fails, return content unchanged — the caller's own JSON
+        parser will decide whether to fail.
+        """
+        stripped = content.strip()
+
+        # Already a bare array — nothing to unwrap.
+        if stripped.startswith("["):
+            return stripped
+
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            # Try to find a JSON object anywhere in the text
+            match = re.search(r"\{.*\}", stripped, re.DOTALL)
+            if not match:
+                return content
+            try:
+                parsed = json.loads(match.group())
+            except json.JSONDecodeError:
+                return content
+
+        if isinstance(parsed, dict) and "items" in parsed and isinstance(parsed["items"], list):
+            return json.dumps(parsed["items"])
+
+        # Object but no "items" key — return the raw object as JSON so the
+        # caller sees a deterministic string rather than provider-specific text.
+        return json.dumps(parsed)

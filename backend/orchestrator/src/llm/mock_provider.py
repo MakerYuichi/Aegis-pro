@@ -14,7 +14,8 @@ class MockProvider(LLMProvider):
 
     name = "mock"
 
-    DEFAULT_RESPONSE = (
+    # Incident analysis: single JSON object
+    DEFAULT_OBJECT_RESPONSE = (
         '{"severity": "P2", '
         '"title": "Mock incident", '
         '"root_cause": "NullPointerException at PaymentProcessor.java:442", '
@@ -23,8 +24,22 @@ class MockProvider(LLMProvider):
         '"confidence": 0.85}'
     )
 
-    def __init__(self, canned_response: Optional[str] = None):
-        self._canned = canned_response or self.DEFAULT_RESPONSE
+    # PR scoring: JSON array of scored candidates
+    DEFAULT_ARRAY_RESPONSE = (
+        '[{"number": 42, "score": 0.91, "reason": "modified exact line"}, '
+        '{"number": 43, "score": 0.45, "reason": "unrelated"}]'
+    )
+
+    # Backwards-compat alias — existing tests reference DEFAULT_RESPONSE
+    DEFAULT_RESPONSE = DEFAULT_OBJECT_RESPONSE
+
+    def __init__(
+        self,
+        canned_response: Optional[str] = None,
+        canned_array_response: Optional[str] = None,
+    ):
+        self._canned_object = canned_response or self.DEFAULT_OBJECT_RESPONSE
+        self._canned_array = canned_array_response or self.DEFAULT_ARRAY_RESPONSE
 
     def is_configured(self) -> bool:
         return True
@@ -35,9 +50,17 @@ class MockProvider(LLMProvider):
         system: Optional[str] = None,
         temperature: float = 0.2,
         max_tokens: int = 2048,
+        response_format: str = "text",
     ) -> LLMResponse:
+        if response_format == "json_array":
+            content = self._canned_array
+        else:
+            # "text" and "json_object" both return the object shape.
+            # If a caller wants text, this canned object is still valid text.
+            content = self._canned_object
+
         return LLMResponse(
-            content=self._canned,
+            content=content,
             provider=self.name,
             model="mock-model",
         )

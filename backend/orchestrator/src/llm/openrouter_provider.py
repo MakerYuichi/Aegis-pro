@@ -31,6 +31,7 @@ class OpenRouterProvider(LLMProvider):
         system: Optional[str] = None,
         temperature: float = 0.2,
         max_tokens: int = 2048,
+        response_format: str = "text",
     ) -> LLMResponse:
         messages = []
         if system:
@@ -43,6 +44,12 @@ class OpenRouterProvider(LLMProvider):
             "HTTP-Referer": "http://localhost:8000",
             "X-Title": "AEGIS PRO",
         }
+
+        # Note: response_format is accepted for interface parity but not
+        # forwarded to OpenRouter. Support varies by underlying model, and
+        # sending it unconditionally can produce 400s on models that don't
+        # support native JSON mode. The caller parses JSON from text.
+        # If a specific model is known to support it, add it to an allowlist.
 
         last_error: Optional[Exception] = None
         async with httpx.AsyncClient(timeout=30.0) as client:

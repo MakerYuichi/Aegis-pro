@@ -282,6 +282,7 @@ Provide specific, detailed reasons for each PR. Mention the file name, line numb
                 system=system,
                 temperature=0.3,
                 max_tokens=800,
+                response_format="json_array",
             )
             if not content:
                 logger.warning("LLM chain returned no content; using heuristics")

@@ -35,11 +35,17 @@ class GeminiProvider(LLMProvider):
         system: Optional[str] = None,
         temperature: float = 0.2,
         max_tokens: int = 2048,
+        response_format: str = "text",
     ) -> LLMResponse:
         if not _GEMINI_AVAILABLE:
             raise LLMProviderError("google-generativeai SDK not installed")
 
         full_prompt = f"{system}\n\n{prompt}" if system else prompt
+
+        # Note: response_format is accepted for interface parity but not
+        # forwarded to the Gemini SDK today. The caller is responsible for
+        # parsing JSON out of the text response. See issue #22 (SDK migration)
+        # for a path that adds native structured-output support.
 
         try:
             # The genai SDK is synchronous; wrap it to keep the async contract.

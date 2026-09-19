@@ -29,25 +29,42 @@ class AzureOpenAIProvider(LLMProvider):
             )
         return self._client
 
+    @staticmethod
+    def _native_response_format(response_format: str) -> Optional[dict]:
+        """
+        Map our cross-provider response_format to Azure OpenAI's native format.
+        Same rules as Groq — JSON mode covers both objects and arrays.
+        """
+        if response_format in ("json_object", "json_array"):
+            return {"type": "json_object"}
+        return None
+
     async def complete(
         self,
         prompt: str,
         system: Optional[str] = None,
         temperature: float = 0.2,
         max_tokens: int = 2048,
+        response_format: str = "text",
     ) -> LLMResponse:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        native_format = self._native_response_format(response_format)
+
         try:
-            resp = await self._client_instance().chat.completions.create(
-                model=self._deployment,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            kwargs = {
+                "model": self._deployment,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if native_format:
+                kwargs["response_format"] = native_format
+
+            resp = await self._client_instance().chat.completions.create(**kwargs)
         except Exception as e:
             logger.error(f"Azure OpenAI call failed: {e}")
             raise LLMProviderError(f"Azure provider error: {e}") from e

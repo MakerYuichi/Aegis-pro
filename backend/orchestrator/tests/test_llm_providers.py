@@ -113,3 +113,31 @@ async def test_ollama_provider_posts_to_generate_endpoint(monkeypatch):
         resp = await p.complete("hi")
         assert resp.content == "ollama-ok"
         assert mock_post.call_args[0][0].endswith("/api/generate")
+        
+# ── #21 regression: json_array shape ─────────────────────────
+@pytest.mark.asyncio
+async def test_mock_provider_returns_array_for_json_array_format():
+    """Regression for #21: PR scoring expects a JSON array, not an object."""
+    import json
+    from src.llm.mock_provider import MockProvider
+
+    p = MockProvider()
+    resp = await p.complete("score these PRs", response_format="json_array")
+    parsed = json.loads(resp.content)
+    assert isinstance(parsed, list)
+    assert len(parsed) > 0
+    assert "number" in parsed[0]
+    assert "score" in parsed[0]
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_returns_object_by_default():
+    """Default response_format is 'text' — object shape preserved for incidents."""
+    import json
+    from src.llm.mock_provider import MockProvider
+
+    p = MockProvider()
+    resp = await p.complete("analyze this incident")
+    parsed = json.loads(resp.content)
+    assert isinstance(parsed, dict)
+    assert "severity" in parsed
