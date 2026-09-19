@@ -28,23 +28,23 @@ CREATE TABLE IF NOT EXISTS escalation_policies (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Seed on-call data
+-- Seed on-call data (fictional dataset — see README "Demo Mode")
 INSERT INTO oncall_rotations (service_name, engineer_name, slack_handle, email, phone, role) VALUES
-('payment-api', 'Rahul Kumar', '@rahul', 'rahul@razorpay.com', '+91-98765-43210', 'primary'),
-('payment-api', 'Priya Singh', '@priya', 'priya@razorpay.com', '+91-87654-32109', 'secondary'),
-('payment-api', 'Amit Patel', '@amit', 'amit@razorpay.com', '+91-76543-21098', 'tertiary'),
-('auth', 'Sneha Reddy', '@sneha', 'sneha@razorpay.com', '+91-65432-10987', 'primary'),
-('auth', 'Vikram Shah', '@vikram', 'vikram@razorpay.com', '+91-54321-09876', 'secondary'),
-('ledger', 'Ananya Sharma', '@ananya', 'ananya@razorpay.com', '+91-43210-98765', 'primary'),
-('ledger', 'Arjun Mehta', '@arjun', 'arjun@razorpay.com', '+91-32109-87654', 'secondary'),
-('database', 'Shreya Gupta', '@shreya', 'shreya@razorpay.com', '+91-21098-76543', 'primary'),
-('database', 'Manish Kumar', '@manish', 'manish@razorpay.com', '+91-10987-65432', 'secondary');
+('payment-api', 'Marcus Chen',     '@marcus',  'marcus.chen@acme-demo.com',     '+1-415-555-0101', 'primary'),
+('payment-api', 'Priya Raman',     '@priya',   'priya.raman@acme-demo.com',     '+1-415-555-0102', 'secondary'),
+('payment-api', 'Tomas Alvarez',   '@tomas',   'tomas.alvarez@acme-demo.com',   '+1-415-555-0103', 'tertiary'),
+('auth',        'Dana Okafor',     '@dana',    'dana.okafor@acme-demo.com',     '+1-415-555-0201', 'primary'),
+('auth',        'Wei Zhang',       '@wei',     'wei.zhang@acme-demo.com',       '+1-415-555-0202', 'secondary'),
+('ledger',      'Sofia Marchetti', '@sofia',   'sofia.marchetti@acme-demo.com', '+1-415-555-0301', 'primary'),
+('ledger',      'Ade Balogun',     '@ade',     'ade.balogun@acme-demo.com',     '+1-415-555-0302', 'secondary'),
+('database',    'Rina Takahashi',  '@rina',    'rina.takahashi@acme-demo.com',  '+1-415-555-0401', 'primary'),
+('database',    'Youssef Hamdi',   '@youssef', 'youssef.hamdi@acme-demo.com',   '+1-415-555-0402', 'secondary');
 
 -- Seed escalation policies
 INSERT INTO escalation_policies (service_name, severity, escalation_level, engineer_name, slack_handle, email, phone, wait_time_minutes) VALUES
-('payment-api', 'P0', 1, 'Rahul Kumar', '@rahul', 'rahul@razorpay.com', '+91-98765-43210', 5),
-('payment-api', 'P0', 2, 'Priya Singh', '@priya', 'priya@razorpay.com', '+91-87654-32109', 5),
-('payment-api', 'P0', 3, 'Amit Patel', '@amit', 'amit@razorpay.com', '+91-76543-21098', 5),
-('payment-api', 'P1', 1, 'Priya Singh', '@priya', 'priya@razorpay.com', '+91-87654-32109', 15),
-('auth', 'P0', 1, 'Sneha Reddy', '@sneha', 'sneha@razorpay.com', '+91-65432-10987', 5),
-('auth', 'P0', 2, 'Vikram Shah', '@vikram', 'vikram@razorpay.com', '+91-54321-09876', 10);
+('payment-api', 'P0', 1, 'Marcus Chen',   '@marcus', 'marcus.chen@acme-demo.com',    '+1-415-555-0101', 5),
+('payment-api', 'P0', 2, 'Priya Raman',   '@priya',  'priya.raman@acme-demo.com',    '+1-415-555-0102', 5),
+('payment-api', 'P0', 3, 'Tomas Alvarez', '@tomas',  'tomas.alvarez@acme-demo.com',  '+1-415-555-0103', 5),
+('payment-api', 'P1', 1, 'Priya Raman',   '@priya',  'priya.raman@acme-demo.com',    '+1-415-555-0102', 15),
+('auth',        'P0', 1, 'Dana Okafor',   '@dana',   'dana.okafor@acme-demo.com',    '+1-415-555-0201', 5),
+('auth',        'P0', 2, 'Wei Zhang',     '@wei',    'wei.zhang@acme-demo.com',      '+1-415-555-0202', 10);
