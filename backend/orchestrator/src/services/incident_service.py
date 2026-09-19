@@ -468,18 +468,18 @@ class IncidentService:
             session = await get_db()
             async with session:
                 await session.execute(text("DELETE FROM services"))
-                
+
                 services = [
-                    ("payment-api", "Payment processing", "fastapi", '["@rahul", "@priya"]', '["auth", "ledger"]', True),
-                    ("auth", "Authentication", "auth-service", '["@amit"]', '[]', True),
-                    ("ledger", "Transaction ledger", "ledger-service", '["@sneha"]', '["database"]', True),
-                    ("refund", "Refund processing", "refund-service", '["@ananya"]', '["payment-api"]', False),
-                    ("fraud", "Fraud detection", "fraud-service", '["@raj"]', '["payment-api"]', False),
-                    ("notification", "Notifications", "notification-service", '["@kavya"]', '["user"]', False),
-                    ("user", "User management", "user-service", '["@arjun"]', '[]', False),
-                    ("database", "Database ops", "database-service", '["@shreya"]', '[]', True),
+                    ("payment-api", "Payment processing — cards, wallets, bank transfers", "payment-service", '["@marcus", "@prisha"]', '["auth", "ledger", "fraud"]', True),
+                    ("auth", "Authentication and authorization", "auth-service", '["@dana", "@wei"]', '["user"]', True),
+                    ("ledger", "Transaction ledger and accounting", "ledger-service", '["@sofia", "@ade"]', '["database"]', True),
+                    ("refund", "Refund and reversal processing", "refund-service", '["@nina"]', '["payment-api", "auth"]', False),
+                    ("fraud", "Fraud detection and risk scoring", "fraud-service", '["@omar"]', '["payment-api", "auth"]', False),
+                    ("notification", "Email, SMS, and push notifications", "notification-service", '["@lila"]', '["user"]', False),
+                    ("user", "User profile and KYC management", "user-service", '["@kenji"]', '[]', False),
+                    ("database", "Database operations and migrations", "database-service", '["@rina", "@youssef"]', '[]', True),
                 ]
-                
+
                 for service in services:
                     await session.execute(
                         text("""
@@ -495,7 +495,7 @@ class IncidentService:
                             "is_critical": service[5]
                         }
                     )
-                
+
                 await session.commit()
                 return {"status": "seeded", "count": len(services)}
         except Exception as e:
@@ -608,27 +608,27 @@ class IncidentService:
     
     def _mock_service(self, service_name: str) -> dict:
         services = {
-            "payment-api": {"name": "payment-api", "on_call": ["@rahul", "@priya"], "dependencies": ["auth", "ledger"]},
-            "auth": {"name": "auth", "on_call": ["@amit"], "dependencies": []},
-            "ledger": {"name": "ledger", "on_call": ["@sneha"], "dependencies": ["database"]},
-            "refund": {"name": "refund", "on_call": ["@ananya"], "dependencies": ["payment-api"]},
-            "fraud": {"name": "fraud", "on_call": ["@raj"], "dependencies": ["payment-api"]},
-            "notification": {"name": "notification", "on_call": ["@kavya"], "dependencies": ["user"]},
-            "user": {"name": "user", "on_call": ["@arjun"], "dependencies": []},
-            "database": {"name": "database", "on_call": ["@shreya"], "dependencies": []}
+            "payment-api": {"name": "payment-api", "on_call": ["@marcus", "@prisha"], "dependencies": ["auth", "ledger", "fraud"]},
+            "auth": {"name": "auth", "on_call": ["@dana", "@wei"], "dependencies": ["user"]},
+            "ledger": {"name": "ledger", "on_call": ["@sofia", "@ade"], "dependencies": ["database"]},
+            "refund": {"name": "refund", "on_call": ["@nina"], "dependencies": ["payment-api", "auth"]},
+            "fraud": {"name": "fraud", "on_call": ["@omar"], "dependencies": ["payment-api", "auth"]},
+            "notification": {"name": "notification", "on_call": ["@lila"], "dependencies": ["user"]},
+            "user": {"name": "user", "on_call": ["@kenji"], "dependencies": []},
+            "database": {"name": "database", "on_call": ["@rina", "@youssef"], "dependencies": []}
         }
         return services.get(service_name, {"name": service_name, "on_call": [], "dependencies": []})
     
     def _mock_services_list(self) -> list:
         return [
-            {"name": "payment-api", "description": "Payment processing", "on_call": ["@rahul", "@priya"], "dependencies": ["auth", "ledger"], "is_critical": True},
-            {"name": "auth", "description": "Authentication", "on_call": ["@amit"], "dependencies": [], "is_critical": True},
-            {"name": "ledger", "description": "Transaction ledger", "on_call": ["@sneha"], "dependencies": ["database"], "is_critical": True},
-            {"name": "refund", "description": "Refund processing", "on_call": ["@ananya"], "dependencies": ["payment-api"], "is_critical": False},
-            {"name": "fraud", "description": "Fraud detection", "on_call": ["@raj"], "dependencies": ["payment-api"], "is_critical": False},
-            {"name": "notification", "description": "Notifications", "on_call": ["@kavya"], "dependencies": ["user"], "is_critical": False},
-            {"name": "user", "description": "User management", "on_call": ["@arjun"], "dependencies": [], "is_critical": False},
-            {"name": "database", "description": "Database ops", "on_call": ["@shreya"], "dependencies": [], "is_critical": True},
+            {"name": "payment-api",  "description": "Payment processing — cards, wallets, bank transfers", "on_call": ["@marcus", "@prisha"], "dependencies": ["auth", "ledger", "fraud"], "is_critical": True},
+            {"name": "auth",         "description": "Authentication and authorization",                    "on_call": ["@dana", "@wei"],     "dependencies": ["user"],                     "is_critical": True},
+            {"name": "ledger",       "description": "Transaction ledger and accounting",                    "on_call": ["@sofia", "@ade"],    "dependencies": ["database"],                 "is_critical": True},
+            {"name": "refund",       "description": "Refund and reversal processing",                       "on_call": ["@nina"],             "dependencies": ["payment-api", "auth"],      "is_critical": False},
+            {"name": "fraud",        "description": "Fraud detection and risk scoring",                     "on_call": ["@omar"],             "dependencies": ["payment-api", "auth"],      "is_critical": False},
+            {"name": "notification", "description": "Email, SMS, and push notifications",                   "on_call": ["@lila"],             "dependencies": ["user"],                     "is_critical": False},
+            {"name": "user",         "description": "User profile and KYC management",                      "on_call": ["@kenji"],            "dependencies": [],                           "is_critical": False},
+            {"name": "database",     "description": "Database operations and migrations",                   "on_call": ["@rina", "@youssef"], "dependencies": [],                           "is_critical": True},
         ]
     
     async def save_incident_metadata(self, incident_id: str, extra_metadata: dict) -> dict:
