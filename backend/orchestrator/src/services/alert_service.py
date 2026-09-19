@@ -1,6 +1,6 @@
 from typing import Optional
 from loguru import logger
-from src.services.slack_service import SlackService
+from src.services.factory import get_slack_service
 from src.services.oncall_service import OnCallService
 from sqlalchemy import text
 from src.database import get_db
@@ -8,7 +8,7 @@ from datetime import datetime
 
 class AlertService:
     def __init__(self):
-        self.slack = SlackService()
+        self.slack = get_slack_service()
         self.oncall = OnCallService()
         logger.info("✅ AlertService initialized (Slack only)")
 

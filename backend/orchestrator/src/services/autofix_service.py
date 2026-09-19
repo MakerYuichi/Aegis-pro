@@ -1,6 +1,6 @@
 from sqlalchemy import text
 from src.database import get_db
-from src.services.github_service import GitHubService
+from src.services.factory import get_github_service
 from src.services.llm_service import LLMService
 from src.config import settings
 from loguru import logger
@@ -9,7 +9,7 @@ import json
 
 class AutoFixService:
     def __init__(self):
-        self.github = GitHubService()
+        self.github = get_github_service()
         self.llm = LLMService()
         logger.info("✅ AutoFixService initialized")
 
@@ -294,7 +294,7 @@ class AutoFixService:
                 "status": "approved",
                 "pr": pr_info,
                 "auto_fix": auto_fix,
-                "message": "✅ Fix approved and PR created!",
+                "message": message,
             }
 
         except Exception as e:
