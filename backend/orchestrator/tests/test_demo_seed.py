@@ -1,22 +1,3 @@
-"""
-Tests for the demo seed SQL and the startup embedding backfill.
-
-The seed SQL lives at database/migrations/005_seed_demo_incidents.sql in
-the repo root. docker-compose mounts ./database into the orchestrator
-container at /database (read-only), so the container-relative path is
-/database/migrations/005_seed_demo_incidents.sql.
-
-Two environments, one resolution strategy:
-  - Inside the container: /app/tests/test_demo_seed.py -> /database
-  - On the host:          <repo>/backend/orchestrator/tests/test_demo_seed.py
-                          -> <repo>/database
-
-The function below walks up from __file__ and tries each plausible path
-until it finds the file. If it can't find it anywhere, the test fails
-loudly with a clear message — it does NOT skip. A missing file means the
-mount is broken, and we want to know.
-"""
-
 from pathlib import Path
 
 import pytest
@@ -24,26 +5,31 @@ import pytest
 
 def _find_migration_path() -> Path:
     """Resolve the seed SQL path. Raises if not found."""
+    filename = "005_seed_demo_incidents.sql"
+
+    # 1. Container path (docker-compose :ro mount)
+    container_path = Path(f"/database/migrations/{filename}")
+    if container_path.exists():
+        return container_path
+
+    # 2. Walk up from the test file looking for database/migrations/<file>
     here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "database" / "migrations" / filename
+        if candidate.exists():
+            return candidate
 
-    candidates = [
-        # Container: /app/tests/test_demo_seed.py -> /database/migrations
-        Path("/database/migrations/005_seed_demo_incidents.sql"),
-        # Host: <repo>/backend/orchestrator/tests/... -> <repo>/database/migrations
-        here.parents[2] / "database/migrations/005_seed_demo_incidents.sql",
-        # Belt-and-suspenders: some layouts put tests/ one level deeper
-        here.parents[1] / "database/migrations/005_seed_demo_incidents.sql",
-    ]
-
-    for c in candidates:
-        if c.exists():
-            return c
-
+    # 3. Explicit fallback: repo root as inferred from CI's working dir
+    #    (helpful error message when the file truly isn't there)
     raise FileNotFoundError(
-        "005_seed_demo_incidents.sql not found. Checked:\n"
-        + "\n".join(f"  - {c}" for c in candidates)
-        + "\n\nIf you're inside the orchestrator container, verify the "
-        "docker-compose volume mount './database:/database:ro' is present."
+        f"{filename} not found. Checked:\n"
+        f"  - {container_path}\n"
+        f"  - walked up from {here} looking for database/migrations/{filename}\n"
+        "\nIf you're inside the orchestrator container, verify the "
+        "docker-compose volume mount './database:/database:ro' is present. "
+        "If you're in CI, ensure the workflow checks out the repo and runs "
+        "pytest from the repo root (or that backend/orchestrator is a "
+        "subdirectory that has database/ as a sibling)."
     )
 
 
