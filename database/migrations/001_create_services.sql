@@ -18,7 +18,7 @@ CREATE INDEX idx_services_is_critical ON services(is_critical);
 
 -- Seed service catalog (fictional dataset — see README "Demo Mode")
 INSERT INTO services (name, description, repo_name, on_call, dependencies, is_critical) VALUES
-('payment-api', 'Payment processing — cards, wallets, bank transfers', 'payment-service', '["@marcus", "@priya"]', '["auth", "ledger", "fraud"]', TRUE),
+('payment-api', 'Payment processing — cards, wallets, bank transfers', 'payment-service', '["@marcus", "@prisha"]', '["auth", "ledger", "fraud"]', TRUE),
 ('auth',        'Authentication and authorization',                    'auth-service',    '["@dana", "@wei"]',     '["user"]',                   TRUE),
 ('ledger',      'Transaction ledger and accounting',                   'ledger-service',  '["@sofia", "@ade"]',    '["database"]',               TRUE),
 ('refund',      'Refund and reversal processing',                      'refund-service',  '["@nina"]',             '["payment-api", "auth"]',    FALSE),

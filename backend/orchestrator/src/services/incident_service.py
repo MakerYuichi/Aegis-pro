@@ -470,7 +470,7 @@ class IncidentService:
                 await session.execute(text("DELETE FROM services"))
 
                 services = [
-                    ("payment-api", "Payment processing — cards, wallets, bank transfers", "payment-service", '["@marcus", "@priya"]', '["auth", "ledger", "fraud"]', True),
+                    ("payment-api", "Payment processing — cards, wallets, bank transfers", "payment-service", '["@marcus", "@prisha"]', '["auth", "ledger", "fraud"]', True),
                     ("auth", "Authentication and authorization", "auth-service", '["@dana", "@wei"]', '["user"]', True),
                     ("ledger", "Transaction ledger and accounting", "ledger-service", '["@sofia", "@ade"]', '["database"]', True),
                     ("refund", "Refund and reversal processing", "refund-service", '["@nina"]', '["payment-api", "auth"]', False),
@@ -608,7 +608,7 @@ class IncidentService:
     
     def _mock_service(self, service_name: str) -> dict:
         services = {
-            "payment-api": {"name": "payment-api", "on_call": ["@marcus", "@priya"], "dependencies": ["auth", "ledger", "fraud"]},
+            "payment-api": {"name": "payment-api", "on_call": ["@marcus", "@prisha"], "dependencies": ["auth", "ledger", "fraud"]},
             "auth": {"name": "auth", "on_call": ["@dana", "@wei"], "dependencies": ["user"]},
             "ledger": {"name": "ledger", "on_call": ["@sofia", "@ade"], "dependencies": ["database"]},
             "refund": {"name": "refund", "on_call": ["@nina"], "dependencies": ["payment-api", "auth"]},
@@ -621,7 +621,7 @@ class IncidentService:
     
     def _mock_services_list(self) -> list:
         return [
-            {"name": "payment-api",  "description": "Payment processing — cards, wallets, bank transfers", "on_call": ["@marcus", "@priya"], "dependencies": ["auth", "ledger", "fraud"], "is_critical": True},
+            {"name": "payment-api",  "description": "Payment processing — cards, wallets, bank transfers", "on_call": ["@marcus", "@prisha"], "dependencies": ["auth", "ledger", "fraud"], "is_critical": True},
             {"name": "auth",         "description": "Authentication and authorization",                    "on_call": ["@dana", "@wei"],     "dependencies": ["user"],                     "is_critical": True},
             {"name": "ledger",       "description": "Transaction ledger and accounting",                    "on_call": ["@sofia", "@ade"],    "dependencies": ["database"],                 "is_critical": True},
             {"name": "refund",       "description": "Refund and reversal processing",                       "on_call": ["@nina"],             "dependencies": ["payment-api", "auth"],      "is_critical": False},
