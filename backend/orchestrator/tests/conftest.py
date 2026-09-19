@@ -12,7 +12,8 @@ import pytest
 def _reset_settings(monkeypatch):
     """
     Ensure each test gets a fresh Settings object loaded from the current
-    environment, and that no cached provider chain leaks between tests.
+    environment, and that no cached provider chain or service factory
+    leaks between tests.
     """
     import importlib
     from src import config
@@ -20,8 +21,12 @@ def _reset_settings(monkeypatch):
     # Reload config so Settings() re-reads env vars set by this test
     importlib.reload(config)
 
-    # Clear any cached providers
-    from src.llm import factory
-    importlib.reload(factory)
+    # Reload both factories so their references to `config` and `settings`
+    # are fresh
+    from src.llm import factory as llm_factory
+    importlib.reload(llm_factory)
+
+    from src.services import factory as svc_factory
+    importlib.reload(svc_factory)
 
     yield
