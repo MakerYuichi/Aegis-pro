@@ -283,7 +283,7 @@ INSERT INTO incidents (
   'kubectl rollout restart deploy/ledger-service -n production',
   0.89,
   NOW() - INTERVAL '5 days',
-  '{"demo_seed": true, "auto_fix": {"status": "pr_draft", "approved": false, "requires_approval": true, "mode": "pr_draft", "approval_url": "/approve/INC-20260911-D1E2F3", "fix_preview": "@@ -116,3 +116,3 @@\\n- key = f\\"{entry.ts}:{entry.account}\\"\\n+ key = str(uuid.uuid7())", "explanation": "Replace the timestamp-derived idempotency key with UUIDv7, which is monotonic and collision-free under burst traffic.", "pr": {"status": "pr_draft", "approval_required": true, "approval_url": "/approve/INC-20260911-D1E2F3"}}}'::jsonb,
+  '{"demo_seed": true, "auto_fix": {"status": "pr_draft", "approved": false, "requires_approval": true, "mode": "pr_draft", "approval_url": "/approve/INC-20260911-D1E2F3", "fix_preview": "@@ -116,3 +116,3 @@ - key = f(entry.ts):(entry.account) + key = str(uuid.uuid7())", "explanation": "Replace the timestamp-derived idempotency key with UUIDv7, which is monotonic and collision-free under burst traffic.", "pr": {"status": "pr_draft", "approval_required": true, "approval_url": "/approve/INC-20260911-D1E2F3"}}}'::jsonb,
   '["ledger", "database", "payment-api"]'::jsonb
 ),
 
