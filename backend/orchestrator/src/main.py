@@ -40,6 +40,15 @@ async def lifespan(app: FastAPI):
     app.state.db_connected = db_connected
     app.state.redis_connected = redis_connected
     app.state.incident_service = IncidentService()
+    if settings.DEMO_MODE:
+        try:
+            from src.demo.seed_backfill import backfill_demo_embeddings
+            from src.services.rag_service import RAGService
+
+            rag = RAGService()
+            await backfill_demo_embeddings(rag)
+        except Exception as e:
+            logger.warning(f"⚠️ Demo embedding backfill failed: {e}")
     logger.info(f"🔒 AUTO_FIX_MODE={settings.AUTO_FIX_MODE}")
     
     logger.info("✅ AEGIS PRO is ready!")
@@ -109,6 +118,7 @@ async def health_check():
         "status": "healthy" if db_status and redis_status else "degraded",
         "version": "1.0.0",
         "auto_fix_mode": settings.AUTO_FIX_MODE,
+        "demo_mode": settings.DEMO_MODE,
         "services": {
             "database": "connected" if db_status else "disconnected",
             "redis": "connected" if redis_status else "disconnected"
