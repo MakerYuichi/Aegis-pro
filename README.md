@@ -201,6 +201,73 @@ curl -X POST http://localhost:8000/api/v1/services/seed
 # Dashboard: http://localhost:5173
 # API Docs: http://localhost:8000/docs
  
+ ## Run the Demo
+
+See AEGIS PRO against a fully-populated fictional company — 8 services,
+11 incidents, 27 on-call engineers, working RAG — with zero external
+credentials. No GitHub token, no Slack workspace, no Groq key.
+
+**Requirements:** Docker, Docker Compose, and the React app running
+via `npm run dev`.
+
+```bash
+# Clone
+git clone https://github.com/MakerYuichi/Aegis-pro.git
+cd Aegis-pro
+
+# Bring up the stack in demo mode on a fresh volume
+docker-compose --env-file demo.env down -v
+docker-compose --env-file demo.env up -d
+
+# In another terminal, start the frontend
+cd frontend && npm install && npm run dev
+```
+
+Open `http://localhost:5173`. Sign in with Auth0 (any email — this is
+your local instance) and the dashboard loads with the Acme seed.
+
+### What demo mode does
+
+| Setting | Production default | Demo value | Effect |
+|---|---|---|---|
+| `DEMO_MODE` | `false` | `true` | Seed backfill runs on startup; mock services replace GitHub and Slack |
+| `LLM_PROVIDER` | `groq` | `mock` | No network calls to any LLM; deterministic responses |
+| `LLM_FALLBACKS` | `gemini,openrouter` | *(empty)* | Mock is the only provider; no fallback chain |
+| `AUTO_FIX_MODE` | `read_only` | `pr_draft` | Fixes are staged for approval; no real PRs are created |
+
+### Verify it worked
+
+```bash
+# 11 incidents seeded
+docker-compose exec postgres psql -U postgres -d aegis \
+  -c "SELECT COUNT(*) FROM incidents WHERE extra_metadata->>'demo_seed' = 'true';"
+
+# 11 embeddings backfilled (expect a log line, then this count)
+docker-compose logs orchestrator | grep backfill
+docker-compose exec postgres psql -U postgres -d aegis \
+  -c "SELECT COUNT(*) FROM incidents WHERE embedding IS NOT NULL AND extra_metadata->>'demo_seed' = 'true';"
+
+# demo_mode reported in health
+curl http://localhost:8000/health 
+```
+
+Expected:
+- First query returns `11`
+- Log line: `📚 Demo embedding backfill: embedded 11 incidents`
+- Second query returns `11`
+- Health check response contains `"demo_mode": true`
+
+### Switching back to production mode
+
+```bash
+docker-compose down
+docker-compose up -d
+```
+
+Without `--env-file demo.env`, the environment block falls back to its
+defaults: `DEMO_MODE=false`, `LLM_PROVIDER=groq`, `AUTO_FIX_MODE=read_only`.
+Your personal `backend/orchestrator/.env` supplies the real credentials.
+
 ## API Reference
  
 | Endpoint | Method | Description |
