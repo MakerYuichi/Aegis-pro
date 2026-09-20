@@ -82,12 +82,12 @@ def _extract_host_and_path(raw: str) -> tuple[str, str]:
     s = raw.strip()
 
     # SSH form: git@github.com:org/repo.git
-    ssh = re.match(r"^[a-zA-Z0-9._-]+@([A-Za-z0-9.-]+):(.+)$", s)
+    ssh = re.match(r"^[a-zA-Z0-9._-]{0,64}@([A-Za-z0-9.-]{0,255}):(.{0,4096})$", s)
     if ssh:
         return ssh.group(1).lower(), ssh.group(2)
 
     # URL form with scheme
-    url = re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://([A-Za-z0-9.-]+)/?(.*)$", s)
+    url = re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]{0,63}://([A-Za-z0-9.-]{0,255})/?(.*)$", s)
     if url:
         return url.group(1).lower(), url.group(2)
 
