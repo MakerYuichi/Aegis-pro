@@ -106,22 +106,21 @@ export type GitHubMetadata = {
     title: string;
     author: string;
     url: string;
-    merged_at: string;
-    additions: number;
-    deletions: number;
-    files: string[];
+    merged_at?: string;
   }>;
-  blame?: GitBlame;
   related_prs?: Array<{
-    number: number;
-    title: string;
+    sha?: string;
+    commit_message?: string;
+    commit_date?: string;
+    number?: number;
+    title?: string;
     author: string;
-    url: string;
+    url?: string;
     merged_at?: string;
     relevance_score?: number;
     reason?: string;
-    files?: string[];
   }>;
+  blame?: GitBlame;
 };
 
 export type Incident = {
@@ -133,6 +132,9 @@ export type Incident = {
   title: string;
   description: string;
   stack_trace?: string;
+  exception_type?: string;
+  file_path?: string;
+  line_number?: number;
   root_cause: string;
   suggested_fix: string;
   rollback_command: string;
@@ -147,6 +149,13 @@ export type Incident = {
     github?: GitHubMetadata;
     code_context?: CodeContext;
     auto_fix?: AutoFix;
+    demo_quality?: {
+      confidence: 'high' | 'low' | 'fallback';
+      real_file: boolean;
+      category: string;
+      blast_radius_reason: string;
+      related_lines: number[];
+    };
   };
 };
 
@@ -275,13 +284,35 @@ export type DemoParsed = {
   language_hint: string;
 };
 
+export type DemoTimings = {
+  try_check_ms?: number;
+  parse_ms?: number;
+  fetch_meta_ms?: number;
+  fetch_tree_ms?: number;
+  select_file_ms?: number;
+  fetch_file_ms?: number;
+  fetch_commits_ms?: number;
+  fetch_contributors_ms?: number;
+  fetch_prs_ms?: number;
+  analyze_ms?: number;
+  generate_ms?: number;
+  total_ms: number;
+};
+
+export type DemoMeta = {
+  tries_remaining: number;
+  timings?: DemoTimings;
+};
+
 export type DemoGenerateResponse =
-  | { incident: Incident; parsed: DemoParsed }
+  | { incident: Incident; parsed: DemoParsed; meta: DemoMeta }
   | {
-      error: string;
+      error?: string;
       reason: string;
       detail: string;
-      supported_shapes: string[];
+      supported_shapes?: string[];
+      signup_required?: boolean;
+      tries_remaining?: number;
     };
 
 export const getDemoDefault = async (): Promise<Incident> => {
@@ -300,6 +331,7 @@ export const resetDemo = async (): Promise<{ status: string }> => {
   const response = await api.post('/api/v1/demo/reset');
   return response.data;
 };
+
 /**
  * Returns an axios instance wired with the current Auth0 access token.
  * Use for protected (mutating) endpoints only.

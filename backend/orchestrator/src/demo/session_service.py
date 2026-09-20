@@ -12,6 +12,11 @@ from src.demo.repo_parser import ParseResult
 
 RETENTION_DAYS = 30
 
+# Successful analyses per session before the demo asks for signup.
+# Failed parses and "not code" responses don't count against this — see
+# count_successful_tries.
+MAX_SUCCESSFUL_TRIES = 3
+
 
 async def record_session(
     session_id: str,
@@ -73,3 +78,27 @@ async def record_session(
     except Exception as e:
         # Never let session logging break the demo.
         logger.warning(f"⚠️ Failed to record demo session: {e}")
+
+
+async def count_successful_tries(session_id: str) -> int:
+    if not settings.DEMO_MODE:
+        return 0
+
+    try:
+        session = await get_db()
+        async with session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) FROM demo_sessions
+                    WHERE session_id = :sid
+                      AND parse_ok = true
+                      AND incident_id IS NOT NULL
+                    """
+                ),
+                {"sid": session_id},
+            )
+            return int(result.scalar() or 0)
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to count demo tries: {e}")
+        return 0
