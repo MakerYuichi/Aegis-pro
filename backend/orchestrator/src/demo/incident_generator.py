@@ -130,7 +130,7 @@ def _make_real_blame(
         # related_prs[0] is the PR whose merge commit is the newest commit
         # to this file — the most likely candidate for the failing line.
         matched = next((r for r in related_prs if r.get("number")), None)
-        if matched.get("number"):
+        if matched:
             blame.update({
                 "pr_number": matched["number"],
                 "pr_title": matched.get("title"),

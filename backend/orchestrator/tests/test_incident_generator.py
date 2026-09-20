@@ -440,3 +440,37 @@ async def test_recent_prs_present_in_metadata():
     assert gh["recent_prs"][0]["number"] == 999
     # related_prs and recent_prs are distinct lists
     assert gh["related_prs"][0]["number"] == 127
+    
+@pytest.mark.asyncio
+async def test_blame_does_not_crash_when_changes_have_no_prs():
+    """
+    Regression: related_prs may contain commits with no PR attached.
+    _make_real_blame must not crash on that shape.
+    """
+    commits_without_prs = [
+        {
+            "sha": "aaaa1111",
+            "commit_message": "direct push",
+            "commit_date": "2026-01-01T00:00:00Z",
+            "author": "alice",
+            "relevance_score": 0.8,
+            "reason": "direct commit",
+        },
+    ]
+    inc = await generate_incident_from_analysis(
+        parsed=_parsed("uber", "ride-dispatch"),
+        seed=42,
+        repo_meta=_repo_meta(),
+        target_file="src/handlers/upstream.py",
+        file_content=_file_content(),
+        risk=_risk(),
+        related_prs=commits_without_prs,
+        recent_prs=[],
+        file_commits=_file_commits(),
+        contributors=_contributors(),
+    )
+    assert inc is not None
+    blame = inc["extra_metadata"]["github"]["blame"]
+    # No PR fields — the changes list had none.
+    assert "pr_number" not in blame
+    assert "pr_title" not in blame
