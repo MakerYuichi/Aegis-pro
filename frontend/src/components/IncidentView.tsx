@@ -428,7 +428,7 @@ export function IncidentView({
                             <div className="flex items-center gap-2 mb-1">
                               <span className="text-xs text-light-muted dark:text-dark-muted">Relevance</span>
                               <span className="text-xs font-semibold text-brand-primary">
-                                {Math.round(pr.relevance_score * 100)}%
+                                {(pr.relevance_score * 100).toFixed(1)}%
                               </span>
                             </div>
                             <div className="w-20 h-2 bg-light-bg dark:bg-dark-bg rounded-full overflow-hidden">

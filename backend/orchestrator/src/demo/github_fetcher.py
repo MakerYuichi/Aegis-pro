@@ -248,7 +248,7 @@ async def fetch_file_commits(
     return commits
 
 async def _fetch_pr_for_commit(
-    owner: str, repo: str, sha: str
+    owner: str, repo: str, sha: str, commit: Optional[dict] = None
 ) -> Optional[dict]:
     """
     Return the PR that merged a given commit, or None.
@@ -281,7 +281,7 @@ async def _fetch_pr_for_commit(
             if not isinstance(data, list) or not data:
                 return None
             pr = data[0]
-            return {
+            result = {
                 "number": pr.get("number"),
                 "title": pr.get("title"),
                 "author": (pr.get("user") or {}).get("login"),
@@ -289,6 +289,12 @@ async def _fetch_pr_for_commit(
                 "merged_at": pr.get("merged_at"),
                 "state": pr.get("state"),
             }
+            if commit:
+                result["commit_message"] = commit.get("message")
+                result["commit_date"] = commit.get("committed_at")
+                result["commit_sha"] = commit.get("sha")
+            return result
+        
     except httpx.HTTPError as e:
         logger.debug(f"PR lookup for {sha} failed: {e}")
         return None
@@ -329,9 +335,14 @@ async def fetch_related_prs(
         )
         return []
 
-    sha_list = [c["sha"] for c in commits if c.get("sha") and c["sha"] != "unknown"]
+    commit_by_sha = {
+        c["sha"]: c for c in commits
+        if c.get("sha") and c["sha"] != "unknown"
+    }
+    sha_list = list(commit_by_sha.keys())
     results = await asyncio.gather(
-        *(_fetch_pr_for_commit(owner, repo, sha) for sha in sha_list),
+        *(_fetch_pr_for_commit(owner, repo, sha, commit_by_sha.get(sha))
+          for sha in sha_list),
         return_exceptions=False,
     )
 
@@ -381,14 +392,21 @@ async def _score_prs_with_llm(
     from src.services.llm_service import LLMService
 
     # Compact the PR list for the prompt.
-    pr_list = [
-        {
+        # Compact the PR list for the prompt. Include the commit that
+    # touched this file so the LLM has evidence to reason about, not
+    # just the PR title.
+    pr_list = []
+    for p in prs[:10]:
+        entry = {
             "number": p["number"],
             "title": (p.get("title") or "")[:200],
             "author": p.get("author"),
         }
-        for p in prs[:10]
-    ]
+        if p.get("commit_message"):
+            entry["commit_message"] = p["commit_message"][:200]
+        if p.get("commit_date"):
+            entry["commit_date"] = p["commit_date"]
+        pr_list.append(entry)
 
     prompt = f"""You are a senior software engineer analyzing which GitHub Pull Request most likely introduced a bug.
 
@@ -409,6 +427,11 @@ cause of a failure at line {line_number}:
 - 0.00-0.29: unrelated
 
 Give exact float scores with two decimal places (e.g. 0.73, 0.86, 0.42). Do not round to 0.1 intervals.
+
+For each reason, reference the commit message and date if provided.
+Do NOT invent line numbers or describe changes you cannot see.
+If a PR's commit message does not describe a change near line {line_number},
+say so and score it accordingly.
 
 Return ONLY a JSON array with one object per PR:
 [{{"number": 123, "score": 0.87, "reason": "PR #123 modified line {line_number} and removed a null check."}}]
