@@ -266,6 +266,40 @@ export const getPendingFixes = async (): Promise<{ fixes: PendingFix[]; count: n
   return response.data;
 };
 
+// ── Demo endpoints (public, no auth) ───────────────────────────────────
+
+export type DemoParsed = {
+  host: string;
+  org: string;
+  repo: string;
+  language_hint: string;
+};
+
+export type DemoGenerateResponse =
+  | { incident: Incident; parsed: DemoParsed }
+  | {
+      error: string;
+      reason: string;
+      detail: string;
+      supported_shapes: string[];
+    };
+
+export const getDemoDefault = async (): Promise<Incident> => {
+  const response = await api.get('/api/v1/demo/default');
+  return response.data;
+};
+
+export const generateDemoIncident = async (
+  repo_url: string
+): Promise<DemoGenerateResponse> => {
+  const response = await api.post('/api/v1/demo/generate', { repo_url });
+  return response.data;
+};
+
+export const resetDemo = async (): Promise<{ status: string }> => {
+  const response = await api.post('/api/v1/demo/reset');
+  return response.data;
+};
 /**
  * Returns an axios instance wired with the current Auth0 access token.
  * Use for protected (mutating) endpoints only.
@@ -391,3 +425,4 @@ export function useProtectedApi() {
     },
   }), [api]);
 }
+
