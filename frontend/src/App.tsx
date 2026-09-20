@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth0 } from '@auth0/auth0-react';
 import { ThemeProvider } from './components/ThemeProvider';
 import { Dashboard } from './pages/Dashboard';
@@ -10,49 +10,135 @@ import { OnCallPage } from './pages/OnCallPage';
 import { Settings } from './pages/Settings';
 import { Navbar } from './components/Navbar';
 import { LoginGate } from './components/LoginGate';
+import { DemoPage } from './pages/DemoPage';
+import type { ReactNode } from 'react';
+
+function LoadingScreen() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-light-bg dark:bg-dark-bg">
+      <div className="text-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4" />
+        <p className="text-gray-500">Initializing AEGIS PRO...</p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Wraps a route that requires authentication.
+ *
+ * When signed out, renders the LoginGate instead of the protected page.
+ * When signed in, renders the standard authenticated shell — Navbar plus
+ * a main container. The demo routes (`/` when signed out, `/demo` always)
+ * do NOT use this wrapper and therefore render without a Navbar.
+ */
+function RequireAuth({
+  isAuthenticated,
+  error,
+  children,
+}: {
+  isAuthenticated: boolean;
+  error: Error | null | undefined;
+  children: ReactNode;
+}) {
+  if (!isAuthenticated) {
+    return <LoginGate error={error ?? undefined} />;
+  }
+  return (
+    <div className="min-h-screen bg-light-bg dark:bg-dark-bg transition-colors">
+      <Navbar />
+      <main className="container mx-auto px-4 py-8">{children}</main>
+    </div>
+  );
+}
 
 function App() {
   const { isLoading, isAuthenticated, error } = useAuth0();
 
-  // Show a loading screen while Auth0 initializes
   if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-light-bg dark:bg-dark-bg">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4" />
-          <p className="text-gray-500">Initializing AEGIS PRO...</p>
-        </div>
-      </div>
-    );
+    return <LoadingScreen />;
   }
 
-  // If not authenticated, show login screen instead of the app
-  if (!isAuthenticated) {
-    return (
-      <ThemeProvider defaultTheme="light">
-        <LoginGate error={error} />
-      </ThemeProvider>
-    );
-  }
-
-  // Authenticated: render the normal app
   return (
     <ThemeProvider defaultTheme="light">
       <BrowserRouter>
-        <div className="min-h-screen bg-light-bg dark:bg-dark-bg transition-colors">
-          <Navbar />
-          <main className="container mx-auto px-4 py-8">
-            <Routes>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/incident/:id" element={<IncidentDetail />} />
-              <Route path="/incidents" element={<IncidentsPage />} />
-              <Route path="/services" element={<ServicesPage />} />
-              <Route path="/oncall" element={<OnCallPage />} />
-              <Route path="/settings" element={<Settings />} />
-              <Route path="/approvals" element={<ApprovalDashboard />} />
-            </Routes>
-          </main>
-        </div>
+        <Routes>
+          {/* ── Public demo routes ────────────────────────────────── */}
+
+          {/* `/demo` is always the demo, even when signed in — an escape
+              hatch for the operator to preview what a prospect sees. */}
+          <Route path="/demo" element={<DemoPage />} />
+
+          {/* `/` is the demo when signed out, the Dashboard when signed in.
+              This is the primary landing page for prospects. */}
+          <Route
+            path="/"
+            element={
+              isAuthenticated ? (
+                <RequireAuth isAuthenticated={isAuthenticated} error={error}>
+                  <Dashboard />
+                </RequireAuth>
+              ) : (
+                <DemoPage />
+              )
+            }
+          />
+
+          {/* ── Authenticated routes ──────────────────────────────── */}
+
+          <Route
+            path="/incident/:id"
+            element={
+              <RequireAuth isAuthenticated={isAuthenticated} error={error}>
+                <IncidentDetail />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/incidents"
+            element={
+              <RequireAuth isAuthenticated={isAuthenticated} error={error}>
+                <IncidentsPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/services"
+            element={
+              <RequireAuth isAuthenticated={isAuthenticated} error={error}>
+                <ServicesPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/oncall"
+            element={
+              <RequireAuth isAuthenticated={isAuthenticated} error={error}>
+                <OnCallPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <RequireAuth isAuthenticated={isAuthenticated} error={error}>
+                <Settings />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/approvals"
+            element={
+              <RequireAuth isAuthenticated={isAuthenticated} error={error}>
+                <ApprovalDashboard />
+              </RequireAuth>
+            }
+          />
+
+          {/* Anything unknown → home. The home handler decides
+              demo vs. dashboard based on auth state. */}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
       </BrowserRouter>
     </ThemeProvider>
   );
