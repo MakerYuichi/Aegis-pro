@@ -109,10 +109,13 @@ export type GitHubMetadata = {
     merged_at?: string;
   }>;
   related_prs?: Array<{
-    number: number;
-    title: string;
+    sha?: string;
+    commit_message?: string;
+    commit_date?: string;
+    number?: number;
+    title?: string;
     author: string;
-    url: string;
+    url?: string;
     merged_at?: string;
     relevance_score?: number;
     reason?: string;

@@ -129,7 +129,7 @@ def _make_real_blame(
     if related_prs:
         # related_prs[0] is the PR whose merge commit is the newest commit
         # to this file — the most likely candidate for the failing line.
-        matched = related_prs[0]
+        matched = next((r for r in related_prs if r.get("number")), None)
         if matched.get("number"):
             blame.update({
                 "pr_number": matched["number"],
@@ -153,22 +153,32 @@ def _make_real_blame(
 
 def _make_real_related_prs(related_prs: list[dict], file_path: str) -> list[dict]:
     """
-    Return the file-related PRs with their LLM relevance scores intact.
-    Sorted by relevance_score desc, so the most likely cause comes first.
+    Return the file-related changes (commits and PRs) with their LLM
+    relevance scores. Sorted by relevance_score desc.
     """
     out = []
-    for pr in related_prs[:5]:
-        out.append({
-            "number": pr.get("number"),
-            "title": pr.get("title"),
-            "author": pr.get("author"),
-            "url": pr.get("url"),
-            "merged_at": pr.get("merged_at"),
-            "relevance_score": pr.get("relevance_score", 1.0),
-            "reason": pr.get("reason") or f"PR #{pr.get('number')} was merged into {file_path}.",
-        })
+    for item in related_prs[:5]:
+        entry = {
+            "sha": item.get("sha"),
+            "commit_message": item.get("commit_message"),
+            "commit_date": item.get("commit_date"),
+            "author": item.get("author"),
+            "relevance_score": item.get("relevance_score", 1.0),
+            "reason": item.get("reason") or _default_change_reason(item, file_path),
+        }
+        if item.get("number"):
+            entry["number"] = item["number"]
+            entry["title"] = item.get("title")
+            entry["url"] = item.get("url")
+            entry["merged_at"] = item.get("merged_at")
+        out.append(entry)
     return out
 
+
+def _default_change_reason(item: dict, file_path: str) -> str:
+    if item.get("number"):
+        return f"PR #{item['number']} merged a commit into {file_path}."
+    return f"Commit {item.get('sha', 'unknown')} touched {file_path}."
 
 def _make_recent_prs(recent_prs: list[dict]) -> list[dict]:
     """

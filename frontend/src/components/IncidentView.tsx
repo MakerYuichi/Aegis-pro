@@ -397,30 +397,50 @@ export function IncidentView({
             <div className="bg-gradient-to-br from-light-card to-light-surface dark:from-dark-card dark:to-dark-surface rounded-2xl border border-light-border dark:border-dark-border shadow-xl p-6 backdrop-blur-sm">
               <div className="flex items-center gap-2 mb-4">
                 <GitPullRequest className="w-5 h-5 text-brand-primary" />
-                <h3 className="text-sm font-semibold text-brand-primary">Related Pull Requests</h3>
+                <h3 className="text-sm font-semibold text-brand-primary">
+                  Recent changes to this file
+                </h3>
               </div>
               <div className="space-y-3">
                 {incident.extra_metadata!.github!.related_prs!.map((pr: any, index: number) => {
                   return (
                     <motion.div
-                      key={pr.number || index}
+                      key={pr.number ?? pr.sha ?? index}
                       initial={{ opacity: 0, x: -20 }}
                       animate={{ opacity: 1, x: 0 }}
                       transition={{ delay: index * 0.1 }}
                       className="p-4 bg-light-surface dark:bg-dark-surface rounded-xl border border-light-border dark:border-dark-border"
                     >
                       <div className="flex items-start justify-between mb-2">
-                        <div className="flex-1">
-                          <a
-                            href={pr.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-sm font-medium text-brand-primary hover:underline"
-                          >
-                            #{pr.number}: {pr.title}
-                          </a>
+                        <div className="flex-1 min-w-0">
+                          {pr.number ? (
+                            <a
+                              href={pr.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-sm font-medium text-brand-primary hover:underline"
+                            >
+                              #{pr.number}: {pr.title}
+                            </a>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <code className="text-xs font-mono text-brand-primary bg-light-bg dark:bg-dark-bg px-2 py-0.5 rounded">
+                                {pr.sha}
+                              </code>
+                              <span className="text-xs text-light-muted dark:text-dark-muted">
+                                commit
+                              </span>
+                            </div>
+                          )}
+                          {pr.commit_message && (
+                            <p className="text-xs text-light-text dark:text-dark-text mt-1.5 line-clamp-2">
+                              {pr.commit_message}
+                            </p>
+                          )}
                           <p className="text-xs text-light-muted dark:text-dark-muted mt-1">
-                            by {pr.author} • {pr.merged_at ? new Date(pr.merged_at).toLocaleDateString() : '—'}
+                            by {pr.author} • {pr.merged_at || pr.commit_date
+                              ? new Date(pr.merged_at || pr.commit_date!).toLocaleDateString()
+                              : '—'}
                           </p>
                         </div>
                         {typeof pr.relevance_score === 'number' && (

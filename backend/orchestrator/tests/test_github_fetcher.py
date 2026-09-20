@@ -214,8 +214,9 @@ async def test_fetch_related_prs_empty_commits_returns_empty(monkeypatch):
         return []
     monkeypatch.setattr(gh, "fetch_file_commits", _empty_commits)
 
-    prs = await gh.fetch_related_prs("owner", "repo", "src/x.py", 42)
-    assert prs == []
+    changes = await gh.fetch_related_prs("owner", "repo", "src/x.py", 42)
+    assert changes == []
+
 
 
 @pytest.mark.asyncio
@@ -230,19 +231,28 @@ async def test_fetch_related_prs_dedupes_prs(monkeypatch):
     monkeypatch.setattr(gh, "fetch_file_commits", _commits)
 
     async def _pr_for(owner, repo, sha):
+        # Both commits map to the same PR.
         return {"number": 42, "title": "Same PR", "author": "z",
                 "url": "u", "merged_at": None, "state": "closed"}
     monkeypatch.setattr(gh, "_fetch_pr_for_commit", _pr_for)
 
-    prs = await gh.fetch_related_prs("o", "r", "src/x.py", 42)
-    assert len(prs) == 1
-    assert prs[0]["number"] == 42
+    # Stub out the LLM scorer so we don't hit the network.
+    async def _no_score(items, file_path, line_number):
+        return [{**it, "relevance_score": 0.5, "reason": "stub"} for it in items]
+    monkeypatch.setattr(gh, "_score_prs_with_llm", _no_score)
+
+    changes = await gh.fetch_related_prs("o", "r", "src/x.py", 42)
+    # Two commits, two items, even though both map to the same PR.
+    assert len(changes) == 2
+    assert all(c.get("number") == 42 for c in changes)
+    assert changes[0]["sha"] in ("a1b2c3d4", "e5f6a7b8")
 
 
 @pytest.mark.asyncio
-async def test_fetch_related_prs_skips_commits_without_pr(monkeypatch):
+async def test_fetch_related_prs_keeps_commits_without_pr(monkeypatch):
+    """A commit with no associated PR still appears in the list."""
     async def _commits(*a, **kw):
-        return [{"sha": "aaaa1111", "author": "x", "message": "m",
+        return [{"sha": "aaaa1111", "author": "x", "message": "direct push",
                  "committed_at": "2026-01-01T00:00:00Z"}]
     monkeypatch.setattr(gh, "fetch_file_commits", _commits)
 
@@ -250,14 +260,22 @@ async def test_fetch_related_prs_skips_commits_without_pr(monkeypatch):
         return None
     monkeypatch.setattr(gh, "_fetch_pr_for_commit", _no_pr)
 
-    prs = await gh.fetch_related_prs("o", "r", "src/x.py", 42)
-    assert prs == []
+    async def _no_score(items, file_path, line_number):
+        return [{**it, "relevance_score": 0.5, "reason": "stub"} for it in items]
+    monkeypatch.setattr(gh, "_score_prs_with_llm", _no_score)
+
+    changes = await gh.fetch_related_prs("o", "r", "src/x.py", 42)
+    assert len(changes) == 1
+    assert changes[0]["sha"] == "aaaa1111"
+    assert changes[0]["commit_message"] == "direct push"
+    assert "number" not in changes[0]   # no PR attached
+
     
 @pytest.mark.asyncio
 async def test_fetch_related_prs_scores_with_llm(monkeypatch):
-    """PRs get relevance_score and reason from the LLM."""
+    """The LLM scorer is called and its output is used."""
     async def _commits(*a, **kw):
-        return [{"sha": "aaaa1111", "author": "x", "message": "m",
+        return [{"sha": "aaaa1111", "author": "x", "message": "fix null check",
                  "committed_at": "2026-01-01T00:00:00Z"}]
     monkeypatch.setattr(gh, "fetch_file_commits", _commits)
 
@@ -267,7 +285,7 @@ async def test_fetch_related_prs_scores_with_llm(monkeypatch):
     monkeypatch.setattr(gh, "_fetch_pr_for_commit", _pr_for)
 
     async def _complete_raw(*a, **kw):
-        return '[{"number": 42, "score": 0.91, "reason": "removed the null guard"}]'
+        return '[{"index": 0, "score": 0.91, "reason": "removed the null guard"}]'
 
     class _FakeLLM:
         async def complete_raw(self, *a, **kw):
@@ -276,15 +294,15 @@ async def test_fetch_related_prs_scores_with_llm(monkeypatch):
     import src.services.llm_service as llm_mod
     monkeypatch.setattr(llm_mod, "LLMService", lambda: _FakeLLM())
 
-    prs = await gh.fetch_related_prs("o", "r", "src/x.py", 42)
-    assert len(prs) == 1
-    assert prs[0]["relevance_score"] == 0.91
-    assert "null guard" in prs[0]["reason"]
+    changes = await gh.fetch_related_prs("o", "r", "src/x.py", 42)
+    assert len(changes) == 1
+    assert changes[0]["relevance_score"] == 0.91
+    assert "null guard" in changes[0]["reason"]
 
 
 @pytest.mark.asyncio
 async def test_fetch_related_prs_falls_back_when_llm_fails(monkeypatch):
-    """LLM failure → constant 1.0 on every PR, no crash."""
+    """LLM failure → constant 1.0 on every change, no crash."""
     async def _commits(*a, **kw):
         return [{"sha": "aaaa1111", "author": "x", "message": "m",
                  "committed_at": "2026-01-01T00:00:00Z"}]
@@ -302,6 +320,6 @@ async def test_fetch_related_prs_falls_back_when_llm_fails(monkeypatch):
     import src.services.llm_service as llm_mod
     monkeypatch.setattr(llm_mod, "LLMService", lambda: _BrokenLLM())
 
-    prs = await gh.fetch_related_prs("o", "r", "src/x.py", 42)
-    assert len(prs) == 1
-    assert prs[0]["relevance_score"] == 1.0
+    changes = await gh.fetch_related_prs("o", "r", "src/x.py", 42)
+    assert len(changes) == 1
+    assert changes[0]["relevance_score"] == 1.0

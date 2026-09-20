@@ -248,17 +248,18 @@ async def fetch_file_commits(
     return commits
 
 async def _fetch_pr_for_commit(
-    owner: str, repo: str, sha: str, commit: Optional[dict] = None
+    owner: str, repo: str, sha: str
 ) -> Optional[dict]:
     """
     Return the PR that merged a given commit, or None.
 
     GitHub's /commits/{sha}/pulls endpoint returns an array. For a
     merge commit, it's usually one entry. For a non-merge commit
-    (e.g. a direct push), it's empty.
+    (e.g. a direct push or squash merge), it's empty.
 
     Errors are swallowed — a missing PR for one commit must not fail
-    the whole related-PRs lookup.
+    the whole changes lookup. The caller treats None as "commit has
+    no associated PR" and still includes it in the list.
     """
     url = f"{GITHUB_API}/repos/{owner}/{repo}/commits/{sha}/pulls"
     try:
@@ -281,7 +282,7 @@ async def _fetch_pr_for_commit(
             if not isinstance(data, list) or not data:
                 return None
             pr = data[0]
-            result = {
+            return {
                 "number": pr.get("number"),
                 "title": pr.get("title"),
                 "author": (pr.get("user") or {}).get("login"),
@@ -289,12 +290,6 @@ async def _fetch_pr_for_commit(
                 "merged_at": pr.get("merged_at"),
                 "state": pr.get("state"),
             }
-            if commit:
-                result["commit_message"] = commit.get("message")
-                result["commit_date"] = commit.get("committed_at")
-                result["commit_sha"] = commit.get("sha")
-            return result
-        
     except httpx.HTTPError as e:
         logger.debug(f"PR lookup for {sha} failed: {e}")
         return None
@@ -308,24 +303,26 @@ async def fetch_related_prs(
     per_commit_prs: int = 10,
 ) -> list[dict]:
     """
-    Return PRs that merged commits to this file, scored by an LLM for
+    Return changes that touched this file, scored by an LLM for
     relevance to the failing line.
+
+    Each entry is a commit. If the commit was merged by a PR, the PR
+    number and URL are attached. If not, the entry is commit-only.
+    The LLM scores both kinds identically.
 
     Pipeline:
       1. Fetch the file's commit history (cached separately).
       2. Take the most recent `per_commit_prs` commits.
-      3. Look up the PR that merged each, in parallel.
-      4. Filter out commits with no associated PR.
-      5. Score the survivors with the LLM chain against (file_path,
-         line_number). Falls back to a constant 1.0 on every PR if the
-         LLM is unavailable.
-      6. Cache the whole list for 1 hour.
+      3. For each commit, look up the merging PR (parallel).
+      4. Merge commit + optional PR into one item.
+      5. Score every item with the LLM against (file_path, line_number).
+      6. Cache the scored list for 1 hour.
 
     Cached under demo:fileprs:{owner}/{repo}:{file_path}.
     """
     cached = await cache.cache_get(cache.key_file_prs(owner, repo, file_path))
     if cached is not None:
-        logger.debug(f"cache hit: file PRs {owner}/{repo}:{file_path}")
+        logger.debug(f"cache hit: file changes {owner}/{repo}:{file_path}")
         return cached
 
     commits = await fetch_file_commits(owner, repo, file_path, per_page=per_commit_prs)
@@ -335,111 +332,112 @@ async def fetch_related_prs(
         )
         return []
 
-    commit_by_sha = {
-        c["sha"]: c for c in commits
-        if c.get("sha") and c["sha"] != "unknown"
-    }
-    sha_list = list(commit_by_sha.keys())
+    # Look up PRs in parallel. Commits without PRs still come through —
+    # they're the majority on many repos.
     results = await asyncio.gather(
-        *(_fetch_pr_for_commit(owner, repo, sha, commit_by_sha.get(sha))
-          for sha in sha_list),
+        *(_fetch_pr_for_commit(owner, repo, c["sha"])
+          for c in commits if c.get("sha") and c["sha"] != "unknown"),
         return_exceptions=False,
     )
 
-    prs: list[dict] = []
-    seen: set[int] = set()
-    for pr in results:
-        if not pr or pr.get("number") in seen:
-            continue
-        seen.add(pr["number"])
-        prs.append(pr)
+    # Zip commits (that had valid shas) back with their PR lookups.
+    valid_commits = [
+        c for c in commits if c.get("sha") and c["sha"] != "unknown"
+    ]
+    items: list[dict] = []
+    for commit, pr in zip(valid_commits, results):
+        item: dict[str, Any] = {
+            "sha": commit.get("sha"),
+            "commit_message": commit.get("message"),
+            "commit_date": commit.get("committed_at"),
+            "author": commit.get("author"),
+        }
+        if pr:
+            item["number"] = pr.get("number")
+            item["title"] = pr.get("title")
+            item["url"] = pr.get("url")
+            item["merged_at"] = pr.get("merged_at")
+            # The commit's author may differ from the PR's author.
+            # Prefer the PR author when we have one — it's the more
+            # relevant name for attribution.
+            if pr.get("author"):
+                item["author"] = pr["author"]
+        items.append(item)
 
-    if not prs:
-        await cache.cache_set(
-            cache.key_file_prs(owner, repo, file_path), [], cache.TTL_PRS
-        )
-        return []
-
-    # Score the PRs against the failing line. Falls back to a constant
-    # if the LLM chain is unavailable.
-    scored = await _score_prs_with_llm(prs, file_path, line_number)
+    scored = await _score_prs_with_llm(items, file_path, line_number)
 
     await cache.cache_set(
         cache.key_file_prs(owner, repo, file_path), scored, cache.TTL_PRS
     )
     logger.info(
-        f"Found {len(scored)} file-related PRs for {owner}/{repo}:{file_path}"
+        f"Found {len(scored)} file-related changes for {owner}/{repo}:{file_path}"
     )
     return scored
 
 
 async def _score_prs_with_llm(
-    prs: list[dict],
+    items: list[dict],
     file_path: str,
     line_number: int,
 ) -> list[dict]:
     """
-    Score each PR for how likely it is to be related to the failing
-    line. Uses LLMService.complete_raw with response_format='json_array',
-    so the chain handles provider selection and fallback.
+    Score each change (commit or PR) for how likely it is to be related
+    to the failing line. Uses LLMService.complete_raw with
+    response_format='json_array'.
 
-    Returns a copy of the input list with relevance_score and reason
-    fields added. On any failure, sets relevance_score=1.0 and a
-    generic reason — the caller never sees an unscored list.
+    Items are scored by their index in the list, since commits have no
+    PR number. Returns a copy of the input list with relevance_score
+    and reason added.
     """
-    # Import here to avoid a circular import at module load time:
-    # llm_service imports github_service, which imports this module.
     from src.services.llm_service import LLMService
 
-    # Compact the PR list for the prompt.
-        # Compact the PR list for the prompt. Include the commit that
-    # touched this file so the LLM has evidence to reason about, not
-    # just the PR title.
-    pr_list = []
-    for p in prs[:10]:
-        entry = {
-            "number": p["number"],
-            "title": (p.get("title") or "")[:200],
-            "author": p.get("author"),
+    # Build the prompt list. Each entry has an index, the commit message,
+    # and optionally the PR number and title.
+    prompt_items = []
+    for i, it in enumerate(items[:10]):
+        entry: dict[str, Any] = {
+            "index": i,
+            "commit_message": (it.get("commit_message") or "")[:200],
+            "commit_date": it.get("commit_date"),
+            "author": it.get("author"),
         }
-        if p.get("commit_message"):
-            entry["commit_message"] = p["commit_message"][:200]
-        if p.get("commit_date"):
-            entry["commit_date"] = p["commit_date"]
-        pr_list.append(entry)
+        if it.get("number"):
+            entry["pr_number"] = it["number"]
+            entry["pr_title"] = (it.get("title") or "")[:200]
+        prompt_items.append(entry)
 
-    prompt = f"""You are a senior software engineer analyzing which GitHub Pull Request most likely introduced a bug.
+    prompt = f"""You are a senior software engineer analyzing which change most likely introduced a bug.
 
 Error location: {file_path}, line {line_number}
 
 The failing line is at line {line_number} of {file_path}.
 
-PRs that merged commits into this file (most recent first):
-{json.dumps(pr_list, indent=2)}
+Changes that touched this file (most recent first):
+{json.dumps(prompt_items, indent=2)}
 
-Score each PR from 0.0 to 1.0 based on how likely it is to be the
+Score each change from 0.0 to 1.0 based on how likely it is to be the
 cause of a failure at line {line_number}:
 
-- 0.90-1.00: modified the exact line or function where the error occurs
-- 0.70-0.89: modified the same file near the error line
-- 0.50-0.69: modified the same file in a different area
-- 0.30-0.49: touched a related file but seems unlikely
+- 0.90-1.00: the commit message or PR title indicates a change at the failing line
+- 0.70-0.89: the change is clearly related to the code around line {line_number}
+- 0.50-0.69: the change touched the same file but in a different area
+- 0.30-0.49: same file, unclear relation
 - 0.00-0.29: unrelated
 
 Give exact float scores with two decimal places (e.g. 0.73, 0.86, 0.42). Do not round to 0.1 intervals.
 
-For each reason, reference the commit message and date if provided.
-Do NOT invent line numbers or describe changes you cannot see.
-If a PR's commit message does not describe a change near line {line_number},
-say so and score it accordingly.
+For each reason, reference the commit message or PR title. Do NOT
+invent line numbers or describe changes you cannot see. If the commit
+message does not describe a change near line {line_number}, say so and
+score it accordingly.
 
-Return ONLY a JSON array with one object per PR:
-[{{"number": 123, "score": 0.87, "reason": "PR #123 modified line {line_number} and removed a null check."}}]
+Return ONLY a JSON array with one object per change:
+[{{"index": 0, "score": 0.87, "reason": "Commit 'refactor: fix null check' touches the area around line {line_number}."}}]
 """
 
     system = (
         "You are a senior software engineer. Return ONLY a valid JSON "
-        "array. Reference the file name and line number in each reason."
+        "array. Reference the commit message or PR title in each reason."
     )
 
     try:
@@ -448,71 +446,78 @@ Return ONLY a JSON array with one object per PR:
             prompt=prompt,
             system=system,
             temperature=0.3,
-            max_tokens=800,
+            max_tokens=1000,
             response_format="json_array",
         )
     except Exception as e:
-        logger.warning(f"LLM PR scoring failed: {e}")
-        return _fallback_scores(prs, file_path)
+        logger.warning(f"LLM change scoring failed: {e}")
+        return _fallback_scores(items, file_path)
 
     if not content:
-        logger.warning("LLM PR scoring returned no content; using fallback")
-        return _fallback_scores(prs, file_path)
+        logger.warning("LLM change scoring returned no content; using fallback")
+        return _fallback_scores(items, file_path)
 
     try:
         scores = json.loads(content)
     except json.JSONDecodeError:
-        logger.warning("LLM PR scoring returned invalid JSON; using fallback")
-        return _fallback_scores(prs, file_path)
+        logger.warning("LLM change scoring returned invalid JSON; using fallback")
+        return _fallback_scores(items, file_path)
 
     if not isinstance(scores, list):
-        return _fallback_scores(prs, file_path)
+        return _fallback_scores(items, file_path)
 
     score_map: dict[int, dict] = {}
     for s in scores:
         if not isinstance(s, dict):
             continue
-        num = s.get("number")
-        if not isinstance(num, int):
+        idx = s.get("index")
+        if not isinstance(idx, int):
             continue
-        score_map[num] = s
+        score_map[idx] = s
 
     out = []
-    for pr in prs:
-        s = score_map.get(pr["number"])
+    for i, it in enumerate(items):
+        s = score_map.get(i)
         if s and isinstance(s.get("score"), (int, float)):
             try:
                 score = float(s["score"])
             except (TypeError, ValueError):
                 score = 1.0
-            reason = str(s.get("reason") or f"PR #{pr['number']} touched {file_path}.")
+            reason = str(s.get("reason") or _default_reason(it, file_path))
         else:
             score = 1.0
-            reason = f"PR #{pr['number']} touched {file_path}."
+            reason = _default_reason(it, file_path)
         out.append({
-            **pr,
+            **it,
             "relevance_score": max(0.0, min(1.0, score)),
             "reason": reason[:400],
         })
 
-    out.sort(key=lambda p: p.get("relevance_score", 0), reverse=True)
+    out.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
     return out
 
 
-def _fallback_scores(prs: list[dict], file_path: str) -> list[dict]:
+def _default_reason(item: dict, file_path: str) -> str:
+    if item.get("number"):
+        return f"PR #{item['number']} merged a commit into {file_path}."
+    return f"Commit {item.get('sha', 'unknown')} touched {file_path}."
+
+
+def _fallback_scores(items: list[dict], file_path: str) -> list[dict]:
     """
-    Return the PRs with a constant relevance_score=1.0 and a generic
-    reason. Used when the LLM is unavailable, so the frontend still has
+    Return the items with a constant relevance_score=1.0 and a generic
+    reason. Used when the LLM is unavailable so the frontend still has
     something to render.
     """
     return [
         {
-            **pr,
+            **it,
             "relevance_score": 1.0,
-            "reason": f"PR #{pr['number']} was merged into {file_path}.",
+            "reason": _default_reason(it, file_path),
         }
-        for pr in prs
+        for it in items
     ]
+
 
 
 async def fetch_file_content(
