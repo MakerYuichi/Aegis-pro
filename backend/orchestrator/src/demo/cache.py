@@ -76,5 +76,9 @@ def key_commits(owner: str, repo: str, path: str) -> str:
     return f"demo:commits:{owner}/{repo}:{path}"
 
 
+def key_file_prs(owner: str, repo: str, path: str) -> str:
+    return f"demo:fileprs:{owner}/{repo}:{path}"
+
+
 def key_contributors(owner: str, repo: str) -> str:
     return f"demo:contributors:{owner}/{repo}"
