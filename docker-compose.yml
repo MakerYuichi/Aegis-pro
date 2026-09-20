@@ -35,9 +35,16 @@ services:
     container_name: aegis-orchestrator
     ports:
       - "8000:8000"
-    # FIX: Use env_file to load .env
+    # Base env from the developer's local .env; overridable by the shell.
     env_file:
       - ./backend/orchestrator/.env
+    # Shell env wins over env_file. Set these before `docker-compose up`
+    # or pass --env-file demo.env to run in demo mode without touching .env.
+    environment:
+      DEMO_MODE: ${DEMO_MODE:-false}
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+      LLM_FALLBACKS: ${LLM_FALLBACKS:-gemini,openrouter}
+      AUTO_FIX_MODE: ${AUTO_FIX_MODE:-read_only}
     depends_on:
       postgres:
         condition: service_healthy
