@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any
 import hashlib
+import time
 import uuid
 
 import redis.asyncio as redis
@@ -179,6 +180,44 @@ _AEGIS_DEFAULT = {
 }
 
 
+# ── Timing helpers ───────────────────────────────────────────────────────
+
+class _Timer:
+    """Collect per-stage timings as ms. Attach to the response's meta block."""
+
+    def __init__(self):
+        self._start = time.perf_counter()
+        self._stages: dict[str, int] = {}
+
+    def stage(self, name: str) -> "_StageTimer":
+        """Context manager: records elapsed ms for a named stage."""
+        return _StageTimer(self, name)
+
+    def _record(self, name: str, ms: int) -> None:
+        self._stages[name] = ms
+
+    def total_ms(self) -> int:
+        return int((time.perf_counter() - self._start) * 1000)
+
+    def snapshot(self) -> dict[str, int]:
+        return {**self._stages, "total_ms": self.total_ms()}
+
+
+class _StageTimer:
+    def __init__(self, timer: _Timer, name: str):
+        self._timer = timer
+        self._name = name
+        self._start = 0.0
+
+    def __enter__(self) -> "_StageTimer":
+        self._start = time.perf_counter()
+        return self
+
+    def __exit__(self, *args) -> None:
+        ms = int((time.perf_counter() - self._start) * 1000)
+        self._timer._record(self._name, ms)
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 def _require_demo_mode() -> None:
@@ -281,8 +320,11 @@ async def demo_generate(
     _require_demo_mode()
     session_id = _get_or_create_session(request, response)
 
+    timer = _Timer()
+
     # ── Try cap (checked first, before any external call) ───────────────
-    tries_used = await count_successful_tries(session_id)
+    with timer.stage("try_check_ms"):
+        tries_used = await count_successful_tries(session_id)
     if tries_used >= MAX_TRIES:
         return {
             "signup_required": True,
@@ -298,7 +340,8 @@ async def demo_generate(
     await _check_rate_limit(session_id)
 
     # ── Parse the URL ───────────────────────────────────────────────────
-    parsed = parse_repo_input(request_body.repo_url)
+    with timer.stage("parse_ms"):
+        parsed = parse_repo_input(request_body.repo_url)
     if not parsed.ok:
         await record_session(session_id, request_body.repo_url, parsed, None)
         return _error_payload(parsed.reason, parsed.detail)
@@ -308,10 +351,12 @@ async def demo_generate(
 
     # ── Fetch repo metadata + tree (cached) ─────────────────────────────
     try:
-        repo_meta = await github_fetcher.fetch_repo_metadata(org, repo)
-        tree = await github_fetcher.fetch_tree(
-            org, repo, repo_meta["default_branch"]
-        )
+        with timer.stage("fetch_meta_ms"):
+            repo_meta = await github_fetcher.fetch_repo_metadata(org, repo)
+        with timer.stage("fetch_tree_ms"):
+            tree = await github_fetcher.fetch_tree(
+                org, repo, repo_meta["default_branch"]
+            )
     except GitHubRepoNotFoundError:
         await record_session(session_id, request_body.repo_url, parsed, None)
         return _error_payload(
@@ -336,7 +381,8 @@ async def demo_generate(
 
     # ── Select the target file ──────────────────────────────────────────
     language = repo_meta.get("language") or parsed.language_hint
-    candidate = select_target_file(tree, language)
+    with timer.stage("select_file_ms"):
+        candidate = select_target_file(tree, language)
 
     if candidate is None:
         await record_session(session_id, request_body.repo_url, parsed, None)
@@ -357,14 +403,18 @@ async def demo_generate(
 
     # ── Fetch the file, commits, contributors, PRs ──────────────────────
     try:
-        file_content = await github_fetcher.fetch_file_content(
-            org, repo, candidate.path
-        )
-        file_commits = await github_fetcher.fetch_file_commits(
-            org, repo, candidate.path
-        )
-        contributors = await github_fetcher.fetch_contributors(org, repo)
-        related_prs = await github_fetcher.fetch_recent_prs(org, repo)
+        with timer.stage("fetch_file_ms"):
+            file_content = await github_fetcher.fetch_file_content(
+                org, repo, candidate.path
+            )
+        with timer.stage("fetch_commits_ms"):
+            file_commits = await github_fetcher.fetch_file_commits(
+                org, repo, candidate.path
+            )
+        with timer.stage("fetch_contributors_ms"):
+            contributors = await github_fetcher.fetch_contributors(org, repo)
+        with timer.stage("fetch_prs_ms"):
+            related_prs = await github_fetcher.fetch_recent_prs(org, repo)
     except GitHubFetchError as e:
         logger.warning(f"GitHub fetch failed for {candidate.path}: {e}")
         await record_session(session_id, request_body.repo_url, parsed, None)
@@ -374,12 +424,13 @@ async def demo_generate(
         )
 
     # ── Analyze the file for risks ──────────────────────────────────────
-    risk = await analyze_file(
-        file_path=candidate.path,
-        file_content=file_content["content"],
-        language=language,
-        repo_context=repo_meta,
-    )
+    with timer.stage("analyze_ms"):
+        risk = await analyze_file(
+            file_path=candidate.path,
+            file_content=file_content["content"],
+            language=language,
+            repo_context=repo_meta,
+        )
 
     if risk is None:
         await record_session(session_id, request_body.repo_url, parsed, None)
@@ -398,17 +449,18 @@ async def demo_generate(
         16,
     )
 
-    incident = await generate_incident_from_analysis(
-        parsed=parsed,
-        seed=seed,
-        repo_meta=repo_meta,
-        target_file=candidate.path,
-        file_content=file_content["content"],
-        risk=risk,
-        related_prs=related_prs,
-        file_commits=file_commits,
-        contributors=contributors,
-    )
+    with timer.stage("generate_ms"):
+        incident = await generate_incident_from_analysis(
+            parsed=parsed,
+            seed=seed,
+            repo_meta=repo_meta,
+            target_file=candidate.path,
+            file_content=file_content["content"],
+            risk=risk,
+            related_prs=related_prs,
+            file_commits=file_commits,
+            contributors=contributors,
+        )
 
     if incident is None:
         # Shouldn't happen given the checks above, but guard anyway.
@@ -430,6 +482,7 @@ async def demo_generate(
         },
         "meta": {
             "tries_remaining": MAX_TRIES - tries_used - 1,
+            "timings": timer.snapshot(),
         },
     }
 

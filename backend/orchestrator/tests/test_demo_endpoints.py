@@ -369,3 +369,20 @@ def _mock_full_pipeline(candidate=None, risk=None):
                 p.stop()
 
     return _ctx()
+
+
+def test_successful_generate_returns_timings(client_demo_on, monkeypatch):
+    async def _one(_sid):
+        return 1
+    monkeypatch.setattr("src.demo.endpoints.count_successful_tries", _one)
+
+    with _mock_full_pipeline():
+        r = client_demo_on.post(
+            "/api/v1/demo/generate",
+            json={"repo_url": "github.com/uber/ride-dispatch"},
+        )
+    assert r.status_code == 200
+    timings = r.json()["meta"]["timings"]
+    assert "total_ms" in timings
+    assert "analyze_ms" in timings
+    assert isinstance(timings["total_ms"], int)
