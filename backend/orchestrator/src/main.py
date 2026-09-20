@@ -10,6 +10,7 @@ from src.api.slack import router as slack_router
 from src.database import init_db
 from src.services.incident_service import IncidentService
 from src.api.webhook import router as webhook_router
+from src.demo.endpoints import router as demo_router
 from src.config import settings
 from src.websocket import manager
 from src.auth import auth0
@@ -82,6 +83,7 @@ app.add_middleware(
 app.include_router(router, prefix="/api/v1")
 app.include_router(slack_router)
 app.include_router(webhook_router)
+app.include_router(demo_router)
 
 @app.websocket("/ws/incidents")
 async def websocket_endpoint(websocket: WebSocket):
