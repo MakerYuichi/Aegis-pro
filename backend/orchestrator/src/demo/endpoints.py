@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 from typing import Any
 import hashlib
-import secrets
 import uuid
 
 import redis.asyncio as redis
@@ -10,9 +9,18 @@ from pydantic import BaseModel
 from loguru import logger
 
 from src.config import settings
-from src.demo.incident_generator import generate_incident
+from src.demo.incident_generator import generate_incident_from_analysis
 from src.demo.repo_parser import parse_repo_input, supported_shapes
-from src.demo.session_service import record_session
+from src.demo.session_service import record_session, count_successful_tries
+from src.demo import github_fetcher
+from src.demo.github_fetcher import (
+    GitHubRepoNotFoundError,
+    GitHubRateLimitError,
+    GitHubNetworkError,
+    GitHubFetchError,
+)
+from src.demo.file_selector import select_target_file
+from src.demo.risk_analyzer import analyze_file
 
 
 router = APIRouter(prefix="/api/v1/demo", tags=["demo"])
@@ -20,10 +28,13 @@ router = APIRouter(prefix="/api/v1/demo", tags=["demo"])
 SESSION_COOKIE = "demo_session_id"
 SESSION_MAX_AGE = 60 * 60 * 4  # 4 hours
 
-# Rate limit: 20 generate calls per session per hour, max 1 per 3 seconds.
+# Timing limit (Redis token bucket): 20 requests per hour, 1 per 3 seconds.
 RATE_MAX = 20
 RATE_WINDOW_SECONDS = 3600
 RATE_MIN_INTERVAL_SECONDS = 3
+
+# Try cap: 3 successful analyses per session, then signup_required.
+MAX_TRIES = 3
 
 
 class GenerateRequest(BaseModel):
@@ -168,6 +179,8 @@ _AEGIS_DEFAULT = {
 }
 
 
+# ── Helpers ──────────────────────────────────────────────────────────────
+
 def _require_demo_mode() -> None:
     if not settings.DEMO_MODE:
         # 404, not 403 — the route simply does not exist in production.
@@ -198,7 +211,6 @@ async def _check_rate_limit(session_id: str) -> None:
     try:
         client = redis.from_url(settings.REDIS_URL)
         try:
-            # Minimum interval between calls.
             last_key = f"demo:last:{session_id}"
             last = await client.get(last_key)
             now = datetime.now(timezone.utc).timestamp()
@@ -212,7 +224,6 @@ async def _check_rate_limit(session_id: str) -> None:
                         headers={"Retry-After": str(int(RATE_MIN_INTERVAL_SECONDS - elapsed) + 1)},
                     )
 
-            # Window count.
             count_key = f"demo:count:{session_id}"
             count = await client.incr(count_key)
             if count == 1:
@@ -235,13 +246,21 @@ async def _check_rate_limit(session_id: str) -> None:
         return
 
 
+def _error_payload(reason: str, detail: str) -> dict:
+    """Uniform error response shape for the frontend."""
+    return {
+        "error": reason,
+        "reason": reason,
+        "detail": detail,
+        "supported_shapes": supported_shapes(),
+    }
+
+
 # ── Routes ───────────────────────────────────────────────────────────────
 
 @router.get("/default")
 async def demo_default(response: Response):
     _require_demo_mode()
-    # Ensure the session cookie is set even on first load, so /generate
-    # uses the same session id.
     response.set_cookie(
         SESSION_COOKIE,
         uuid.uuid4().hex,
@@ -262,26 +281,142 @@ async def demo_generate(
     _require_demo_mode()
     session_id = _get_or_create_session(request, response)
 
-    await _check_rate_limit(session_id)
-
-    parsed = parse_repo_input(request_body.repo_url)
-
-    if not parsed.ok:
-        await record_session(session_id, request_body.repo_url, parsed, None)
+    # ── Try cap (checked first, before any external call) ───────────────
+    tries_used = await count_successful_tries(session_id)
+    if tries_used >= MAX_TRIES:
         return {
-            "error": parsed.reason,
-            "reason": parsed.reason,
-            "detail": parsed.detail,
-            "supported_shapes": supported_shapes(),
+            "signup_required": True,
+            "reason": "signup_required",
+            "detail": (
+                f"You've seen {MAX_TRIES} real analyses. Sign up to run "
+                "AEGIS PRO on your own stack with your own credentials."
+            ),
+            "tries_remaining": 0,
         }
 
+    # ── Timing limit (Redis token bucket, fail-open) ────────────────────
+    await _check_rate_limit(session_id)
+
+    # ── Parse the URL ───────────────────────────────────────────────────
+    parsed = parse_repo_input(request_body.repo_url)
+    if not parsed.ok:
+        await record_session(session_id, request_body.repo_url, parsed, None)
+        return _error_payload(parsed.reason, parsed.detail)
+
+    org = parsed.org
+    repo = parsed.repo
+
+    # ── Fetch repo metadata + tree (cached) ─────────────────────────────
+    try:
+        repo_meta = await github_fetcher.fetch_repo_metadata(org, repo)
+        tree = await github_fetcher.fetch_tree(
+            org, repo, repo_meta["default_branch"]
+        )
+    except GitHubRepoNotFoundError:
+        await record_session(session_id, request_body.repo_url, parsed, None)
+        return _error_payload(
+            "not_found",
+            f"GitHub doesn't have a public repo at {org}/{repo}. "
+            "Check the URL, or try a different repo.",
+        )
+    except GitHubRateLimitError as e:
+        retry = "a few minutes" if not e.reset_epoch else "a few minutes"
+        await record_session(session_id, request_body.repo_url, parsed, None)
+        return _error_payload(
+            "rate_limited",
+            f"GitHub's public API is rate-limited right now. Try again in {retry}.",
+        )
+    except (GitHubNetworkError, GitHubFetchError) as e:
+        logger.warning(f"GitHub fetch failed: {e}")
+        await record_session(session_id, request_body.repo_url, parsed, None)
+        return _error_payload(
+            "github_unavailable",
+            "Couldn't reach GitHub right now. Try again in a moment.",
+        )
+
+    # ── Select the target file ──────────────────────────────────────────
+    language = repo_meta.get("language") or parsed.language_hint
+    candidate = select_target_file(tree, language)
+
+    if candidate is None:
+        await record_session(session_id, request_body.repo_url, parsed, None)
+        return _error_payload(
+            "empty_repo",
+            "This repository appears to be completely empty. "
+            "Try a repo with active code configurations to launch the simulation.",
+        )
+
+    if candidate.confidence == "fallback":
+        await record_session(session_id, request_body.repo_url, parsed, None)
+        return _error_payload(
+            "not_code",
+            "This repository doesn't contain code that can fail. "
+            "AEGIS PRO analyzes source files — READMEs, configs, and docs "
+            "don't produce incidents.",
+        )
+
+    # ── Fetch the file, commits, contributors, PRs ──────────────────────
+    try:
+        file_content = await github_fetcher.fetch_file_content(
+            org, repo, candidate.path
+        )
+        file_commits = await github_fetcher.fetch_file_commits(
+            org, repo, candidate.path
+        )
+        contributors = await github_fetcher.fetch_contributors(org, repo)
+        related_prs = await github_fetcher.fetch_recent_prs(org, repo)
+    except GitHubFetchError as e:
+        logger.warning(f"GitHub fetch failed for {candidate.path}: {e}")
+        await record_session(session_id, request_body.repo_url, parsed, None)
+        return _error_payload(
+            "github_unavailable",
+            "Couldn't fetch the file from GitHub right now. Try again in a moment.",
+        )
+
+    # ── Analyze the file for risks ──────────────────────────────────────
+    risk = await analyze_file(
+        file_path=candidate.path,
+        file_content=file_content["content"],
+        language=language,
+        repo_context=repo_meta,
+    )
+
+    if risk is None:
+        await record_session(session_id, request_body.repo_url, parsed, None)
+        return _error_payload(
+            "no_risk_found",
+            "We couldn't identify a specific production failure in this "
+            "repo. This is rare — it usually means the file is too small "
+            "or too clean. Try a different repo.",
+        )
+
+    # ── Generate the incident ───────────────────────────────────────────
     seed = int(
         hashlib.sha256(
-            f"{parsed.org}/{parsed.repo}/{session_id}".encode()
+            f"{org}/{repo}/{session_id}".encode()
         ).hexdigest()[:12],
         16,
     )
-    incident = generate_incident(parsed, seed)
+
+    incident = await generate_incident_from_analysis(
+        parsed=parsed,
+        seed=seed,
+        repo_meta=repo_meta,
+        target_file=candidate.path,
+        file_content=file_content["content"],
+        risk=risk,
+        related_prs=related_prs,
+        file_commits=file_commits,
+        contributors=contributors,
+    )
+
+    if incident is None:
+        # Shouldn't happen given the checks above, but guard anyway.
+        await record_session(session_id, request_body.repo_url, parsed, None)
+        return _error_payload(
+            "generation_failed",
+            "Something went wrong building the incident. Try again.",
+        )
 
     await record_session(session_id, request_body.repo_url, parsed, incident)
 
@@ -292,6 +427,9 @@ async def demo_generate(
             "org": parsed.org,
             "repo": parsed.repo,
             "language_hint": parsed.language_hint,
+        },
+        "meta": {
+            "tries_remaining": MAX_TRIES - tries_used - 1,
         },
     }
 
