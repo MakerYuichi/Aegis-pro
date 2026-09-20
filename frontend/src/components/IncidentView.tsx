@@ -401,9 +401,6 @@ export function IncidentView({
               </div>
               <div className="space-y-3">
                 {incident.extra_metadata!.github!.related_prs!.map((pr: any, index: number) => {
-                  const relevancePercentage = typeof pr.relevance_score === 'number'
-                    ? Math.round(pr.relevance_score * 100)
-                    : 0;
                   return (
                     <motion.div
                       key={pr.number || index}
@@ -414,23 +411,30 @@ export function IncidentView({
                     >
                       <div className="flex items-start justify-between mb-2">
                         <div className="flex-1">
-                          <span className="text-sm font-medium text-brand-primary">
+                          <a
+                            href={pr.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-sm font-medium text-brand-primary hover:underline"
+                          >
                             #{pr.number}: {pr.title}
-                          </span>
+                          </a>
                           <p className="text-xs text-light-muted dark:text-dark-muted mt-1">
                             by {pr.author} • {pr.merged_at ? new Date(pr.merged_at).toLocaleDateString() : '—'}
                           </p>
                         </div>
-                        {pr.relevance_score !== undefined && (
-                          <div className="ml-4">
+                        {typeof pr.relevance_score === 'number' && (
+                          <div className="ml-4 flex-shrink-0">
                             <div className="flex items-center gap-2 mb-1">
                               <span className="text-xs text-light-muted dark:text-dark-muted">Relevance</span>
-                              <span className="text-xs font-semibold text-brand-primary">{relevancePercentage}%</span>
+                              <span className="text-xs font-semibold text-brand-primary">
+                                {Math.round(pr.relevance_score * 100)}%
+                              </span>
                             </div>
                             <div className="w-20 h-2 bg-light-bg dark:bg-dark-bg rounded-full overflow-hidden">
                               <div
                                 className="h-full bg-gradient-to-r from-brand-primary to-brand-secondary"
-                                style={{ width: `${relevancePercentage}%` }}
+                                style={{ width: `${(pr.relevance_score * 100).toFixed(1)}%` }}
                               />
                             </div>
                           </div>
@@ -450,6 +454,54 @@ export function IncidentView({
             </div>
           )}
         </div>
+
+         {/* Recent PRs in this repo (sidebar context, not incident-related) */}
+          {((incident.extra_metadata?.github?.recent_prs?.length) ?? 0) > 0 && (
+            <div className="bg-light-card dark:bg-dark-card rounded-2xl border border-light-border dark:border-dark-border shadow-lg p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <GitMerge className="w-5 h-5 text-brand-secondary" />
+                <h3 className="text-sm font-semibold text-brand-secondary">
+                  Recent activity in this repo
+                </h3>
+                <span className="ml-auto text-xs text-light-muted dark:text-dark-muted">
+                  {incident.extra_metadata!.github!.recent_prs!.length} PRs
+                </span>
+              </div>
+              <div className="space-y-2">
+                {incident.extra_metadata!.github!.recent_prs!.map((pr, i) => (
+                  <div
+                    key={pr.number || i}
+                    className="flex items-start gap-3 p-3 bg-light-surface dark:bg-dark-surface rounded-lg border border-light-border dark:border-dark-border"
+                  >
+                    <GitPullRequest className="w-4 h-4 text-brand-primary mt-0.5 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <a
+                        href={pr.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm font-medium text-brand-primary hover:underline line-clamp-1"
+                      >
+                        #{pr.number}: {pr.title}
+                      </a>
+                      <div className="flex items-center gap-3 mt-0.5">
+                        <span className="text-xs text-light-muted dark:text-dark-muted">
+                          by {pr.author}
+                        </span>
+                        {pr.merged_at && (
+                          <span className="text-xs text-light-muted dark:text-dark-muted">
+                            merged {new Date(pr.merged_at).toLocaleDateString()}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-light-muted dark:text-dark-muted mt-3 text-center">
+                These PRs are not necessarily related to the incident. They show what's active in the repo.
+              </p>
+            </div>
+          )}
 
         {/* Right Column — Actions & Metadata */}
         <div className="space-y-6">

@@ -169,6 +169,7 @@ async def test_returns_none_when_target_file_is_none():
         file_content=_file_content(),
         risk=_risk(),
         related_prs=_related_prs(),
+        recent_prs=_related_prs(),
         file_commits=_file_commits(),
         contributors=_contributors(),
     )
@@ -185,6 +186,7 @@ async def test_returns_none_when_risk_is_none():
         file_content=_file_content(),
         risk=None,
         related_prs=_related_prs(),
+        recent_prs=_related_prs(),
         file_commits=_file_commits(),
         contributors=_contributors(),
     )
@@ -201,6 +203,7 @@ async def test_returns_none_when_file_content_is_none():
         file_content=None,
         risk=_risk(),
         related_prs=_related_prs(),
+        recent_prs=_related_prs(),
         file_commits=_file_commits(),
         contributors=_contributors(),
     )
@@ -217,6 +220,7 @@ async def test_uses_risk_title_and_severity_and_line():
         file_content=_file_content(),
         risk=_risk(line_number=3, title="Custom title", severity="P0"),
         related_prs=_related_prs(),
+        recent_prs=_related_prs(),
         file_commits=_file_commits(),
         contributors=_contributors(),
     )
@@ -238,6 +242,7 @@ async def test_stack_trace_contains_real_line_and_path():
         file_content=_file_content(),
         risk=_risk(line_number=3),
         related_prs=_related_prs(),
+        recent_prs=_related_prs(),
         file_commits=_file_commits(),
         contributors=_contributors(),
     )
@@ -256,6 +261,7 @@ async def test_code_context_uses_real_file_content():
         file_content=_file_content(),
         risk=_risk(line_number=3),
         related_prs=_related_prs(),
+        recent_prs=_related_prs(),
         file_commits=_file_commits(),
         contributors=_contributors(),
     )
@@ -277,6 +283,7 @@ async def test_blame_uses_real_commit_and_contributor():
         file_content=_file_content(),
         risk=_risk(),
         related_prs=_related_prs(),
+        recent_prs=_related_prs(),
         file_commits=_file_commits(),
         contributors=_contributors(),
     )
@@ -298,6 +305,7 @@ async def test_related_prs_uses_real_pr_number_and_url():
         file_content=_file_content(),
         risk=_risk(),
         related_prs=_related_prs(),
+        recent_prs=_related_prs(),
         file_commits=_file_commits(),
         contributors=_contributors(),
     )
@@ -317,6 +325,7 @@ async def test_demo_quality_block_is_populated():
         file_content=_file_content(),
         risk=_risk(),
         related_prs=_related_prs(),
+        recent_prs=_related_prs(),
         file_commits=_file_commits(),
         contributors=_contributors(),
     )
@@ -337,6 +346,7 @@ async def test_deterministic_incident_id_across_two_calls():
         target_file="src/handlers/upstream.py",
         file_content=_file_content(),
         related_prs=_related_prs(),
+        recent_prs=_related_prs(),
         file_commits=_file_commits(),
         contributors=_contributors(),
     )
@@ -358,6 +368,7 @@ async def test_output_is_json_serializable():
         file_content=_file_content(),
         risk=_risk(),
         related_prs=_related_prs(),
+        recent_prs=_related_prs(),
         file_commits=_file_commits(),
         contributors=_contributors(),
     )
@@ -376,6 +387,7 @@ async def test_handles_empty_commits_and_contributors():
         file_content=_file_content(),
         risk=_risk(),
         related_prs=[],
+        recent_prs=_related_prs(),
         file_commits=[],
         contributors=[],
     )
@@ -383,3 +395,48 @@ async def test_handles_empty_commits_and_contributors():
     blame = inc["extra_metadata"]["github"]["blame"]
     assert blame["author"].endswith("@uber")   # fallback handle
     assert blame["commit_hash"] == "unknown"
+    
+@pytest.mark.asyncio
+async def test_blame_omits_pr_fields_when_no_related_prs():
+    """If the file has no associated PR, the blame block must not
+    fabricate one."""
+    inc = await generate_incident_from_analysis(
+        parsed=_parsed("uber", "ride-dispatch"),
+        seed=42,
+        repo_meta=_repo_meta(),
+        target_file="src/handlers/upstream.py",
+        file_content=_file_content(),
+        risk=_risk(),
+        related_prs=[],
+        recent_prs=_related_prs(),
+        file_commits=_file_commits(),
+        contributors=_contributors(),
+    )
+    assert inc is not None
+    blame = inc["extra_metadata"]["github"]["blame"]
+    assert "pr_number" not in blame
+    assert "pr_title" not in blame
+    assert "pr_url" not in blame
+    
+@pytest.mark.asyncio
+async def test_recent_prs_present_in_metadata():
+    inc = await generate_incident_from_analysis(
+        parsed=_parsed("uber", "ride-dispatch"),
+        seed=42,
+        repo_meta=_repo_meta(),
+        target_file="src/handlers/upstream.py",
+        file_content=_file_content(),
+        risk=_risk(),
+        related_prs=_related_prs(),
+        recent_prs=[{"number": 999, "title": "Unrelated PR", "author": "a",
+                     "url": "u", "merged_at": "2026-09-01T00:00:00Z"}],
+        file_commits=_file_commits(),
+        contributors=_contributors(),
+    )
+    assert inc is not None
+    gh = inc["extra_metadata"]["github"]
+    assert "recent_prs" in gh
+    assert len(gh["recent_prs"]) == 1
+    assert gh["recent_prs"][0]["number"] == 999
+    # related_prs and recent_prs are distinct lists
+    assert gh["related_prs"][0]["number"] == 127

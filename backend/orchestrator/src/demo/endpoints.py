@@ -401,7 +401,7 @@ async def demo_generate(
             "don't produce incidents.",
         )
 
-    # ── Fetch the file, commits, contributors, PRs ──────────────────────
+    # ── Fetch the file, commits, contributors ───────────────────────────
     try:
         with timer.stage("fetch_file_ms"):
             file_content = await github_fetcher.fetch_file_content(
@@ -413,8 +413,8 @@ async def demo_generate(
             )
         with timer.stage("fetch_contributors_ms"):
             contributors = await github_fetcher.fetch_contributors(org, repo)
-        with timer.stage("fetch_prs_ms"):
-            related_prs = await github_fetcher.fetch_recent_prs(org, repo)
+        with timer.stage("fetch_recent_prs_ms"):
+            recent_prs = await github_fetcher.fetch_recent_prs(org, repo)
     except GitHubFetchError as e:
         logger.warning(f"GitHub fetch failed for {candidate.path}: {e}")
         await record_session(session_id, request_body.repo_url, parsed, None)
@@ -441,6 +441,16 @@ async def demo_generate(
             "or too clean. Try a different repo.",
         )
 
+    # ── Fetch and score related PRs (uses the risk's line number) ───────
+    try:
+        with timer.stage("fetch_file_prs_ms"):
+            related_prs = await github_fetcher.fetch_related_prs(
+                org, repo, candidate.path, risk.line_number, per_commit_prs=10
+            )
+    except GitHubFetchError as e:
+        logger.warning(f"Related PRs fetch failed: {e}")
+        related_prs = []
+
     # ── Generate the incident ───────────────────────────────────────────
     seed = int(
         hashlib.sha256(
@@ -458,6 +468,7 @@ async def demo_generate(
             file_content=file_content["content"],
             risk=risk,
             related_prs=related_prs,
+            recent_prs=recent_prs,
             file_commits=file_commits,
             contributors=contributors,
         )

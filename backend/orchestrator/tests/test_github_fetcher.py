@@ -204,3 +204,104 @@ async def test_fetch_file_commits_shapes_response():
     assert commits[0]["sha"] == "a3f9d21c"
     assert commits[0]["author"] == "alice"
     assert commits[0]["message"] == "refactor(upi): simplify response handling"
+
+
+# ── Related PRs ────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_fetch_related_prs_empty_commits_returns_empty(monkeypatch):
+    async def _empty_commits(*a, **kw):
+        return []
+    monkeypatch.setattr(gh, "fetch_file_commits", _empty_commits)
+
+    prs = await gh.fetch_related_prs("owner", "repo", "src/x.py", 42)
+    assert prs == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_related_prs_dedupes_prs(monkeypatch):
+    async def _commits(*a, **kw):
+        return [
+            {"sha": "a1b2c3d4", "author": "x", "message": "m1",
+             "committed_at": "2026-01-01T00:00:00Z"},
+            {"sha": "e5f6a7b8", "author": "y", "message": "m2",
+             "committed_at": "2026-01-02T00:00:00Z"},
+        ]
+    monkeypatch.setattr(gh, "fetch_file_commits", _commits)
+
+    async def _pr_for(owner, repo, sha):
+        return {"number": 42, "title": "Same PR", "author": "z",
+                "url": "u", "merged_at": None, "state": "closed"}
+    monkeypatch.setattr(gh, "_fetch_pr_for_commit", _pr_for)
+
+    prs = await gh.fetch_related_prs("o", "r", "src/x.py", 42)
+    assert len(prs) == 1
+    assert prs[0]["number"] == 42
+
+
+@pytest.mark.asyncio
+async def test_fetch_related_prs_skips_commits_without_pr(monkeypatch):
+    async def _commits(*a, **kw):
+        return [{"sha": "aaaa1111", "author": "x", "message": "m",
+                 "committed_at": "2026-01-01T00:00:00Z"}]
+    monkeypatch.setattr(gh, "fetch_file_commits", _commits)
+
+    async def _no_pr(*a, **kw):
+        return None
+    monkeypatch.setattr(gh, "_fetch_pr_for_commit", _no_pr)
+
+    prs = await gh.fetch_related_prs("o", "r", "src/x.py", 42)
+    assert prs == []
+    
+@pytest.mark.asyncio
+async def test_fetch_related_prs_scores_with_llm(monkeypatch):
+    """PRs get relevance_score and reason from the LLM."""
+    async def _commits(*a, **kw):
+        return [{"sha": "aaaa1111", "author": "x", "message": "m",
+                 "committed_at": "2026-01-01T00:00:00Z"}]
+    monkeypatch.setattr(gh, "fetch_file_commits", _commits)
+
+    async def _pr_for(*a, **kw):
+        return {"number": 42, "title": "Fix null check", "author": "z",
+                "url": "u", "merged_at": None, "state": "closed"}
+    monkeypatch.setattr(gh, "_fetch_pr_for_commit", _pr_for)
+
+    async def _complete_raw(*a, **kw):
+        return '[{"number": 42, "score": 0.91, "reason": "removed the null guard"}]'
+
+    class _FakeLLM:
+        async def complete_raw(self, *a, **kw):
+            return await _complete_raw()
+
+    import src.services.llm_service as llm_mod
+    monkeypatch.setattr(llm_mod, "LLMService", lambda: _FakeLLM())
+
+    prs = await gh.fetch_related_prs("o", "r", "src/x.py", 42)
+    assert len(prs) == 1
+    assert prs[0]["relevance_score"] == 0.91
+    assert "null guard" in prs[0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_related_prs_falls_back_when_llm_fails(monkeypatch):
+    """LLM failure → constant 1.0 on every PR, no crash."""
+    async def _commits(*a, **kw):
+        return [{"sha": "aaaa1111", "author": "x", "message": "m",
+                 "committed_at": "2026-01-01T00:00:00Z"}]
+    monkeypatch.setattr(gh, "fetch_file_commits", _commits)
+
+    async def _pr_for(*a, **kw):
+        return {"number": 42, "title": "t", "author": "z",
+                "url": "u", "merged_at": None, "state": "closed"}
+    monkeypatch.setattr(gh, "_fetch_pr_for_commit", _pr_for)
+
+    class _BrokenLLM:
+        async def complete_raw(self, *a, **kw):
+            raise RuntimeError("boom")
+
+    import src.services.llm_service as llm_mod
+    monkeypatch.setattr(llm_mod, "LLMService", lambda: _BrokenLLM())
+
+    prs = await gh.fetch_related_prs("o", "r", "src/x.py", 42)
+    assert len(prs) == 1
+    assert prs[0]["relevance_score"] == 1.0

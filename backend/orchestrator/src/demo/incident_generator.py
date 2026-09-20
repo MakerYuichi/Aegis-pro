@@ -96,13 +96,12 @@ def _make_real_blame(
     contributors: list[dict],
     related_prs: list[dict],
     org: str,
-    repo: str,
 ) -> dict:
     """
     Build the blame block from the file's real commit history and the
-    repo's real contributors. If there are no commits, we fall back to
-    the top contributor. If there are no contributors, we synthesize a
-    placeholder — this is the one honest exception.
+    repo's real contributors. If the file has an associated PR from the
+    commit history, include it. If not, omit the PR fields — do not
+    fabricate one.
     """
     top_commit = file_commits[0] if file_commits else None
     top_contributor = contributors[0] if contributors else None
@@ -115,11 +114,6 @@ def _make_real_blame(
     commit_hash = (top_commit or {}).get("sha") or "unknown"
     message = (top_commit or {}).get("message") or f"recent changes to {file_path}"
 
-    # Pick the first related PR that actually touched this file — ideally
-    # one whose number matches the top commit's PR if we had it. Fall
-    # back to the first PR in the list.
-    pr = related_prs[0] if related_prs else None
-
     blame: dict[str, Any] = {
         "commit_hash": commit_hash,
         "author": author,
@@ -129,13 +123,20 @@ def _make_real_blame(
         "file": file_path,
     }
 
-    if pr:
-        blame.update({
-            "pr_number": pr.get("number"),
-            "pr_title": pr.get("title"),
-            "pr_url": pr.get("url"),
-            "pr_author": pr.get("author"),
-        })
+    # Only claim a PR if the file's commit history actually points to one.
+    # related_prs comes from fetch_related_prs, which walks the file's
+    # commits — so a match here is a real match.
+    if related_prs:
+        # related_prs[0] is the PR whose merge commit is the newest commit
+        # to this file — the most likely candidate for the failing line.
+        matched = related_prs[0]
+        if matched.get("number"):
+            blame.update({
+                "pr_number": matched["number"],
+                "pr_title": matched.get("title"),
+                "pr_url": matched.get("url"),
+                "pr_author": matched.get("author"),
+            })
 
     blame["contributors"] = [
         {
@@ -150,40 +151,38 @@ def _make_real_blame(
     return blame
 
 
-def _make_real_related_prs(
-    related_prs: list[dict],
-    file_path: str,
-    line_number: int,
-) -> list[dict]:
+def _make_real_related_prs(related_prs: list[dict], file_path: str) -> list[dict]:
     """
-    Annotate the real PRs with a relevance score and a reason. The score
-    is a heuristic — real PRs that touched this exact file score higher
-    than PRs that only touched the repo.
+    Return the file-related PRs with their LLM relevance scores intact.
+    Sorted by relevance_score desc, so the most likely cause comes first.
     """
     out = []
-    for i, pr in enumerate(related_prs[:5]):
-        files = pr.get("files") or []
-        touched_file = file_path in files
-        # Higher relevance for the first PR, lower for later ones, plus
-        # a bump if the PR touched this exact file.
-        score = max(0.3, 0.95 - i * 0.15)
-        if touched_file:
-            score = min(0.98, score + 0.05)
-        reason = (
-            f"PR #{pr.get('number')} modified {file_path}."
-            if touched_file
-            else f"PR #{pr.get('number')} is one of the most recent changes "
-                 f"in the repository."
-        )
+    for pr in related_prs[:5]:
         out.append({
             "number": pr.get("number"),
             "title": pr.get("title"),
             "author": pr.get("author"),
             "url": pr.get("url"),
             "merged_at": pr.get("merged_at"),
-            "files": files,
-            "relevance_score": round(score, 2),
-            "reason": reason,
+            "relevance_score": pr.get("relevance_score", 1.0),
+            "reason": pr.get("reason") or f"PR #{pr.get('number')} was merged into {file_path}.",
+        })
+    return out
+
+
+def _make_recent_prs(recent_prs: list[dict]) -> list[dict]:
+    """
+    Return the repo's most recent merged PRs — a sidebar, not part of
+    the incident analysis. Rendered separately by the frontend.
+    """
+    out = []
+    for pr in recent_prs[:5]:
+        out.append({
+            "number": pr.get("number"),
+            "title": pr.get("title"),
+            "author": pr.get("author"),
+            "url": pr.get("url"),
+            "merged_at": pr.get("merged_at"),
         })
     return out
 
@@ -214,6 +213,7 @@ async def generate_incident_from_analysis(
     file_content: Optional[str],
     risk: Optional[RiskFinding],
     related_prs: list[dict],
+    recent_prs: list[dict],
     file_commits: list[dict],
     contributors: list[dict],
 ) -> Optional[dict]:
@@ -267,10 +267,9 @@ async def generate_incident_from_analysis(
         contributors=contributors,
         related_prs=related_prs,
         org=org,
-        repo=repo,
     )
 
-    related = _make_real_related_prs(related_prs, target_file, risk.line_number)
+    related = _make_real_related_prs(related_prs, target_file)
     auto_fix = _make_analysis_auto_fix(risk, target_file)
 
     affected = [repo, "auth", "ledger"]
@@ -299,6 +298,7 @@ async def generate_incident_from_analysis(
             "github": {
                 "blame": blame,
                 "related_prs": related,
+                "recent_prs": _make_recent_prs(recent_prs),
             },
             "code_context": code_context,
             "auto_fix": auto_fix,
