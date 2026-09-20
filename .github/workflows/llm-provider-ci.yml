@@ -10,6 +10,17 @@ jobs:
   test-llm-providers:
     runs-on: ubuntu-latest
 
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v5
 
@@ -26,7 +37,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run LLM provider tests
+      - name: Wait for Redis
+        run: |
+          for i in {1..15}; do
+            if redis-cli -h localhost ping | grep -q PONG; then
+              echo "Redis is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Redis did not start in time"
+          exit 1
+
+      - name: Run tests
         working-directory: backend/orchestrator
         env:
           LLM_PROVIDER: mock
