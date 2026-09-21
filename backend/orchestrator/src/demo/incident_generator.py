@@ -251,7 +251,7 @@ async def generate_incident_from_analysis(
     # the hash — the incident ID is stable across re-runs even if the LLM
     # picks a different line.
     incident_id = "INC-DEMO-" + hashlib.sha1(
-        f"{org}/{repo}/{seed}".encode()
+        f"{org}/{repo}/{target_file}/{seed}".encode()
     ).hexdigest()[:8].upper()
 
     declared_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

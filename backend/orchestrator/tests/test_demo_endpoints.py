@@ -173,8 +173,8 @@ def test_rate_limited_when_github_403(client_demo_on):
 def test_empty_repo_returns_empty_repo_error(client_demo_on):
     with _mock_metadata_and_tree(tree=[]):
         with patch(
-            "src.demo.endpoints.select_target_file",
-            return_value=None,
+            "src.demo.endpoints.select_target_files",
+            return_value=[],
         ):
             r = client_demo_on.post(
                 "/api/v1/demo/generate",
@@ -193,8 +193,8 @@ def test_fallback_confidence_returns_not_code_error(client_demo_on):
     )
     with _mock_metadata_and_tree():
         with patch(
-            "src.demo.endpoints.select_target_file",
-            return_value=fallback,
+            "src.demo.endpoints.select_target_files",
+            return_value=[fallback],
         ):
             r = client_demo_on.post(
                 "/api/v1/demo/generate",
@@ -322,8 +322,8 @@ def _mock_full_pipeline(candidate=None, risk=None):
                     ]),
                 ),
                 patch(
-                    "src.demo.endpoints.select_target_file",
-                    return_value=candidate,
+                    "src.demo.endpoints.select_target_files",
+                    return_value=[candidate],
                 ),
                 patch(
                     "src.demo.endpoints.github_fetcher.fetch_file_content",
