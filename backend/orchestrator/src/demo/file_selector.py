@@ -103,7 +103,7 @@ _EXTENSIONS_BY_LANGUAGE = {
     "Rust": {".rs"},
 }
 
-_KNOWN_LANGUAGES = set(_EXTENSIONS_BY_LANGUAGE.keys())\
+_KNOWN_LANGUAGES = set(_EXTENSIONS_BY_LANGUAGE.keys())
 
 # Extensions we consider "code". If the top candidate doesn't have one
 # of these, we mark it fallback — the generator will synthesize the
@@ -279,20 +279,23 @@ def _score_candidate(path: str, size: int, language: str) -> FileCandidate:
     return FileCandidate(path=path, score=round(total, 3), reasons=reasons, confidence=confidence)
 
 
-def select_target_file(
+def select_target_files(
     tree: list[dict],
     language: str,
-) -> Optional[FileCandidate]:
+    limit: int = 5,
+) -> list[FileCandidate]:
     """
-    Return the best candidate from the tree, or None if the tree has no
-    blobs at all.
+    Return up to `limit` top-scoring file candidates, sorted by score desc.
 
-    Never raises. Never returns None for a non-empty tree — if every
-    candidate scores poorly, the best of them is returned with
-    confidence='low'.
+    Filters out `fallback`-confidence candidates (non-code files like
+    READMEs and configs) so the dropdown only shows real code. If every
+    candidate is fallback, returns the single best one anyway so the
+    caller can surface "not_code".
+
+    Never raises. Returns [] for empty or blob-less trees.
     """
     if not tree:
-        return None
+        return []
 
     candidates: list[FileCandidate] = []
     for item in tree:
@@ -307,20 +310,54 @@ def select_target_file(
         candidates.append(_score_candidate(path, size, language))
 
     if not candidates:
-        return None
+        return []
 
-    # Sort by score desc, then by path length asc (shorter paths win ties),
-    # then alphabetically for full determinism.
     candidates.sort(key=lambda c: (-c.score, len(c.path), c.path))
-    top = candidates[0]
 
-    ext = _extension(top.path)
-    if ext not in _CODE_EXTENSIONS:
-        return FileCandidate(
-            path=top.path,
-            score=top.score,
-            reasons=top.reasons + ["no code extension — incident will be synthesized"],
-            confidence="fallback",
-        )
+    # Partition into code and fallback picks.
+    code: list[FileCandidate] = []
+    fallback: list[FileCandidate] = []
+    for c in candidates:
+        ext = _extension(c.path)
+        if ext in _CODE_EXTENSIONS:
+            code.append(c)
+        else:
+            # Rebuild with the fallback confidence so the reasons list
+            # stays accurate.
+            fallback.append(FileCandidate(
+                path=c.path,
+                score=c.score,
+                reasons=c.reasons + ["no code extension — incident will be synthesized"],
+                confidence="fallback",
+            ))
 
-    return top
+    if code:
+        return code[:limit]
+
+    # No code file at all — return the single best non-code pick so the
+    # caller can return a "not_code" error with the path attached.
+    return fallback[:1]
+
+
+def select_target_file(
+    tree: list[dict],
+    language: str,
+) -> Optional[FileCandidate]:
+    """
+    Return the single best candidate, or None for an empty tree.
+
+    Thin wrapper around select_target_files. Kept for callers that don't
+    need the full list. Same behavior as before: never returns None for
+    a non-empty tree.
+    """
+    picks = select_target_files(tree, language, limit=1)
+    return picks[0] if picks else None
+
+
+def score_one_file(path: str, size: int, language: str) -> FileCandidate:
+    """
+    Score a single file path. Public wrapper around _score_candidate.
+    Used by the endpoint when a specific file is forced and isn't in the
+    top-N candidates.
+    """
+    return _score_candidate(path, size, language)

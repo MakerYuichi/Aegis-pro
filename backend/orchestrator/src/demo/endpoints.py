@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Any
+from typing import Optional
 import hashlib
 import time
 import uuid
@@ -20,7 +20,7 @@ from src.demo.github_fetcher import (
     GitHubNetworkError,
     GitHubFetchError,
 )
-from src.demo.file_selector import select_target_file
+from src.demo.file_selector import select_target_file, select_target_files, score_one_file
 from src.demo.risk_analyzer import analyze_file
 
 
@@ -280,63 +280,31 @@ def _error_payload(reason: str, detail: str) -> dict:
         "detail": detail,
         "supported_shapes": supported_shapes(),
     }
+    
+async def _run_pipeline(
+    *,
+    session_id: str,
+    raw_url: str,
+    parsed,
+    timer: "_Timer",
+    forced_file_path: Optional[str] = None,
+) -> tuple[dict | None, dict | None]:
+    """
+    Run the analysis pipeline for a parsed URL and return (incident, error).
 
+    Exactly one of the tuple elements is non-None.
 
-# ── Routes ───────────────────────────────────────────────────────────────
+    If `forced_file_path` is provided, the pipeline skips the selector
+    and analyzes that file directly. Used by /regenerate so the dropdown
+    can target a specific candidate. The file must be present in the
+    repo tree — otherwise we return a not_found error.
 
-@router.get("/default")
-async def demo_default(response: Response):
-    _require_demo_mode()
-    response.set_cookie(
-        SESSION_COOKIE,
-        uuid.uuid4().hex,
-        max_age=SESSION_MAX_AGE,
-        httponly=True,
-        samesite="lax",
-        path="/",
-    )
-    return _AEGIS_DEFAULT
-
-
-@router.post("/generate")
-async def demo_generate(
-    request_body: GenerateRequest,
-    request: Request,
-    response: Response,
-):
-    _require_demo_mode()
-    session_id = _get_or_create_session(request, response)
-
-    timer = _Timer()
-
-    # ── Try cap (checked first, before any external call) ───────────────
-    with timer.stage("try_check_ms"):
-        tries_used = await count_successful_tries(session_id)
-    if tries_used >= MAX_TRIES:
-        return {
-            "signup_required": True,
-            "reason": "signup_required",
-            "detail": (
-                f"You've seen {MAX_TRIES} real analyses. Sign up to run "
-                "AEGIS PRO on your own stack with your own credentials."
-            ),
-            "tries_remaining": 0,
-        }
-
-    # ── Timing limit (Redis token bucket, fail-open) ────────────────────
-    await _check_rate_limit(session_id)
-
-    # ── Parse the URL ───────────────────────────────────────────────────
-    with timer.stage("parse_ms"):
-        parsed = parse_repo_input(request_body.repo_url)
-    if not parsed.ok:
-        await record_session(session_id, request_body.repo_url, parsed, None)
-        return _error_payload(parsed.reason, parsed.detail)
-
+    Shared between /generate and /regenerate.
+    """
     org = parsed.org
     repo = parsed.repo
 
-    # ── Fetch repo metadata + tree (cached) ─────────────────────────────
+    # ── Fetch repo metadata + tree ──────────────────────────────────────
     try:
         with timer.stage("fetch_meta_ms"):
             repo_meta = await github_fetcher.fetch_repo_metadata(org, repo)
@@ -345,23 +313,19 @@ async def demo_generate(
                 org, repo, repo_meta["default_branch"]
             )
     except GitHubRepoNotFoundError:
-        await record_session(session_id, request_body.repo_url, parsed, None)
-        return _error_payload(
+        return None, _error_payload(
             "not_found",
             f"GitHub doesn't have a public repo at {org}/{repo}. "
             "Check the URL, or try a different repo.",
         )
-    except GitHubRateLimitError as e:
-        retry = "a few minutes" if not e.reset_epoch else "a few minutes"
-        await record_session(session_id, request_body.repo_url, parsed, None)
-        return _error_payload(
+    except GitHubRateLimitError:
+        return None, _error_payload(
             "rate_limited",
-            f"GitHub's public API is rate-limited right now. Try again in {retry}.",
+            "GitHub's public API is rate-limited right now. Try again in a few minutes.",
         )
     except (GitHubNetworkError, GitHubFetchError) as e:
         logger.warning(f"GitHub fetch failed: {e}")
-        await record_session(session_id, request_body.repo_url, parsed, None)
-        return _error_payload(
+        return None, _error_payload(
             "github_unavailable",
             "Couldn't reach GitHub right now. Try again in a moment.",
         )
@@ -369,26 +333,54 @@ async def demo_generate(
     # ── Select the target file ──────────────────────────────────────────
     language = repo_meta.get("language") or parsed.language_hint
     with timer.stage("select_file_ms"):
-        candidate = select_target_file(tree, language)
+        candidates = select_target_files(tree, language, limit=5)
 
-    if candidate is None:
-        await record_session(session_id, request_body.repo_url, parsed, None)
-        return _error_payload(
+    if not candidates:
+        return None, _error_payload(
             "empty_repo",
             "This repository appears to be completely empty. "
             "Try a repo with active code configurations to launch the simulation.",
         )
 
+    # ── Pick the candidate: forced path or top-scoring ──────────────────
+    if forced_file_path:
+        # Find the forced path in the candidate list. If it's not a
+        # candidate (didn't score high enough, or doesn't exist in the
+        # tree), fall back to a direct tree lookup.
+        match = next(
+            (c for c in candidates if c.path == forced_file_path),
+            None,
+        )
+        if match is None:
+            # Not in the top 5. Check whether it exists in the tree at all,
+            # and pull its size while we're there.
+            file_size = next(
+                (item.get("size", 0) for item in tree
+                 if item.get("path") == forced_file_path
+                 and item.get("type") == "blob"),
+                None,
+            )
+            if file_size is None:
+                return None, _error_payload(
+                    "file_not_found",
+                    f"File '{forced_file_path}' not found in {org}/{repo}. "
+                    "Try a different file from the list.",
+                )
+            # It exists — score it directly so we get a proper candidate.
+            match = score_one_file(forced_file_path, int(file_size or 0), language)
+        candidate = match
+    else:
+        candidate = candidates[0]
+
     if candidate.confidence == "fallback":
-        await record_session(session_id, request_body.repo_url, parsed, None)
-        return _error_payload(
+        return None, _error_payload(
             "not_code",
             "This repository doesn't contain code that can fail. "
             "AEGIS PRO analyzes source files — READMEs, configs, and docs "
             "don't produce incidents.",
         )
 
-    # ── Fetch the file, commits, contributors ───────────────────────────
+    # ── Fetch file, commits, contributors, recent PRs ───────────────────
     try:
         with timer.stage("fetch_file_ms"):
             file_content = await github_fetcher.fetch_file_content(
@@ -404,13 +396,12 @@ async def demo_generate(
             recent_prs = await github_fetcher.fetch_recent_prs(org, repo)
     except GitHubFetchError as e:
         logger.warning(f"GitHub fetch failed for {candidate.path}: {e}")
-        await record_session(session_id, request_body.repo_url, parsed, None)
-        return _error_payload(
+        return None, _error_payload(
             "github_unavailable",
             "Couldn't fetch the file from GitHub right now. Try again in a moment.",
         )
 
-    # ── Analyze the file for risks ──────────────────────────────────────
+    # ── Analyze the file ────────────────────────────────────────────────
     with timer.stage("analyze_ms"):
         risk = await analyze_file(
             file_path=candidate.path,
@@ -420,15 +411,13 @@ async def demo_generate(
         )
 
     if risk is None:
-        await record_session(session_id, request_body.repo_url, parsed, None)
-        return _error_payload(
+        return None, _error_payload(
             "no_risk_found",
             "We couldn't identify a specific production failure in this "
-            "repo. This is rare — it usually means the file is too small "
-            "or too clean. Try a different repo.",
+            "file. Try a different file from the list, or a different repo.",
         )
 
-    # ── Fetch and score related PRs (uses the risk's line number) ───────
+    # ── Fetch and score related changes ─────────────────────────────────
     try:
         with timer.stage("fetch_file_prs_ms"):
             related_prs = await github_fetcher.fetch_related_prs(
@@ -461,12 +450,82 @@ async def demo_generate(
         )
 
     if incident is None:
-        # Shouldn't happen given the checks above, but guard anyway.
-        await record_session(session_id, request_body.repo_url, parsed, None)
-        return _error_payload(
+        return None, _error_payload(
             "generation_failed",
             "Something went wrong building the incident. Try again.",
         )
+
+    # ── Attach the candidate list for the dropdown ──────────────────────
+    incident["extra_metadata"]["demo_candidates"] = [
+        {"path": c.path, "score": c.score, "confidence": c.confidence}
+        for c in candidates
+    ]
+
+    return incident, None
+
+
+# ── Routes ───────────────────────────────────────────────────────────────
+
+@router.get("/default")
+async def demo_default(response: Response):
+    _require_demo_mode()
+    response.set_cookie(
+        SESSION_COOKIE,
+        uuid.uuid4().hex,
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+    return _AEGIS_DEFAULT
+
+
+@router.post("/generate")
+async def demo_generate(
+    request_body: GenerateRequest,
+    request: Request,
+    response: Response,
+):
+    _require_demo_mode()
+    session_id = _get_or_create_session(request, response)
+
+    timer = _Timer()
+
+    # ── Try cap ─────────────────────────────────────────────────────────
+    with timer.stage("try_check_ms"):
+        tries_used = await count_successful_tries(session_id)
+    if tries_used >= MAX_TRIES:
+        return {
+            "signup_required": True,
+            "reason": "signup_required",
+            "detail": (
+                f"You've seen {MAX_TRIES} real analyses. Sign up to run "
+                "AEGIS PRO on your own stack with your own credentials."
+            ),
+            "tries_remaining": 0,
+        }
+
+    # ── Timing limit ────────────────────────────────────────────────────
+    await _check_rate_limit(session_id)
+
+    # ── Parse the URL ───────────────────────────────────────────────────
+    with timer.stage("parse_ms"):
+        parsed = parse_repo_input(request_body.repo_url)
+    if not parsed.ok:
+        await record_session(session_id, request_body.repo_url, parsed, None)
+        return _error_payload(parsed.reason, parsed.detail)
+
+    # ── Run the pipeline ────────────────────────────────────────────────
+    incident, error = await _run_pipeline(
+        session_id=session_id,
+        raw_url=request_body.repo_url,
+        parsed=parsed,
+        timer=timer,
+    )
+
+    if error:
+        await record_session(session_id, request_body.repo_url, parsed, None)
+        return error
 
     await record_session(session_id, request_body.repo_url, parsed, incident)
 
@@ -481,6 +540,127 @@ async def demo_generate(
         "meta": {
             "tries_remaining": MAX_TRIES - tries_used - 1,
             "timings": timer.snapshot(),
+        },
+    }
+    
+
+class RegenerateRequest(BaseModel):
+    repo_url: str
+    file_path: str
+
+
+REGENERATE_FREE_KEY_TTL = 60 * 60 * 4  # 4 hours
+
+
+async def _has_used_free_regenerate(session_id: str) -> bool:
+    """Check whether this session has already used its free switch."""
+    try:
+        client = redis.from_url(settings.REDIS_URL)
+        try:
+            return await client.exists(f"demo:regenerate_used:{session_id}") == 1
+        finally:
+            await client.aclose()
+    except Exception as e:
+        # Fail open — if Redis is down, treat the switch as free.
+        logger.warning(f"Regenerate free-switch check failed: {e}")
+        return False
+
+
+async def _mark_free_regenerate_used(session_id: str) -> None:
+    """Set the free-switch flag for this session, with a TTL."""
+    try:
+        client = redis.from_url(settings.REDIS_URL)
+        try:
+            await client.set(
+                f"demo:regenerate_used:{session_id}",
+                "1",
+                ex=REGENERATE_FREE_KEY_TTL,
+            )
+        finally:
+            await client.aclose()
+    except Exception as e:
+        logger.warning(f"Regenerate free-switch mark failed: {e}")
+
+
+@router.post("/regenerate")
+async def demo_regenerate(
+    request_body: RegenerateRequest,
+    request: Request,
+    response: Response,
+):
+    """
+    Re-run the pipeline for a specific file within the same repo.
+
+    Intended for the file-selector dropdown. The first regenerate per
+    session is free; subsequent ones consume one of the session's tries.
+
+    The response shape matches /generate, plus a was_free_switch flag.
+    """
+    _require_demo_mode()
+    session_id = _get_or_create_session(request, response)
+
+    timer = _Timer()
+
+    # ── Determine whether this regenerate is free or paid ───────────────
+    is_free = not await _has_used_free_regenerate(session_id)
+    tries_used = await count_successful_tries(session_id)
+
+    if not is_free and tries_used >= MAX_TRIES:
+        return {
+            "signup_required": True,
+            "reason": "signup_required",
+            "detail": (
+                "You've used your free file switch and reached the "
+                "demo limit. Sign up to keep exploring."
+            ),
+            "tries_remaining": 0,
+        }
+
+    # ── Timing limit ────────────────────────────────────────────────────
+    await _check_rate_limit(session_id)
+
+    # ── Parse the URL ───────────────────────────────────────────────────
+    with timer.stage("parse_ms"):
+        parsed = parse_repo_input(request_body.repo_url)
+    if not parsed.ok:
+        return _error_payload(parsed.reason, parsed.detail)
+
+    # ── Run the pipeline with the forced file ───────────────────────────
+    incident, error = await _run_pipeline(
+        session_id=session_id,
+        raw_url=request_body.repo_url,
+        parsed=parsed,
+        timer=timer,
+        forced_file_path=request_body.file_path,
+    )
+
+    if error:
+        # Don't mark the free switch used on error — the caller can retry.
+        return error
+
+    # ── Mark the free switch used, if this was the free one ────────────
+    if is_free:
+        await _mark_free_regenerate_used(session_id)
+
+    await record_session(session_id, request_body.repo_url, parsed, incident)
+
+    # If the regenerate was paid, deduct a try. Otherwise the count is
+    # unchanged.
+    tries_remaining = MAX_TRIES - tries_used - (0 if is_free else 1)
+    tries_remaining = max(0, tries_remaining)
+
+    return {
+        "incident": incident,
+        "parsed": {
+            "host": parsed.host,
+            "org": parsed.org,
+            "repo": parsed.repo,
+            "language_hint": parsed.language_hint,
+        },
+        "meta": {
+            "tries_remaining": tries_remaining,
+            "timings": timer.snapshot(),
+            "was_free_switch": is_free,
         },
     }
 

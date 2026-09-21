@@ -3,15 +3,17 @@ import { Link } from 'react-router-dom';
 import {
   Loader2, Search, AlertTriangle, RotateCcw,
   FileCode, GitCommit, GitPullRequest, Sparkles, ExternalLink,
-  ChevronDown,
+  ChevronDown, FileStack,
 } from 'lucide-react';
 import {
   getDemoDefault,
   generateDemoIncident,
+  regenerateDemoIncident,
   resetDemo,
   type Incident,
   type DemoGenerateResponse,
   type DemoTimings,
+  type DemoCandidate,
 } from '../utils/api';
 import { IncidentView } from '../components/IncidentView';
 import { DemoBadge } from '../components/DemoBadge';
@@ -52,6 +54,11 @@ export function DemoPage() {
   const [triesRemaining, setTriesRemaining] = useState<number | null>(null);
   const [sampleExpanded, setSampleExpanded] = useState(false);
 
+  // Dropdown state
+  const [candidates, setCandidates] = useState<DemoCandidate[]>([]);
+  const [currentFile, setCurrentFile] = useState<string | null>(null);
+  const [regenerating, setRegenerating] = useState(false);
+
   useEffect(() => {
     fetchDefault();
   }, []);
@@ -62,6 +69,8 @@ export function DemoPage() {
       setError(null);
       setParsedLabel(null);
       setTimings(null);
+      setCandidates([]);
+      setCurrentFile(null);
       const data = await getDemoDefault();
       setDefaultIncident(data);
       setIncident(data);
@@ -77,6 +86,26 @@ export function DemoPage() {
     }
   };
 
+  const applyResponse = (response: DemoGenerateResponse) => {
+    if ('reason' in response) {
+      setError({
+        reason: response.reason,
+        detail: response.detail,
+        supported_shapes: response.supported_shapes ?? [],
+        signupRequired: response.signup_required,
+      });
+      setTriesRemaining(response.tries_remaining ?? null);
+      return false;
+    }
+    setIncident(response.incident);
+    setParsedLabel(`${response.parsed.org}/${response.parsed.repo}`);
+    setTimings(response.meta.timings ?? null);
+    setTriesRemaining(response.meta.tries_remaining);
+    setCandidates(response.incident.extra_metadata?.demo_candidates ?? []);
+    setCurrentFile(response.incident.file_path ?? null);
+    return true;
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!url.trim()) {
@@ -88,33 +117,14 @@ export function DemoPage() {
       return;
     }
 
-    // Switch to the analyzing view immediately — the full-screen
-    // takeover is what makes the demo feel like an event.
     setView('analyzing');
     setError(null);
     setTimings(null);
 
     try {
       const response: DemoGenerateResponse = await generateDemoIncident(url);
-
-      if ('reason' in response) {
-        setError({
-          reason: response.reason,
-          detail: response.detail,
-          supported_shapes: response.supported_shapes ?? [],
-          signupRequired: response.signup_required,
-        });
-        setParsedLabel(null);
-        setTriesRemaining(response.tries_remaining ?? null);
-        // Return to landing with the error banner visible.
-        setView('landing');
-      } else {
-        setIncident(response.incident);
-        setParsedLabel(`${response.parsed.org}/${response.parsed.repo}`);
-        setTimings(response.meta.timings ?? null);
-        setTriesRemaining(response.meta.tries_remaining);
-        setView('result');
-      }
+      const ok = applyResponse(response);
+      setView(ok ? 'result' : 'landing');
     } catch (err) {
       console.error('Generate failed:', err);
       setError({
@@ -123,6 +133,33 @@ export function DemoPage() {
         supported_shapes: [],
       });
       setView('landing');
+    }
+  };
+
+  const handleFileSwitch = async (filePath: string) => {
+    if (!parsedLabel || filePath === currentFile || regenerating) return;
+
+    // parsedLabel is "org/repo"; we need the URL form.
+    const repoUrl = `github.com/${parsedLabel}`;
+
+    setRegenerating(true);
+    setError(null);
+
+    try {
+      const response = await regenerateDemoIncident(repoUrl, filePath);
+      const ok = applyResponse(response);
+      if (!ok) {
+        // Keep the previous incident visible; the error banner shows why.
+      }
+    } catch (err) {
+      console.error('Regenerate failed:', err);
+      setError({
+        reason: 'network',
+        detail: err instanceof Error ? err.message : 'Request failed',
+        supported_shapes: [],
+      });
+    } finally {
+      setRegenerating(false);
     }
   };
 
@@ -137,6 +174,8 @@ export function DemoPage() {
     setParsedLabel(null);
     setTimings(null);
     setTriesRemaining(null);
+    setCandidates([]);
+    setCurrentFile(null);
     setIncident(defaultIncident);
     setView('landing');
   };
@@ -179,7 +218,6 @@ export function DemoPage() {
     return (
       <div className="min-h-screen bg-light-bg dark:bg-dark-bg">
         <div className="max-w-6xl mx-auto px-6 py-12">
-          {/* Header */}
           <div className="flex items-center justify-between mb-8">
             <div className="flex items-center gap-2">
               <span className="text-2xl">🛡️</span>
@@ -269,6 +307,81 @@ export function DemoPage() {
             </button>
           </div>
 
+          {/* ── File dropdown ──────────────────────────────────────────── */}
+          {candidates.length > 1 && (
+            <div className="mb-6 bg-light-card dark:bg-dark-card rounded-xl border border-light-border dark:border-dark-border p-4">
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="flex items-center gap-2 text-sm text-light-muted dark:text-dark-muted">
+                  <FileStack className="w-4 h-4 text-brand-primary" />
+                  <span>Try a different file:</span>
+                </div>
+                <div className="relative flex-1 min-w-[260px]">
+                  <select
+                    value={currentFile ?? ''}
+                    onChange={(e) => handleFileSwitch(e.target.value)}
+                    disabled={regenerating}
+                    className="w-full appearance-none pl-3 pr-10 py-2 bg-light-bg dark:bg-dark-bg border border-light-border dark:border-dark-border rounded-lg text-sm text-light-text dark:text-dark-text font-mono focus:outline-none focus:ring-2 focus:ring-brand-primary/30 disabled:opacity-50"
+                  >
+                    {candidates.map((c) => (
+                      <option key={c.path} value={c.path}>
+                        {c.path}
+                      </option>
+                    ))}
+                  </select>
+                  {regenerating ? (
+                    <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-primary animate-spin" />
+                  ) : (
+                    <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-light-muted dark:text-dark-muted pointer-events-none" />
+                  )}
+                </div>
+              </div>
+              <p className="text-xs text-light-muted dark:text-dark-muted mt-2">
+                {regenerating
+                  ? 'Analyzing a different file from your repo…'
+                  : candidates.length === 5
+                  ? 'AEGIS PRO picked the highest-scoring file. Switch to see the analysis for another.'
+                  : `${candidates.length} candidate files found.`}
+              </p>
+            </div>
+          )}
+
+          {/* Error banner (also covers paid-switch signup_required) */}
+          {error && (
+            <div className="mb-6 bg-severity-critical/10 border border-severity-critical/30 rounded-2xl p-5">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-severity-critical mt-0.5 flex-shrink-0" />
+                <div className="flex-1">
+                  {error.signupRequired ? (
+                    <>
+                      <p className="text-sm font-semibold text-severity-critical mb-1">
+                        You've used all your free demo analyses.
+                      </p>
+                      <p className="text-sm text-light-muted dark:text-dark-muted mb-3">
+                        {error.detail}
+                      </p>
+                      <Link
+                        to="/"
+                        className="inline-flex items-center gap-2 px-4 py-2 bg-brand-primary text-white rounded-lg text-sm font-semibold hover:bg-brand-primary/90 transition"
+                      >
+                        Join Cloud Beta
+                        <ExternalLink className="w-3 h-3" />
+                      </Link>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-sm font-semibold text-severity-critical mb-1">
+                        Could not switch to that file.
+                      </p>
+                      <p className="text-sm text-light-muted dark:text-dark-muted">
+                        {error.detail}
+                      </p>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Timings */}
           {timings && (
             <div className="mb-8">
@@ -286,9 +399,7 @@ export function DemoPage() {
   // ── State 1: Landing ─────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-light-bg dark:bg-dark-bg">
-      {/* Hero — owns the viewport */}
       <section className="min-h-[88vh] flex flex-col">
-        {/* Top bar */}
         <div className="px-6 py-5 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-2xl">🛡️</span>
@@ -304,7 +415,6 @@ export function DemoPage() {
           </Link>
         </div>
 
-        {/* Centered hero content */}
         <div className="flex-1 flex items-center justify-center px-6">
           <div className="max-w-3xl w-full text-center">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-primary/10 text-brand-primary text-xs font-semibold mb-6">
@@ -313,18 +423,18 @@ export function DemoPage() {
             </div>
 
             <h1 className="text-5xl sm:text-6xl font-bold text-light-text dark:text-dark-text mb-5 leading-[1.05]">
-              Alert in.
+              Paste a repo.
               <br />
-              <span className="text-brand-primary">Reviewed fix PR</span> out.
+              Watch AEGIS PRO find a{' '}
+              <span className="text-brand-primary">real bug.</span>
             </h1>
 
             <p className="text-lg text-light-muted dark:text-dark-muted mb-10 max-w-2xl mx-auto">
-              Open-source AI incident commander. Paste a public GitHub repo —
-              AEGIS PRO finds a real production risk in a real file, with blame,
-              related changes, and a suggested fix you can verify on GitHub.
+              AEGIS PRO reads your actual source files, identifies production
+              risks with an LLM, and generates a patch approval — in under
+              10 seconds.
             </p>
 
-            {/* Input — the primary action */}
             <form onSubmit={handleSubmit} className="mb-4">
               <div className="flex flex-col sm:flex-row gap-3 max-w-2xl mx-auto">
                 <div className="relative flex-1">
@@ -360,7 +470,6 @@ export function DemoPage() {
               </p>
             )}
 
-            {/* Error banner — appears below the input, above the fold */}
             {error && (
               <div className="mt-6 bg-severity-critical/10 border border-severity-critical/30 rounded-2xl p-5 text-left max-w-2xl mx-auto">
                 <div className="flex items-start gap-3">
@@ -419,13 +528,11 @@ export function DemoPage() {
           </div>
         </div>
 
-        {/* Scroll hint */}
         <div className="pb-6 text-center">
           <ChevronDown className="w-5 h-5 text-light-muted dark:text-dark-muted mx-auto animate-bounce" />
         </div>
       </section>
 
-      {/* Sample output — compact card, expandable */}
       <section className="border-t border-light-border dark:border-dark-border bg-light-surface dark:bg-dark-surface py-16 px-6">
         <div className="max-w-4xl mx-auto">
           <div className="text-center mb-8">
@@ -443,11 +550,10 @@ export function DemoPage() {
             </div>
           ) : defaultIncident ? (
             <div className="bg-light-card dark:bg-dark-card rounded-2xl border border-light-border dark:border-dark-border overflow-hidden">
-              {/* Compact preview */}
               <div className="p-6">
                 <div className="flex items-center gap-3 mb-3 flex-wrap">
                   <span className="px-3 py-1 rounded-full text-xs font-semibold bg-severity-critical/10 text-severity-critical border border-severity-critical/30">
-                    Critical
+                    {defaultIncident.severity}
                   </span>
                   <span className="text-sm font-semibold text-light-text dark:text-dark-text">
                     {defaultIncident.title}
@@ -479,7 +585,6 @@ export function DemoPage() {
                 </div>
               </div>
 
-              {/* Expanded detail */}
               {sampleExpanded && (
                 <div className="border-t border-light-border dark:border-dark-border p-6">
                   <IncidentView incident={defaultIncident} demoMode />
