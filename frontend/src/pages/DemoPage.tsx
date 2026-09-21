@@ -1,10 +1,18 @@
-import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
-  Loader2, Search, AlertTriangle, RotateCcw,
-  FileCode, GitCommit, GitPullRequest, Sparkles, ExternalLink,
-  ChevronDown, FileStack,
-} from 'lucide-react';
+  Loader2,
+  Search,
+  AlertTriangle,
+  RotateCcw,
+  FileCode,
+  GitCommit,
+  GitPullRequest,
+  Sparkles,
+  ExternalLink,
+  ChevronDown,
+  FileStack,
+} from "lucide-react";
 import {
   getDemoDefault,
   generateDemoIncident,
@@ -14,26 +22,29 @@ import {
   type DemoGenerateResponse,
   type DemoTimings,
   type DemoCandidate,
-} from '../utils/api';
-import { IncidentView } from '../components/IncidentView';
-import { DemoBadge } from '../components/DemoBadge';
-import { PipelineProgress, type PipelineStage } from '../components/PipelineProgress';
+} from "../utils/api";
+import { IncidentView } from "../components/IncidentView";
+import { DemoBadge } from "../components/DemoBadge";
+import {
+  PipelineProgress,
+  type PipelineStage,
+} from "../components/PipelineProgress";
 
 const STAGE_DEFS: PipelineStage[] = [
-  { key: 'parse_ms', label: 'Parsing repo signature' },
-  { key: 'fetch_meta_ms', label: 'Fetching metadata' },
-  { key: 'fetch_tree_ms', label: 'Fetching file tree' },
-  { key: 'select_file_ms', label: 'Selecting incident surface' },
-  { key: 'fetch_file_ms', label: 'Retrieving source file' },
-  { key: 'fetch_commits_ms', label: 'Retrieving file history' },
-  { key: 'fetch_contributors_ms', label: 'Retrieving contributors' },
-  { key: 'fetch_recent_prs_ms', label: 'Retrieving recent PRs' },
-  { key: 'analyze_ms', label: 'Analyzing source for risks' },
-  { key: 'fetch_file_prs_ms', label: 'Scoring related PRs' },
-  { key: 'generate_ms', label: 'Generating patch approval' },
+  { key: "parse_ms", label: "Parsing repo signature" },
+  { key: "fetch_meta_ms", label: "Fetching metadata" },
+  { key: "fetch_tree_ms", label: "Fetching file tree" },
+  { key: "select_file_ms", label: "Selecting incident surface" },
+  { key: "fetch_file_ms", label: "Retrieving source file" },
+  { key: "fetch_commits_ms", label: "Retrieving file history" },
+  { key: "fetch_contributors_ms", label: "Retrieving contributors" },
+  { key: "fetch_recent_prs_ms", label: "Retrieving recent PRs" },
+  { key: "analyze_ms", label: "Analyzing source for risks" },
+  { key: "fetch_file_prs_ms", label: "Scoring related PRs" },
+  { key: "generate_ms", label: "Generating patch approval" },
 ];
 
-type ViewState = 'landing' | 'analyzing' | 'result';
+type ViewState = "landing" | "analyzing" | "result";
 
 type ErrorState = {
   reason: string;
@@ -43,11 +54,11 @@ type ErrorState = {
 };
 
 export function DemoPage() {
-  const [view, setView] = useState<ViewState>('landing');
+  const [view, setView] = useState<ViewState>("landing");
   const [defaultIncident, setDefaultIncident] = useState<Incident | null>(null);
   const [incident, setIncident] = useState<Incident | null>(null);
   const [loading, setLoading] = useState(true);
-  const [url, setUrl] = useState('');
+  const [url, setUrl] = useState("");
   const [error, setError] = useState<ErrorState | null>(null);
   const [parsedLabel, setParsedLabel] = useState<string | null>(null);
   const [timings, setTimings] = useState<DemoTimings | null>(null);
@@ -75,10 +86,11 @@ export function DemoPage() {
       setDefaultIncident(data);
       setIncident(data);
     } catch (err) {
-      console.error('Failed to fetch default incident:', err);
+      console.error("Failed to fetch default incident:", err);
       setError({
-        reason: 'network',
-        detail: 'Could not reach the demo backend. Is the orchestrator running?',
+        reason: "network",
+        detail:
+          "Could not reach the demo backend. Is the orchestrator running?",
         supported_shapes: [],
       });
     } finally {
@@ -87,7 +99,7 @@ export function DemoPage() {
   };
 
   const applyResponse = (response: DemoGenerateResponse) => {
-    if ('reason' in response) {
+    if ("reason" in response) {
       setError({
         reason: response.reason,
         detail: response.detail,
@@ -110,29 +122,29 @@ export function DemoPage() {
     e.preventDefault();
     if (!url.trim()) {
       setError({
-        reason: 'empty',
-        detail: 'Paste a public GitHub repo URL to continue.',
+        reason: "empty",
+        detail: "Paste a public GitHub repo URL to continue.",
         supported_shapes: [],
       });
       return;
     }
 
-    setView('analyzing');
+    setView("analyzing");
     setError(null);
     setTimings(null);
 
     try {
       const response: DemoGenerateResponse = await generateDemoIncident(url);
       const ok = applyResponse(response);
-      setView(ok ? 'result' : 'landing');
+      setView(ok ? "result" : "landing");
     } catch (err) {
-      console.error('Generate failed:', err);
+      console.error("Generate failed:", err);
       setError({
-        reason: 'network',
-        detail: err instanceof Error ? err.message : 'Request failed',
+        reason: "network",
+        detail: err instanceof Error ? err.message : "Request failed",
         supported_shapes: [],
       });
-      setView('landing');
+      setView("landing");
     }
   };
 
@@ -152,10 +164,10 @@ export function DemoPage() {
         // Keep the previous incident visible; the error banner shows why.
       }
     } catch (err) {
-      console.error('Regenerate failed:', err);
+      console.error("Regenerate failed:", err);
       setError({
-        reason: 'network',
-        detail: err instanceof Error ? err.message : 'Request failed',
+        reason: "network",
+        detail: err instanceof Error ? err.message : "Request failed",
         supported_shapes: [],
       });
     } finally {
@@ -167,9 +179,9 @@ export function DemoPage() {
     try {
       await resetDemo();
     } catch (err) {
-      console.warn('Reset failed (non-blocking):', err);
+      console.warn("Reset failed (non-blocking):", err);
     }
-    setUrl('');
+    setUrl("");
     setError(null);
     setParsedLabel(null);
     setTimings(null);
@@ -177,7 +189,7 @@ export function DemoPage() {
     setCandidates([]);
     setCurrentFile(null);
     setIncident(defaultIncident);
-    setView('landing');
+    setView("landing");
   };
 
   const pipelineStages: PipelineStage[] = STAGE_DEFS.map((s) => ({
@@ -189,7 +201,7 @@ export function DemoPage() {
     parsedLabel && incident?.extra_metadata?.demo_quality?.real_file;
 
   // ── State 2: Analyzing ───────────────────────────────────────────────
-  if (view === 'analyzing') {
+  if (view === "analyzing") {
     return (
       <div className="min-h-screen bg-light-bg dark:bg-dark-bg flex items-center justify-center px-6 py-12">
         <div className="w-full max-w-2xl">
@@ -214,7 +226,7 @@ export function DemoPage() {
   }
 
   // ── State 3: Result ──────────────────────────────────────────────────
-  if (view === 'result' && incident) {
+  if (view === "result" && incident) {
     return (
       <div className="min-h-screen bg-light-bg dark:bg-dark-bg">
         <div className="max-w-6xl mx-auto px-6 py-12">
@@ -239,7 +251,7 @@ export function DemoPage() {
               <div className="flex items-center gap-2 mb-3">
                 <DemoBadge />
                 <span className="text-sm font-semibold text-light-text dark:text-dark-text">
-                  Real analysis of{' '}
+                  Real analysis of{" "}
                   <code className="font-mono">github.com/{parsedLabel}</code>
                 </span>
               </div>
@@ -294,7 +306,8 @@ export function DemoPage() {
               <DemoBadge />
               {triesRemaining !== null && triesRemaining > 0 && (
                 <span className="text-xs text-light-muted dark:text-dark-muted">
-                  · {triesRemaining} {triesRemaining === 1 ? 'try' : 'tries'} remaining
+                  · {triesRemaining} {triesRemaining === 1 ? "try" : "tries"}{" "}
+                  remaining
                 </span>
               )}
             </div>
@@ -317,7 +330,7 @@ export function DemoPage() {
                 </div>
                 <div className="relative flex-1 min-w-[260px]">
                   <select
-                    value={currentFile ?? ''}
+                    value={currentFile ?? ""}
                     onChange={(e) => handleFileSwitch(e.target.value)}
                     disabled={regenerating}
                     className="w-full appearance-none pl-3 pr-10 py-2 bg-light-bg dark:bg-dark-bg border border-light-border dark:border-dark-border rounded-lg text-sm text-light-text dark:text-dark-text font-mono focus:outline-none focus:ring-2 focus:ring-brand-primary/30 disabled:opacity-50"
@@ -337,10 +350,10 @@ export function DemoPage() {
               </div>
               <p className="text-xs text-light-muted dark:text-dark-muted mt-2">
                 {regenerating
-                  ? 'Analyzing a different file from your repo…'
+                  ? "Analyzing a different file from your repo…"
                   : candidates.length === 5
-                  ? 'AEGIS PRO picked the highest-scoring file. Switch to see the analysis for another.'
-                  : `${candidates.length} candidate files found.`}
+                    ? "AEGIS PRO picked the highest-scoring file. Switch to see the analysis for another."
+                    : `${candidates.length} candidate files found.`}
               </p>
             </div>
           )}
@@ -425,14 +438,14 @@ export function DemoPage() {
             <h1 className="text-5xl sm:text-6xl font-bold text-light-text dark:text-dark-text mb-5 leading-[1.05]">
               Paste a repo.
               <br />
-              Watch AEGIS PRO find a{' '}
+              Watch AEGIS PRO find a{" "}
               <span className="text-brand-primary">real bug.</span>
             </h1>
 
             <p className="text-lg text-light-muted dark:text-dark-muted mb-10 max-w-2xl mx-auto">
               AEGIS PRO reads your actual source files, identifies production
-              risks with an LLM, and generates a patch approval — in under
-              10 seconds.
+              risks with an LLM, and generates a patch approval — in under 10
+              seconds.
             </p>
 
             <form onSubmit={handleSubmit} className="mb-4">
@@ -466,7 +479,8 @@ export function DemoPage() {
 
             {triesRemaining !== null && triesRemaining > 0 && (
               <p className="text-xs text-light-muted dark:text-dark-muted mt-2">
-                {triesRemaining} {triesRemaining === 1 ? 'try' : 'tries'} remaining this session
+                {triesRemaining} {triesRemaining === 1 ? "try" : "tries"}{" "}
+                remaining this session
               </p>
             )}
 
@@ -494,24 +508,26 @@ export function DemoPage() {
                     ) : (
                       <>
                         <p className="text-sm font-semibold text-severity-critical mb-1">
-                          {error.reason === 'not_code'
+                          {error.reason === "not_code"
                             ? "This repo doesn't contain code that can fail."
-                            : error.reason === 'empty_repo'
-                            ? 'This repo is empty.'
-                            : error.reason === 'not_found'
-                            ? 'Repo not found on GitHub.'
-                            : error.reason === 'rate_limited'
-                            ? 'GitHub rate limit reached.'
-                            : error.reason === 'no_risk_found'
-                            ? 'No specific failure found.'
-                            : 'Could not analyze that repo.'}
+                            : error.reason === "empty_repo"
+                              ? "This repo is empty."
+                              : error.reason === "not_found"
+                                ? "Repo not found on GitHub."
+                                : error.reason === "rate_limited"
+                                  ? "GitHub rate limit reached."
+                                  : error.reason === "no_risk_found"
+                                    ? "No specific failure found."
+                                    : "Could not analyze that repo."}
                         </p>
                         <p className="text-sm text-light-muted dark:text-dark-muted mb-3">
                           {error.detail}
                         </p>
                         {error.supported_shapes.length > 0 && (
                           <div className="text-xs text-light-muted dark:text-dark-muted">
-                            <p className="font-medium mb-1">Supported formats:</p>
+                            <p className="font-medium mb-1">
+                              Supported formats:
+                            </p>
                             <ul className="space-y-0.5 font-mono">
                               {error.supported_shapes.map((shape) => (
                                 <li key={shape}>{shape}</li>
@@ -567,18 +583,24 @@ export function DemoPage() {
                   <div className="flex items-center gap-3 text-xs text-light-muted dark:text-dark-muted">
                     <span>{defaultIncident.service_name}</span>
                     <span>·</span>
-                    <span>{defaultIncident.affected_services.length} services affected</span>
+                    <span>
+                      {defaultIncident.affected_services.length} services
+                      affected
+                    </span>
                     <span>·</span>
-                    <span>{Math.round(defaultIncident.confidence_score * 100)}% confidence</span>
+                    <span>
+                      {Math.round(defaultIncident.confidence_score * 100)}%
+                      confidence
+                    </span>
                   </div>
                   <button
                     onClick={() => setSampleExpanded((s) => !s)}
                     className="flex items-center gap-1.5 text-sm font-medium text-brand-primary hover:underline"
                   >
-                    {sampleExpanded ? 'Hide details' : 'View full sample'}
+                    {sampleExpanded ? "Hide details" : "View full sample"}
                     <ChevronDown
                       className={`w-3.5 h-3.5 transition-transform ${
-                        sampleExpanded ? 'rotate-180' : ''
+                        sampleExpanded ? "rotate-180" : ""
                       }`}
                     />
                   </button>
