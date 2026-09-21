@@ -313,16 +313,15 @@ export function DemoPage() {
             </div>
 
             <h1 className="text-5xl sm:text-6xl font-bold text-light-text dark:text-dark-text mb-5 leading-[1.05]">
-              Paste a repo.
+              Alert in.
               <br />
-              Watch AEGIS PRO find a{' '}
-              <span className="text-brand-primary">real bug.</span>
+              <span className="text-brand-primary">Reviewed fix PR</span> out.
             </h1>
 
             <p className="text-lg text-light-muted dark:text-dark-muted mb-10 max-w-2xl mx-auto">
-              AEGIS PRO reads your actual source files, identifies production
-              risks with an LLM, and generates a patch approval — in under
-              10 seconds.
+              Open-source AI incident commander. Paste a public GitHub repo —
+              AEGIS PRO finds a real production risk in a real file, with blame,
+              related changes, and a suggested fix you can verify on GitHub.
             </p>
 
             {/* Input — the primary action */}
