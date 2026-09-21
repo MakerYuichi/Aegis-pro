@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AEGIS PRO",
-    description="AI Incident Commander - 10 second incident response",
+    description="Open-source AI incident commander that turns an alert into a reviewed fix PR.",
     version="1.0.0",
     lifespan=lifespan
 )

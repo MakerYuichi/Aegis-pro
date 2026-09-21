@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { Shield, Zap, Moon, Sun, LayoutDashboard, AlertTriangle, Server, Users, Settings as SettingsIcon, LogOut } from 'lucide-react';
+import { Shield, Zap, Moon, Sun, LayoutDashboard, AlertTriangle, Server, Users, Settings as SettingsIcon, LogOut, Sparkles } from 'lucide-react';
 import { useAuth0 } from '@auth0/auth0-react';
 import { useTheme } from './ThemeProvider';
 
@@ -15,6 +15,7 @@ export function Navbar() {
     { path: '/oncall', label: 'On-Call', icon: Users },
     { path: '/approvals', label: 'Approvals', icon: Zap },
     { path: '/settings', label: 'Settings', icon: SettingsIcon },
+    { path: '/demo', label: 'Demo', icon: Sparkles },
   ];
 
   const handleLogout = () =>

@@ -27,7 +27,7 @@ export function LoginGate({ error }: LoginGateProps) {
       <div className="max-w-md w-full mx-auto p-8 bg-white dark:bg-gray-800 rounded-lg shadow-lg">
         <h1 className="text-3xl font-bold text-center mb-2">🛡️ AEGIS PRO</h1>
         <p className="text-center text-gray-500 mb-8">
-          AI Incident Commander — Sign in to continue
+          Turns an alert into a reviewed fix PR. Sign in to continue.
         </p>
 
         {error && (
