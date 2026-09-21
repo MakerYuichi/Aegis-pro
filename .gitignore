@@ -1,5 +1,3 @@
-# .gitignore
-cat > .gitignore << 'EOF'
 # Python
 __pycache__/
 *.py[cod]
@@ -8,6 +6,7 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 ENV/
 build/
 develop-eggs/
@@ -43,40 +42,30 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Docker
-*.log
-
 # Node
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .next/
-dist/
-build/
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
+coverage/
+.nyc_output/
+.vercel
 
 # Logs
 logs/
 *.log
 
-# Secrets
+# Secrets / dumps
 *.pem
 *.key
 *.crt
+backup.sql
+
+# Local scratch
+tmp/
 
 # Terraform
 *.tfstate
 *.tfstate.*
 .terraform/
-
-# Coverage
-coverage/
-.nyc_output/
-.vercel
-
-backup.sql

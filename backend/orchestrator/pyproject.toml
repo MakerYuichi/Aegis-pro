@@ -1,13 +1,13 @@
 [project]
 name = "aegis-pro-orchestrator"
 version = "0.1.0"
-description = "AEGIS PRO — AI Incident Commander (backend orchestrator)"
+description = "Open-source AI incident commander that turns an alert into a reviewed fix PR."
 requires-python = ">=3.11"
 license = { text = "BUSL-1.1" }
 authors = [
     { name = "MakerYuichi" },
 ]
-keywords = ["sre", "incident-response", "ai", "llm", "rag"]
+keywords = ["incident-response", "sre", "devops", "fastapi", "rag", "llm", "pgvector"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "License :: Other/Proprietary License",
