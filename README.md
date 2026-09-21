@@ -1,380 +1,241 @@
-# AEGIS PRO — AI Incident Commander
- 
-> **Detects payment failures, finds who broke it, generates the fix, creates the PR. In under 10 seconds.**
- 
+# AEGIS PRO
+
+**Open-source AI incident commander that turns an alert into a reviewed fix PR.**
+
+Paste a public GitHub repo. AEGIS PRO finds a real production risk in a real file and returns a full incident: the failing line, the code around it, the blame, related changes, and a suggested fix. Every link on the incident page points at something you can verify on GitHub.
+
+[Live demo](https://aegis-pro-six.vercel.app/demo) · [Architecture](docs/ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · [API docs](http://localhost:8000/docs)
+
 ---
- 
-## The Problem
- 
-It's 2 AM. A UPI payment failure alert fires. 50 engineers join a war room. 20 minutes pass just figuring out:
-- **What** broke?
-- **Who** changed it?
-- **What** do we do?
-By the time someone finds the root cause, customers are affected and revenue is gone.
- 
-**AEGIS PRO eliminates this chaos entirely.**
- 
+
+## What it does
+
+```
+Alert or repo URL
+        │
+        ▼
+  Locate the failing surface   →  real file, real line
+  Blame + related changes      →  commit, author, PRs (LLM-scored)
+  Diagnose                     →  root cause, severity, blast radius
+  Propose a fix                →  diff staged for human approval
+  Open a reviewed PR           →  when AUTO_FIX_MODE allows writes
+```
+
+PagerDuty and Datadog tell you *that* something broke. AEGIS PRO tells you *why*, *who changed it*, and *what to merge* — from your own codebase and incident history.
+
+The public `/demo` route is the front door: no Slack workspace, no GitHub token, no war room.
+
 ---
- 
-## The "Aha" Moment
- 
-```
-Alert fires         → Prometheus/DataDog sends webhook
-Auto-detects        → Incident created without manual input
-Fetches code        → Actual source from GitHub retrieved
-Shows failing line  → Exact line highlighted with context
-Shows who broke it  → Git blame: author + commit + PR
-Generates fix       → AI-powered diff with explanation
-Creates PR          → One-click approval → PR merged
-```
- 
-**Total time: under 10 seconds. No war room needed.**
- 
+
+## Demo in 60 seconds
+
+1. Open [https://aegis-pro-six.vercel.app/demo](https://aegis-pro-six.vercel.app/demo) (or `/demo` on a local stack).
+2. Paste any public GitHub URL — HTTPS, SSH, or `owner/repo`.
+3. Watch the pipeline: parse → tree → file select → LLM risk → related changes → incident.
+
+What you get back is bound to GitHub:
+
+| Incident field | Source |
+|---|---|
+| File + line | Selected blob + LLM finding |
+| Code context | Real file content around that line |
+| Blame | `fetch_file_commits` + contributors |
+| Related changes | Commits/PRs that touched the file, LLM-scored |
+| Suggested fix | LLM, shown for approval — never auto-merged |
+
+Three successful analyses per session, then signup. GitHub's unauthenticated API is cached in Redis (repo/tree 1h, files 30m, PRs 15m).
+
 ---
- 
-## Demo
- 
-> 📹 [Watch 5-minute demo](#) · 🚀 [Live deployment](#) · 📖 [API docs](http://localhost:8000/docs)
- 
-### Declare via Slack
-```
-/incident payment-api "UPI payments failing"
-```
- 
-**AEGIS PRO responds instantly:**
-```
-🚨 Incident INC-20260902-2D6C59
- 
-Service:     payment-api
-Severity:    P0
-Confidence:  95%
- 
-🧠 Root Cause:
-NullPointerException at PaymentProcessor.java:442
-Recent PR #127 by @engineer removed null guard on UPI response
- 
-🔧 Suggested Fix:
-Add null check on upiResponse before String.equals()
- 
-📋 Rollback: kubectl rollout undo deployment/payment-api
- 
-💥 Blast Radius: 4 services — ledger, database, auth, payment-api
- 
-[🔧 Rollback Now] [📋 View Details] [✅ Acknowledge]
-```
- 
-### Simulate a Monitoring Alert
-```bash
-curl -X POST http://localhost:8000/webhook/alert \
-  -H "Content-Type: application/json" \
-  -d '{
-    "service": "payment-api",
-    "alert": "High error rate detected",
-    "stack_trace": "java.lang.NullPointerException at PaymentProcessor.java:442"
-  }'
-```
- 
----
- 
+
 ## Architecture
- 
+
+```mermaid
+flowchart TB
+  subgraph ingress [Ingress]
+    Slack["Slack /incident"]
+    Dash[Web dashboard]
+    Demo["Public /demo"]
+    Hook[Prometheus / Datadog webhook]
+  end
+
+  subgraph api [FastAPI orchestrator]
+    Inc[Incident service]
+    RAG[RAG + pgvector]
+    LLM[LLM chain]
+    GH[GitHub]
+    WS[WebSocket]
+    AF[Auto-fix + approval]
+  end
+
+  subgraph data [Data]
+    PG[(PostgreSQL + pgvector)]
+    RD[(Redis cache)]
+  end
+
+  Slack --> api
+  Dash --> api
+  Demo --> api
+  Hook --> api
+  Inc --> RAG
+  Inc --> LLM
+  Inc --> GH
+  AF --> GH
+  RAG --> PG
+  Inc --> PG
+  GH --> RD
+  WS --> Dash
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      AEGIS PRO                          │
-├──────────────┬──────────────────┬───────────────────────┤
-│  Slack /cmd  │   Web Dashboard  │   Webhook (Prometheus) │
-└──────┬───────┴────────┬─────────┴──────────┬────────────┘
-       │                │                    │
-       └────────────────▼────────────────────┘
-                        │
-          ┌─────────────▼──────────────┐
-          │     FastAPI Backend        │
-          │  • Incident Service        │
-          │  • RAG Service (pgvector)  │
-          │  • LLM Service (Groq)      │
-          │  • GitHub Service          │
-          │  • WebSocket Manager       │
-          │  • On-Call Rotation        │
-          └─────────────┬──────────────┘
-                        │
-          ┌─────────────▼──────────────┐
-          │         Databases          │
-          │  PostgreSQL + pgvector     │
-          │  Redis (cache)             │
-          └────────────────────────────┘
-```
- 
-**Tech Stack:**
-`Python` · `FastAPI` · `PostgreSQL + pgvector` · `Redis` · `React + TypeScript` · `Tailwind CSS` · `D3.js` · `Docker` · `Groq LLM` · `Sentence Transformers` · `WebSocket`
- 
+
+Full diagrams, the `/demo` pipeline, and safety modes: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+**Stack:** FastAPI · PostgreSQL + pgvector · Redis · React + TypeScript · Tailwind · D3.js · Groq / Gemini / Azure / Ollama / OpenRouter · Slack Bolt · Docker
+
 ---
- 
+
 ## Features
- 
+
 | Feature | Status |
 |---|---|
-| Slack `/incident` command with rich Block Kit UI | ✅ |
-| Auto-discovery from Prometheus / DataDog webhooks | ✅ |
-| Stack trace parsing (Java, Python, Go) | ✅ |
-| Blast radius calculation across service graph | ✅ |
-| RAG pipeline — learns from historical incidents | ✅ |
-| Groq LLM root cause analysis + confidence scoring | ✅ |
-| GitHub integration — fetches failing code + git blame | ✅ |
-| Auto-fix generation — AI diff with human approval flow | ✅ |
-| PR payload staging + approval dashboard | ✅ |
+| Public `/demo` — paste a repo, get a verifiable incident | ✅ |
+| Slack `/incident` with Block Kit | ✅ |
+| Prometheus / Datadog webhooks | ✅ |
+| Stack-trace parsing (Java, Python, Go) | ✅ |
+| Blast radius across the service graph | ✅ |
+| RAG over historical incidents (`all-MiniLM-L6-v2` + pgvector) | ✅ |
+| Provider-agnostic LLM chain with fallbacks | ✅ |
+| GitHub file fetch, blame, related PRs | ✅ |
+| Auto-fix diff + human approval dashboard | ✅ |
 | Real GitHub PR creation | 🚧 [#30](https://github.com/MakerYuichi/Aegis-pro/issues/30) |
 | Real-time WebSocket dashboard | ✅ |
-| On-call rotation management | ✅ |
-| Service dependency graph (D3.js) | ✅ |
-| Dark mode | ✅ |
-| Dockerized — one command setup | ✅ |
+| On-call rotation | ✅ |
+| `AUTO_FIX_MODE=read_only` by default | ✅ |
+| Docker Compose one-command stack | ✅ |
 
 ---
 
-## 📊 Dashboard Features
+## Getting started
 
-The web dashboard provides complete visibility into your incident landscape:
-
-- **Live Activity Feed** — Real-time stream of all user actions: rollbacks, acknowledgments, approvals
-- **Service Health Ring** — Visual health status for every service in your catalog
-- **Service Dependency Graph** — Interactive D3.js visualization showing blast radius
-- **On-Call Rotation** — Current schedule with primary/secondary/tertiary roles
-- **Approval Dashboard** — Pending fixes with diff preview and one-click approve/reject
-- **Git Blame & Code Context** — Shows who changed the code and the exact failing line
- 
----
- 
-## How the AI Works
- 
-### 1. RAG Pipeline
-Every incident is embedded as a 384-dimensional vector using `all-MiniLM-L6-v2`. When a new incident fires, AEGIS PRO searches historical incidents via cosine similarity and sends the top 3 matches as context to the LLM — so it learns from your team's own incident history, not generic Stack Overflow answers.
- 
-### 2. LLM Analysis (Groq)
-The LLM receives: stack trace + blast radius + RAG context + actual code from GitHub. It returns structured JSON with severity, root cause, suggested fix, and confidence score.
- 
-### 3. Auto-Fix Generation
-When a file path and line number are identified, AEGIS PRO:
-- Fetches the actual code from GitHub
-- Sends code context to the LLM
-- Gets a diff-based fix with explanation
-- Presents it for human approval
-- Creates the PR on approval
-
----
-## 👥 On-Call & Team Management
-
-AEGIS PRO includes a complete on-call rotation system:
-
-- Define primary, secondary, and tertiary engineers per service
-- Configure escalation policies with wait times
-- Alert specific engineers or the entire team from the dashboard
-- Visual roster display with role badges
-- Add/remove team members via UI or API
----
- 
-## Getting Started
- 
 ### Prerequisites
+
 - Docker and Docker Compose
-- Node.js 18+
-- Slack workspace with admin access
-- GitHub personal access token
-- Groq API key (optional — falls back to intelligent mock)
-### Quick Start
+- Node.js 18+ (for the dashboard)
+- Optional for production mode: Slack app, GitHub token, Auth0, LLM API key
+
+### Local stack (demo mode)
+
+See AEGIS PRO against a seeded company — 8 services, 11 incidents, 27 on-call engineers — and hit `/demo` with a real public repo. Demo mode still needs a real LLM key for repo analysis (`LLM_PROVIDER=groq` in `demo.env`); GitHub and Slack stay mocked inside the authenticated dashboard.
+
 ```bash
-# Clone
 git clone https://github.com/MakerYuichi/Aegis-pro.git
 cd Aegis-pro
- 
-# Configure
+
 cp backend/orchestrator/.env.example backend/orchestrator/.env
-vim backend/orchestrator/.env
- 
-# Start everything
-docker-compose up -d
-sleep 10
- 
-# Seed service catalog
-curl -X POST http://localhost:8000/api/v1/services/seed
- 
-# API: http://localhost:8000
-# Dashboard: http://localhost:5173
-# API Docs: http://localhost:8000/docs
- 
- ## Run the Demo
+# Set GROQ_API_KEY (or another provider) in that file.
 
-See AEGIS PRO against a fully-populated fictional company — 8 services,
-11 incidents, 27 on-call engineers, working RAG — with zero external
-credentials. No GitHub token, no Slack workspace, no Groq key.
-
-**Requirements:** Docker, Docker Compose, and the React app running
-via `npm run dev`.
-
-```bash
-# Clone
-git clone https://github.com/MakerYuichi/Aegis-pro.git
-cd Aegis-pro
-
-# Bring up the stack in demo mode on a fresh volume
 docker-compose --env-file demo.env down -v
 docker-compose --env-file demo.env up -d
 
-# In another terminal, start the frontend
-cd frontend && npm install && npm run dev
+cd frontend && cp .env.example .env && npm install && npm run dev
 ```
 
-Open `http://localhost:5173`. Sign in with Auth0 (any email — this is
-your local instance) and the dashboard loads with the Acme seed.
+- Dashboard: http://localhost:5173
+- Public demo: http://localhost:5173/demo
+- API: http://localhost:8000
+- OpenAPI: http://localhost:8000/docs
 
-### What demo mode does
+`docker-compose --env-file demo.env down -v` is required on first run so Postgres loads `database/migrations`. Without `-v`, an old volume keeps stale data.
 
-| Setting | Production default | Demo value | Effect |
-|---|---|---|---|
-| `DEMO_MODE` | `false` | `true` | Seed backfill runs on startup; mock services replace GitHub and Slack |
-| `LLM_PROVIDER` | `groq` | `mock` | No network calls to any LLM; deterministic responses |
-| `LLM_FALLBACKS` | `gemini,openrouter` | *(empty)* | Mock is the only provider; no fallback chain |
-| `AUTO_FIX_MODE` | `read_only` | `pr_draft` | Fixes are staged for approval; no real PRs are created |
-
-### Verify it worked
+### Production-shaped stack
 
 ```bash
-# 11 incidents seeded
+cp backend/orchestrator/.env.example backend/orchestrator/.env
+# Fill Auth0, GitHub, Slack, and LLM keys.
+
+docker-compose up -d
+sleep 10
+curl -X POST http://localhost:8000/api/v1/services/seed
+```
+
+Defaults without `demo.env`: `DEMO_MODE=false`, `LLM_PROVIDER=groq`, `AUTO_FIX_MODE=read_only`. A fresh install does not write to GitHub.
+
+### Verify demo seed
+
+```bash
 docker-compose exec postgres psql -U postgres -d aegis \
   -c "SELECT COUNT(*) FROM incidents WHERE extra_metadata->>'demo_seed' = 'true';"
 
-# 11 embeddings backfilled (expect a log line, then this count)
 docker-compose logs orchestrator | grep backfill
-docker-compose exec postgres psql -U postgres -d aegis \
-  -c "SELECT COUNT(*) FROM incidents WHERE embedding IS NOT NULL AND extra_metadata->>'demo_seed' = 'true';"
-
-# demo_mode reported in health
-curl http://localhost:8000/health 
+curl http://localhost:8000/health
 ```
 
-Expected:
-- First query returns `11`
-- Log line: `📚 Demo embedding backfill: embedded 11 incidents`
-- Second query returns `11`
-- Health check response contains `"demo_mode": true`
+Expect 11 seeded incidents, a backfill log line, and `"demo_mode": true` on `/health`.
 
-### Switching back to production mode
+---
 
-```bash
-docker-compose down
-docker-compose up -d
-```
+## How the AI works
 
-Without `--env-file demo.env`, the environment block falls back to its
-defaults: `DEMO_MODE=false`, `LLM_PROVIDER=groq`, `AUTO_FIX_MODE=read_only`.
-Your personal `backend/orchestrator/.env` supplies the real credentials.
+1. **File selection (demo)** — a pure scorer picks the blob most likely to be a production failure surface (`src/`, handlers, auth/payment), and rejects docs/tutorials instead of fabricating an incident.
+2. **Risk analysis** — the file is numbered and sent to `LLMService.complete_raw(response_format="json_object")`. Malformed JSON returns `None`; the API never invents a finding.
+3. **RAG (authenticated incidents)** — each incident is a 384-d vector. New alerts retrieve the top 3 similar incidents as LLM context.
+4. **Related changes** — commits that touched the file are merged with the PRs that landed them. The LLM scores each entry against the failing line using the real commit message.
+5. **Auto-fix** — a diff is staged. Humans approve in the dashboard. GitHub writes happen only when `AUTO_FIX_MODE` is `pr_draft` or `auto_pr`.
 
-## API Reference
- 
+---
+
+## Safety
+
+| Control | Default | Effect |
+|---|---|---|
+| `AUTO_FIX_MODE` | `read_only` | Diffs only; no GitHub writes |
+| `AUTO_FIX_MODE=pr_draft` | opt-in | Stage a PR payload; dashboard approval required |
+| `AUTO_FIX_MODE=auto_pr` | opt-in | Create the PR (see [#30](https://github.com/MakerYuichi/Aegis-pro/issues/30)) |
+| `LLM_PROVIDER` | `groq` / `mock` / `ollama` / `azure` / `gemini` / `openrouter` | Keep analysis on Groq, Azure, or fully local Ollama |
+| Mutating HTTP APIs | Auth0 JWT | `/rollback`, `/declare`, `/approve`, `/seed` |
+
+Verified by [`tests/test_autofix_modes.py`](backend/orchestrator/tests/test_autofix_modes.py).
+
+---
+
+## API
+
 | Endpoint | Method | Description |
 |---|---|---|
-| `/health` | GET | Health check |
-| `/api/v1/services` | GET | List all services |
-| `/api/v1/services/seed` | POST | Seed service catalog |
-| `/api/v1/incident/declare` | POST | Declare incident manually |
-| `/api/v1/incident/{id}` | GET | Get incident details |
-| `/api/v1/incidents` | GET | List all incidents |
-| `/api/v1/incident/rollback` | POST | Trigger rollback |
-| `/api/v1/incident/{id}/approve` | POST | Approve auto-fix PR |
-| `/webhook/alert` | POST | Receive monitoring alerts |
-| `/slack/events` | POST | Slack event handler |
-| `/ws/incidents` | WebSocket | Real-time incident stream |
- 
----
- 
-## Impact
- 
-| Metric | Without AEGIS PRO | With AEGIS PRO |
-|---|---|---|
-| Time to identify root cause | 15–20 minutes | 10 seconds |
-| Engineers needed in war room | 50 | 1 |
-| Time to rollback | 10–15 minutes | 2 minutes |
-| Total MTTR | 30–45 minutes | < 5 minutes |
- 
----
- 
-## Why This Is Different
- 
-Existing tools like PagerDuty and Datadog tell you *that* something broke. AEGIS PRO tells you *why*, *who*, and *what to do* — automatically, using your own incident history and your own codebase.
- 
-The auto-fix generation with human approval is what no existing tool does end-to-end: detect → diagnose → fetch code → generate fix → create PR.
- 
----
-
-## Security Controls
-
-### Authentication
-All mutating endpoints (`/rollback`, `/declare`, `/approve`, `/seed`) require a valid Auth0 JWT. Read-only endpoints remain public. Token validation is enforced server-side via the `auth0-fastapi-api` SDK — see `src/auth.py`.
-
-### Auto-Fix Safety Mode
-
-AEGIS PRO can generate fix diffs without ever writing to your GitHub repos. Control this with `AUTO_FIX_MODE`:
-
-| Mode | Behavior | Use Case |
-|---|---|---|
-| `read_only` **(default)** | Generates diff, never touches GitHub write APIs | Compliance, audits, read-only environments |
-| `pr_draft` | Stages PR payload, requires dashboard approval to push | Standard production deployment |
-| `auto_pr` | Creates PR immediately (requires real GitHub integration — see [#30](https://github.com/MakerYuichi/Aegis-pro/issues/30)) | Trusted dev/staging environments |
-
-**Default is `read_only`.** A fresh install will never modify your repos until you explicitly opt in. Verified by [`tests/test_autofix_modes.py`](backend/orchestrator/tests/test_autofix_modes.py).
-
-### LLM Data Residency
-
-Your codebase and incident data never have to leave your infrastructure. Set `LLM_PROVIDER` to route analysis to your own model:
-
-| Provider | Env | Notes |
-|---|---|---|
-| `groq` (default) | `GROQ_API_KEY` | Fast hosted inference |
-| `azure` | `AZURE_OPENAI_*` | Your Azure OpenAI tenant |
-| `ollama` | `OLLAMA_BASE_URL` | Fully self-hosted, air-gapped |
-| `gemini` | `GOOGLE_API_KEY` | Google Gemini |
-| `openrouter` | `OPENROUTER_API_KEY` | OpenRouter |
-| `mock` | none | Deterministic — for CI and DEMO_MODE |
-
-Configure `LLM_FALLBACKS=gemini,openrouter` to add a resilience chain.
-
-### Read-Only by Default
-
-Two controls are safe-by-default on a fresh install:
-- `AUTO_FIX_MODE=read_only` — no GitHub writes
-- `LLM_PROVIDER` must be set explicitly if you don't want Groq
-
-This means cloning the repo and running `docker-compose up` cannot modify your infrastructure or leak code without your explicit opt-in.
+| `/health` | GET | Health, `demo_mode`, `auto_fix_mode` |
+| `/api/v1/demo/generate` | POST | Public pipeline (`DEMO_MODE=true`) |
+| `/api/v1/demo/default` | GET | Sample Aegis-pro incident |
+| `/api/v1/demo/reset` | POST | Clear demo session cookie |
+| `/api/v1/services` | GET | Service catalog |
+| `/api/v1/incident/declare` | POST | Declare an incident |
+| `/api/v1/incident/{id}` | GET | Incident detail |
+| `/api/v1/incidents` | GET | List incidents |
+| `/api/v1/incident/{id}/approve` | POST | Approve auto-fix |
+| `/webhook/alert` | POST | Monitoring alerts |
+| `/slack/events` | POST | Slack events |
+| `/ws/incidents` | WebSocket | Live incident stream |
 
 ---
- 
-## Built With
- 
-- [FastAPI](https://fastapi.tiangolo.com/) — async Python API framework
-- [pgvector](https://github.com/pgvector/pgvector) — vector similarity search in PostgreSQL
-- [Sentence Transformers](https://www.sbert.net/) — `all-MiniLM-L6-v2` for embeddings
-- [Groq](https://groq.com/) — LLM inference
-- [React](https://react.dev/) + [TypeScript](https://www.typescriptlang.org/) — frontend
-- [D3.js](https://d3js.org/) — service dependency visualization
-- [Slack Bolt](https://slack.dev/bolt-python/) — Slack integration
+
+## Tests
+
+```bash
+cd backend/orchestrator
+LLM_PROVIDER=mock LLM_FALLBACKS= pytest tests/ -v
+```
+
+Backend tests are mocked. The suite does not call GitHub or an LLM provider. Frontend: `cd frontend && npm run lint && npm run build`.
+
 ---
-
- ## 🔧 Engineering Challenges & Solutions
- **Slack 3-Second Timeout** → Slack expects a response within 3 seconds. Our LLM analysis takes 5-10 seconds. Fixed by implementing Slack's `response_url` pattern with background tasks. The command acknowledges immediately, processes asynchronously, and updates the message via webhook.
-
-**GitHub 404 Errors** → The GitHub blame API fails for many repositories. Fixed by falling back to commit history via PyGithub when the blame API returns 404.
-
-**pgvector Syntax Errors** → Parameterized queries don't support `::vector` casting. Fixed by converting embeddings to string format before passing to PostgreSQL.
 
 ## License
 
 AEGIS PRO is **source-available** under the [Business Source License 1.1](LICENSE.md).
 
-- **Free** for internal use, evaluation, research, and personal projects
-- **Commercial license required** for competing products or hosted resale
-- **Converts to Apache 2.0** four years after each release
+- Free for internal use, evaluation, research, and personal projects
+- Commercial license required for competing products or hosted resale
+- Converts to Apache 2.0 four years after each release
 
-For commercial licensing, contact makeryuichii@gmail.com or [request a demo](https://aegis-pro-six.vercel.app/).
- 
+Commercial licensing: makeryuichii@gmail.com
+
 ---
- 
-*Built by MakerYuichi · [GitHub](https://github.com/MakerYuichi) 
+
+Built by [MakerYuichi](https://github.com/MakerYuichi)
