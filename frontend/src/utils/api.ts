@@ -10,6 +10,7 @@ export const api = axios.create({
     'Content-Type': 'application/json',
   },
   timeout: 60000,
+  withCredentials: true, 
 });
 
 // Add response interceptor for error handling
@@ -156,6 +157,7 @@ export type Incident = {
       blast_radius_reason: string;
       related_lines: number[];
     };
+    demo_candidates?: DemoCandidate[];
   };
 };
 
@@ -299,9 +301,16 @@ export type DemoTimings = {
   total_ms: number;
 };
 
+export type DemoCandidate = {
+  path: string;
+  score: number;
+  confidence: 'high' | 'low' | 'fallback';
+};
+
 export type DemoMeta = {
   tries_remaining: number;
   timings?: DemoTimings;
+  was_free_switch?: boolean;
 };
 
 export type DemoGenerateResponse =
@@ -324,6 +333,17 @@ export const generateDemoIncident = async (
   repo_url: string
 ): Promise<DemoGenerateResponse> => {
   const response = await api.post('/api/v1/demo/generate', { repo_url });
+  return response.data;
+};
+
+export const regenerateDemoIncident = async (
+  repo_url: string,
+  file_path: string
+): Promise<DemoGenerateResponse> => {
+  const response = await api.post('/api/v1/demo/regenerate', {
+    repo_url,
+    file_path,
+  });
   return response.data;
 };
 
