@@ -1,0 +1,85 @@
+name: E2E Tests
+
+on:
+  # Weekly, Sunday at 03:00 UTC
+  schedule:
+    - cron: '0 3 * * 0'
+  # Manual trigger from the Actions tab
+  workflow_dispatch:
+  # Also run on pushes to main if you want. Uncomment to enable.
+  # push:
+  #   branches: [main]
+
+jobs:
+  e2e:
+    name: E2E (real Postgres + Redis)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: aegis_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      AUTH0_DOMAIN: test-tenant.us.auth0.com
+      AUTH0_AUDIENCE: https://test-api
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/aegis_test
+      REDIS_URL: redis://localhost:6379/0
+      DEMO_MODE: "true"
+      LLM_PROVIDER: mock
+      LLM_FALLBACKS: ""
+      AUTO_FIX_MODE: read_only
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/orchestrator/requirements.txt
+
+      - name: Install backend deps
+        working-directory: backend/orchestrator
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Load schema
+        working-directory: backend/orchestrator
+        run: |
+          # Load every migration in order
+          for f in ../../database/migrations/*.sql; do
+            echo "Loading $f"
+            PGPASSWORD=postgres psql \
+              -h localhost -U postgres -d aegis_test \
+              -f "$f" || exit 1
+          done
+
+      - name: Run E2E tests
+        working-directory: backend/orchestrator
+        run: |
+          python -m pytest tests/ -v -m e2e --tb=long
