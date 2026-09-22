@@ -75,27 +75,42 @@ async def notify_slack(incident: dict):
             return
         
         # Build Slack message
+        
+        # Use .get() with defaults for every field. A partially-populated
+        # incident should still produce a useful notification — silently
+        # dropping the alert is worse than a notification with a placeholder.
+        incident_id = incident.get('incident_id', 'UNKNOWN')
+        service = incident.get('service') or incident.get('service_name') or 'unknown'
+        severity = incident.get('severity', 'P1')
+        root_cause = (incident.get('root_cause') or 'unknown')[:200]
+        confidence = incident.get('confidence')
+        confidence_text = f"{confidence * 100:.0f}%" if confidence is not None else "unknown"
+
         message = {
-            "text": f"🚨 [AUTO-DETECTED] Incident {incident['incident_id']}",
+            "text": f"🚨 [AUTO-DETECTED] Incident {incident_id}",
             "blocks": [
                 {
                     "type": "header",
-                    "text": {"type": "plain_text", "text": f"🚨 Auto-Detected Incident {incident['incident_id']}", "emoji": True}
+                    "text": {"type": "plain_text", "text": f"🚨 Auto-Detected Incident {incident_id}", "emoji": True}
                 },
                 {
                     "type": "section",
                     "fields": [
-                        {"type": "mrkdwn", "text": f"*Service:*\n{incident['service']}"},
-                        {"type": "mrkdwn", "text": f"*Severity:*\n{incident['severity']}"},
-                        {"type": "mrkdwn", "text": f"*Root Cause:*\n{incident['root_cause'][:200]}"},
-                        {"type": "mrkdwn", "text": f"*Confidence:*\n{(incident['confidence'] * 100):.0f}%"}
+                        {"type": "mrkdwn", "text": f"*Service:*\n{service}"},
+                        {"type": "mrkdwn", "text": f"*Severity:*\n{severity}"},
+                        {"type": "mrkdwn", "text": f"*Root Cause:*\n{root_cause}"},
+                        {"type": "mrkdwn", "text": f"*Confidence:*\n{confidence_text}"}
                     ]
                 }
             ]
         }
         
         # Send to Slack
-        webhook_url = f"https://hooks.slack.com/services/xxx/xxx/xxx"  # Configure this
+        from src.config import settings
+        webhook_url = settings.SLACK_WEBHOOK_URL
+        if not webhook_url:
+            logger.warning("SLACK_WEBHOOK_URL not set — skipping notification")
+            return
         
         async with httpx.AsyncClient() as client:
             await client.post(webhook_url, json=message)
