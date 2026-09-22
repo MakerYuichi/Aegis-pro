@@ -29,6 +29,8 @@ import {
   PipelineProgress,
   type PipelineStage,
 } from "../components/PipelineProgress";
+import { useAuth0 } from '@auth0/auth0-react';
+
 
 const STAGE_DEFS: PipelineStage[] = [
   { key: "parse_ms", label: "Parsing repo signature" },
@@ -69,6 +71,14 @@ export function DemoPage() {
   const [candidates, setCandidates] = useState<DemoCandidate[]>([]);
   const [currentFile, setCurrentFile] = useState<string | null>(null);
   const [regenerating, setRegenerating] = useState(false);
+  const { loginWithRedirect } = useAuth0();
+
+  const handleSignIn = () =>
+  loginWithRedirect({
+    authorizationParams: {
+      audience: import.meta.env.VITE_AUTH0_AUDIENCE,
+    },
+  });
 
   useEffect(() => {
     fetchDefault();
@@ -237,12 +247,12 @@ export function DemoPage() {
                 AEGIS PRO
               </span>
             </div>
-            <Link
-              to="/"
+            <button
+              onClick={handleSignIn}
               className="text-sm font-medium text-brand-primary hover:underline"
             >
               Sign in →
-            </Link>
+            </button>
           </div>
 
           {/* Real-data banner */}
@@ -372,13 +382,13 @@ export function DemoPage() {
                       <p className="text-sm text-light-muted dark:text-dark-muted mb-3">
                         {error.detail}
                       </p>
-                      <Link
-                        to="/"
+                      <button
+                        onClick={handleSignIn}
                         className="inline-flex items-center gap-2 px-4 py-2 bg-brand-primary text-white rounded-lg text-sm font-semibold hover:bg-brand-primary/90 transition"
                       >
                         Join Cloud Beta
                         <ExternalLink className="w-3 h-3" />
-                      </Link>
+                      </button>
                     </>
                   ) : (
                     <>
@@ -420,12 +430,12 @@ export function DemoPage() {
               AEGIS PRO
             </span>
           </div>
-          <Link
-            to="/"
+          <button
+            onClick={handleSignIn}
             className="text-sm font-medium text-brand-primary hover:underline"
           >
             Sign in →
-          </Link>
+          </button>
         </div>
 
         <div className="flex-1 flex items-center justify-center px-6">
@@ -473,8 +483,10 @@ export function DemoPage() {
             </form>
 
             <p className="text-xs text-light-muted dark:text-dark-muted">
-              No signup. No token. Nothing touched. Read-only access to public
-              repos.
+              No signup. No token. Nothing touched. Read-only access to public repos.
+            </p>
+            <p className="text-xs text-light-muted dark:text-dark-muted mt-1">
+              Demo sessions are logged to improve the product. No repo credentials are stored.
             </p>
 
             {triesRemaining !== null && triesRemaining > 0 && (
@@ -497,13 +509,13 @@ export function DemoPage() {
                         <p className="text-sm text-light-muted dark:text-dark-muted mb-3">
                           {error.detail}
                         </p>
-                        <Link
-                          to="/"
+                        <button
+                          onClick={handleSignIn}
                           className="inline-flex items-center gap-2 px-4 py-2 bg-brand-primary text-white rounded-lg text-sm font-semibold hover:bg-brand-primary/90 transition"
                         >
                           Join Cloud Beta
                           <ExternalLink className="w-3 h-3" />
-                        </Link>
+                        </button>
                       </>
                     ) : (
                       <>
