@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   RefreshCw, Brain, Zap, GitCommit, GitPullRequest, Code,
-  Clock, Activity, Copy, AlertTriangle, ExternalLink, Users, GitMerge,
+  Clock, Activity, Copy, ExternalLink, Users, GitMerge,
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { isPendingAutoFix, useProtectedApi, type Incident } from '../utils/api';
