@@ -420,22 +420,38 @@ class IncidentService:
             return []
     
     async def calculate_blast_radius(self, service_name: str, dependencies: list) -> dict:
-        affected = [service_name]
+        affected: set[str] = set()
+        queue = [service_name] + list(dependencies or [])
         
-        for dep in dependencies:
-            affected.append(dep)
-            service = await self.get_service(dep)
+        # Bounded BFS — prevents infinite loops on circular deps.
+        max_depth = 10
+        seen: set[str] = set()
+        
+        while queue and len(seen) < max_depth * 10:
+            current = queue.pop(0)
+            if not current or current in seen:
+                continue
+            seen.add(current)
+            affected.add(current)
+            
+            service = await self.get_service(current)
             if service and service.get("dependencies"):
-                affected.extend(service["dependencies"])
+                for dep in service["dependencies"]:
+                    if dep and dep not in seen:
+                        queue.append(dep)
+                        
+        affected_list = sorted(affected)
         
-        affected = list(set(affected))
-        
-        severity = "CRITICAL" if len(affected) > 5 else "HIGH" if len(affected) > 2 else "MEDIUM"
+        severity = (
+        "CRITICAL" if len(affected_list) > 5
+        else "HIGH" if len(affected_list) > 2
+        else "MEDIUM"
+        )
         
         return {
             "root": service_name,
-            "affected": affected,
-            "count": len(affected),
+            "affected": affected_list,
+            "count": len(affected_list),
             "severity": severity
         }
     
@@ -546,9 +562,9 @@ class IncidentService:
         
         # Extract exception type
         exception_patterns = [
-            r"([A-Za-z]+Exception|Error):",
-            r"([A-Za-z]+Exception|Error)\s+at",
-            r"([A-Za-z]+Exception|Error)\s+at\s+[\w.]+\.(\w+)\(([\w./-]+\.\w+):(\d+)\)",
+            r"([A-Za-z]+(?:Exception|Error)):",
+            r"([A-Za-z]+(?:Exception|Error))\s+at",
+            r"([A-Za-z]+(?:Exception|Error))\s+at\s+[\w.]+\.(\w+)\(([\w./-]+\.\w+):(\d+)\)",
         ]
         for pattern in exception_patterns:
             exception_match = re.search(pattern, stack_trace)
