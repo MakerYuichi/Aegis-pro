@@ -98,7 +98,11 @@ def test_websocket_route_is_registered():
 # ---------------------------------------------------------------------------
 
 def test_cors_allows_localhost_current_behavior(client):
-    """The app currently hardcodes allow_origins=['http://localhost:5173']."""
+    """
+    Situation: CORS request from localhost.
+    Expected: Allows localhost (current hardcoded behavior).
+    Function: src.main.app (CORS middleware)
+    """
     resp = client.options(
         "/health",
         headers={
@@ -109,22 +113,20 @@ def test_cors_allows_localhost_current_behavior(client):
     assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
 
 
-@pytest.mark.xfail(
-    reason="Bug: CORS_ORIGINS env var is computed but ignored; middleware uses "
-           "a hardcoded list. See src/main.py lines defining _cors_env/allow_origins "
-           "vs the CORSMiddleware call. Fix by passing allow_origins=allow_origins.",
-    strict=False,
-)
-def test_cors_respects_cors_origins_env(client, monkeypatch):
-    """Intended behavior: CORS_ORIGINS from env should drive the middleware."""
-    monkeypatch.setenv("CORS_ORIGINS", "https://example.com")
-    # Reload would be needed to pick up the env var at import time; the app
-    # currently ignores it entirely, so this test documents the gap.
-    resp = client.options(
-        "/health",
-        headers={
-            "Origin": "https://example.com",
-            "Access-Control-Request-Method": "GET",
-        },
-    )
-    assert resp.headers.get("access-control-allow-origin") == "https://example.com"
+def test_cors_middleware_uses_allow_origins_variable():
+    """
+    The CORSMiddleware must be configured from the computed allow_origins,
+    not a hardcoded list. Since the value is fixed at import time, we
+    inspect the middleware stack directly.
+    """
+    from src.main import app, allow_origins
+    from starlette.middleware.cors import CORSMiddleware
+
+    for mw in app.user_middleware:
+        if mw.cls is CORSMiddleware:
+            assert mw.kwargs["allow_origins"] == allow_origins
+            # Credentials must be disabled when origins is a wildcard
+            assert mw.kwargs["allow_credentials"] == ("*" not in allow_origins)
+            return
+    pytest.fail("CORSMiddleware not found in app middleware stack")
+

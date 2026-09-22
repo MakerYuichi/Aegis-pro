@@ -45,6 +45,11 @@ def _fake_incident(incident_id="INC-001", service="payments"):
 # ---------------------------------------------------------------------------
 
 def test_alert_creates_incident_and_returns_id(client):
+    """
+    Situation: Valid alert with service and message.
+    Expected: Incident created, broadcast sent, ID returned.
+    Function: src.api.webhook.auto_discover_incident
+    """
     fake = _fake_incident()
 
     with patch.object(webhook_module, "IncidentService") as IncSvc, \
@@ -66,6 +71,11 @@ def test_alert_creates_incident_and_returns_id(client):
 
 
 def test_alert_accepts_service_name_alias(client):
+    """
+    Situation: Alert uses service_name instead of service.
+    Expected: Alias accepted, incident created.
+    Function: src.api.webhook.auto_discover_incident
+    """
     fake = _fake_incident()
 
     with patch.object(webhook_module, "IncidentService") as IncSvc, \
@@ -81,6 +91,11 @@ def test_alert_accepts_service_name_alias(client):
 
 
 def test_alert_missing_service_returns_error(client):
+    """
+    Situation: Alert missing service field.
+    Expected: Returns error, no incident created.
+    Function: src.api.webhook.auto_discover_incident
+    """
     with patch.object(webhook_module, "IncidentService") as IncSvc:
         IncSvc.return_value.declare_incident = AsyncMock()
         resp = client.post("/webhook/alert", json={"message": "oops"})
@@ -91,6 +106,11 @@ def test_alert_missing_service_returns_error(client):
 
 
 def test_alert_invalid_json_returns_error(client):
+    """
+    Situation: Invalid JSON body.
+    Expected: Returns error, no incident created.
+    Function: src.api.webhook.auto_discover_incident
+    """
     resp = client.post(
         "/webhook/alert",
         content=b"not json at all",
@@ -101,7 +121,11 @@ def test_alert_invalid_json_returns_error(client):
 
 
 def test_alert_extracts_stack_trace_from_alias(client):
-    """`stack_trace`, `error`, and `logs` are all accepted as the stack trace."""
+    """
+    Situation: Alert uses logs field for stack trace.
+    Expected: logs mapped to stack_trace parameter.
+    Function: src.api.webhook.auto_discover_incident
+    """
     fake = _fake_incident()
 
     with patch.object(webhook_module, "IncidentService") as IncSvc, \
@@ -118,8 +142,72 @@ def test_alert_extracts_stack_trace_from_alias(client):
     assert call_kwargs["message"].startswith("[Auto-Detected]")
 
 
+def test_alert_extracts_stack_trace_from_error(client):
+    """
+    Situation: Alert uses error field for stack trace.
+    Expected: error mapped to stack_trace parameter.
+    Function: src.api.webhook.auto_discover_incident
+    """
+    fake = _fake_incident()
+
+    with patch.object(webhook_module, "IncidentService") as IncSvc, \
+         patch.object(webhook_module.manager, "broadcast", new=AsyncMock()):
+        IncSvc.return_value.declare_incident = AsyncMock(return_value=fake)
+        client.post("/webhook/alert", json={
+            "service": "payments",
+            "message": "boom",
+            "error": "Error...",
+        })
+
+    call_kwargs = IncSvc.return_value.declare_incident.await_args.kwargs
+    assert call_kwargs["stack_trace"] == "Error..."
+
+
+def test_alert_message_uses_alert_alias(client):
+    """
+    Situation: Alert uses alert field for message.
+    Expected: alert mapped to message parameter.
+    Function: src.api.webhook.auto_discover_incident
+    """
+    fake = _fake_incident()
+
+    with patch.object(webhook_module, "IncidentService") as IncSvc, \
+         patch.object(webhook_module.manager, "broadcast", new=AsyncMock()):
+        IncSvc.return_value.declare_incident = AsyncMock(return_value=fake)
+        client.post("/webhook/alert", json={
+            "service": "payments",
+            "alert": "5xx spike",
+        })
+
+    call_kwargs = IncSvc.return_value.declare_incident.await_args.kwargs
+    assert call_kwargs["message"].startswith("[Auto-Detected] 5xx spike")
+
+
+def test_alert_missing_message_uses_default(client):
+    """
+    Situation: Alert missing message, alert, and stack_trace.
+    Expected: Uses default message text.
+    Function: src.api.webhook.auto_discover_incident
+    """
+    fake = _fake_incident()
+
+    with patch.object(webhook_module, "IncidentService") as IncSvc, \
+         patch.object(webhook_module.manager, "broadcast", new=AsyncMock()):
+        IncSvc.return_value.declare_incident = AsyncMock(return_value=fake)
+        client.post("/webhook/alert", json={
+            "service": "payments",
+        })
+
+    call_kwargs = IncSvc.return_value.declare_incident.await_args.kwargs
+    assert call_kwargs["message"] == "[Auto-Detected] Auto-detected incident"
+
+
 def test_alert_notify_slack_false_skips_background_task(client):
-    """When notify_slack is False, no background task is queued."""
+    """
+    Situation: notify_slack explicitly set to False.
+    Expected: Background task not queued.
+    Function: src.api.webhook.auto_discover_incident
+    """
     fake = _fake_incident()
 
     with patch.object(webhook_module, "IncidentService") as IncSvc, \
@@ -139,6 +227,11 @@ def test_alert_notify_slack_false_skips_background_task(client):
 
 
 def test_alert_service_exception_returns_500(client):
+    """
+    Situation: IncidentService raises exception.
+    Expected: Returns 500 with error detail.
+    Function: src.api.webhook.auto_discover_incident
+    """
     with patch.object(webhook_module, "IncidentService") as IncSvc, \
          patch.object(webhook_module.manager, "broadcast", new=AsyncMock()):
         IncSvc.return_value.declare_incident = AsyncMock(side_effect=RuntimeError("db down"))
@@ -149,7 +242,11 @@ def test_alert_service_exception_returns_500(client):
 
 
 def test_alert_websocket_broadcast_failure_does_not_break_request(client):
-    """A broadcast failure must not fail the request — incident is already created."""
+    """
+    Situation: WebSocket broadcast fails.
+    Expected: Returns 500 (current behavior - broadcast not wrapped).
+    Function: src.api.webhook.auto_discover_incident
+    """
     fake = _fake_incident()
 
     with patch.object(webhook_module, "IncidentService") as IncSvc, \
@@ -163,6 +260,17 @@ def test_alert_websocket_broadcast_failure_does_not_break_request(client):
     # behavior. If you want broadcast failures to be non-fatal, wrap the
     # broadcast call in its own try/except.
     assert resp.status_code == 500
+
+
+def test_alert_empty_body_returns_error(client):
+    """
+    Situation: Empty request body.
+    Expected: Returns error for invalid JSON.
+    Function: src.api.webhook.auto_discover_incident
+    """
+    resp = client.post("/webhook/alert", content=b"", headers={"Content-Type": "application/json"})
+    assert resp.status_code == 200
+    assert resp.json() == {"error": "invalid json"}
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +292,11 @@ def test_webhook_status_shape(client):
 
 @pytest.mark.asyncio
 async def test_notify_slack_noop_when_token_missing():
+    """
+    Situation: SLACK_BOT_TOKEN not configured.
+    Expected: Returns early, no HTTP call.
+    Function: src.api.webhook.notify_slack
+    """
     with patch("src.config.settings") as cfg, \
          patch("httpx.AsyncClient") as http:
         cfg.SLACK_BOT_TOKEN = None
@@ -193,15 +306,16 @@ async def test_notify_slack_noop_when_token_missing():
 
 
 @pytest.mark.asyncio
-async def test_notify_slack_posts_to_hardcoded_placeholder():
+async def test_notify_slack_posts_to_configured_webhook():
     """
-    Documents current behavior: notify_slack posts to a hardcoded
-    'hooks.slack.com/services/xxx/xxx/xxx' URL, not settings.SLACK_WEBHOOK_URL.
-    This is dead code — the URL is a placeholder and will 404 in production.
+    Situation: SLACK_BOT_TOKEN and SLACK_WEBHOOK_URL configured.
+    Expected: Posts to the configured webhook URL.
+    Function: src.api.webhook.notify_slack
     """
     with patch("src.config.settings") as cfg, \
          patch("httpx.AsyncClient") as http_cls:
         cfg.SLACK_BOT_TOKEN = "xoxb-test"
+        cfg.SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/T/B/X"
         client = AsyncMock()
         http_cls.return_value.__aenter__.return_value = client
 
@@ -209,16 +323,20 @@ async def test_notify_slack_posts_to_hardcoded_placeholder():
 
     client.post.assert_awaited_once()
     url = client.post.await_args.args[0]
-    parsed = urlparse(url)
-    assert parsed.hostname == "hooks.slack.com"
-    assert "xxx" in url  # placeholder, not a real webhook
+    assert url == "https://hooks.slack.com/services/T/B/X"
 
 
 @pytest.mark.asyncio
 async def test_notify_slack_swallows_http_errors():
+    """
+    Situation: HTTP client raises exception.
+    Expected: Exception caught and logged, does not raise.
+    Function: src.api.webhook.notify_slack
+    """
     with patch("src.config.settings") as cfg, \
          patch("httpx.AsyncClient") as http_cls:
         cfg.SLACK_BOT_TOKEN = "xoxb-test"
+        cfg.SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/T/B/X"
         client = AsyncMock()
         client.post = AsyncMock(side_effect=RuntimeError("network"))
         http_cls.return_value.__aenter__.return_value = client
@@ -229,9 +347,15 @@ async def test_notify_slack_swallows_http_errors():
 
 @pytest.mark.asyncio
 async def test_notify_slack_payload_contains_incident_fields():
+    """
+    Situation: Valid incident dict.
+    Expected: Payload contains incident ID, service, severity, root cause, confidence.
+    Function: src.api.webhook.notify_slack
+    """
     with patch("src.config.settings") as cfg, \
          patch("httpx.AsyncClient") as http_cls:
         cfg.SLACK_BOT_TOKEN = "xoxb-test"
+        cfg.SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/T/B/X"
         client = AsyncMock()
         http_cls.return_value.__aenter__.return_value = client
 
@@ -242,4 +366,59 @@ async def test_notify_slack_payload_contains_incident_fields():
     # Header block has the incident ID
     header = payload["blocks"][0]
     assert "INC-001" in header["text"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_notify_slack_truncates_root_cause(client):
+    """
+    Situation: Root cause longer than 200 chars.
+    Expected: Truncated to 200 chars in payload.
+    Function: src.api.webhook.notify_slack
+    """
+    fake = _fake_incident()
+    fake["root_cause"] = "x" * 300
+
+    with patch("src.config.settings") as cfg, \
+         patch("httpx.AsyncClient") as http_cls:
+        cfg.SLACK_BOT_TOKEN = "xoxb-test"
+        cfg.SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/T/B/X"
+        client = AsyncMock()
+        http_cls.return_value.__aenter__.return_value = client
+
+        await webhook_module.notify_slack(fake)
+
+    payload = client.post.await_args.kwargs["json"]
+    field = payload["blocks"][1]["fields"][2]  # Root cause field
+    assert len(field["text"]) <= 200 + len("*Root Cause:*\n")  # Account for prefix
+
+
+@pytest.mark.asyncio
+async def test_notify_slack_missing_confidence_still_sends():
+    fake = _fake_incident()
+    del fake["confidence"]
+
+    with patch("src.config.settings") as cfg, \
+         patch("httpx.AsyncClient") as http_cls:
+        cfg.SLACK_BOT_TOKEN = "xoxb-test"
+        cfg.SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/T/B/X"
+        client = AsyncMock()
+        http_cls.return_value.__aenter__.return_value = client
+
+        await webhook_module.notify_slack(fake)
+
+    client.post.assert_awaited_once()   # <-- fails today; passes after the fix
     
+    
+@pytest.mark.asyncio
+async def test_notify_slack_noop_when_webhook_url_missing():
+    """
+    SLACK_WEBHOOK_URL not configured. Returns early without HTTP call,
+    even if SLACK_BOT_TOKEN is set.
+    """
+    with patch("src.config.settings") as cfg, \
+         patch("httpx.AsyncClient") as http:
+        cfg.SLACK_BOT_TOKEN = "xoxb-test"
+        cfg.SLACK_WEBHOOK_URL = None
+        await webhook_module.notify_slack(_fake_incident())
+
+    http.assert_not_called()
