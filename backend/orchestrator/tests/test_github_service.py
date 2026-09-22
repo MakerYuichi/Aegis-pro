@@ -18,19 +18,25 @@ from src.services.github_service import GitHubService
 
 @pytest.fixture
 def service():
-    """GitHubService with GitHub client mocked."""
+    """
+    GitHubService with a mock client, regardless of GITHUB_TOKEN.
+    Forces svc.client to the mock after construction, so tests do not
+    depend on the token being set in the environment.
+    """
     with patch("src.services.github_service.Github") as gh_cls, \
          patch("src.services.github_service.LLMService") as llm_cls:
         mock_client = MagicMock()
         gh_cls.return_value = mock_client
-        
+
         mock_llm = MagicMock()
         mock_llm.chain = MagicMock()
         mock_llm.chain.provider_names = MagicMock(return_value=["mock"])
         llm_cls.return_value = mock_llm
-        
+
         svc = GitHubService()
-        svc._gh_mock = mock_client
+        svc.client = mock_client          # <-- force the client
+        svc.llm = mock_llm                # <-- force the llm
+        svc._gh_mock = mock_client        # <-- keep for existing tests
         svc._llm_mock = mock_llm
     return svc
 

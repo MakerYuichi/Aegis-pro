@@ -71,13 +71,18 @@ allow_origins = (
 )
 
 # CORS
+# allow_credentials=True with allow_origins=["*"] is invalid per the
+# CORS spec — browsers reject credentialed requests against a wildcard.
+# Disable credentials when the origin list is a wildcard.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_credentials=True,
+    allow_origins=allow_origins,
+    allow_credentials="*" not in allow_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+logger.info(f"🔓 CORS allow_origins={allow_origins} credentials={'*' not in allow_origins}")
 
 # Include routes
 app.include_router(router, prefix="/api/v1")

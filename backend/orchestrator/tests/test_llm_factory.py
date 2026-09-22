@@ -100,16 +100,22 @@ def test_get_provider_with_name():
     assert provider.name == "mock"
 
 
-def test_get_provider_default():
+def test_get_provider_default(monkeypatch):
     """
     Situation: No name specified, no LLM_PROVIDER set.
-    Expected: Returns default (groq).
+    Expected: Falls back to the default provider name.
     Function: src.llm.factory.get_provider
+
+    Patches LLM_PROVIDER to 'mock' so this test does not depend on
+    a real GROQ_API_KEY being present. The default-to-groq behavior
+    is verified by asserting on the name passed to _load, not by
+    constructing a real GroqProvider.
     """
-    with patch("src.llm.factory.settings") as settings:
-        settings.LLM_PROVIDER = None
-        provider = get_provider()
-        assert provider.name == "groq"
+    monkeypatch.setattr("src.llm.factory.settings.LLM_PROVIDER", None)
+    with patch("src.llm.factory._load") as load:
+        load.return_value = MagicMock(name="groq_provider")
+        get_provider()
+    load.assert_called_once_with("groq")
 
 
 def test_get_provider_from_settings():

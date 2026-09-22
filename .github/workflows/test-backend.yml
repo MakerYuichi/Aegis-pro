@@ -16,6 +16,7 @@ jobs:
   pytest:
     name: pytest (full suite)
     runs-on: ubuntu-latest
+    
 
     services:
       postgres:
@@ -53,12 +54,17 @@ jobs:
       LLM_PROVIDER: mock
       LLM_FALLBACKS: ""
       AUTO_FIX_MODE: read_only
+      # All secrets empty — tests must not depend on them.
       GROQ_API_KEY: ""
+      GEMINI_API_KEY: ""
       GOOGLE_API_KEY: ""
       OPENROUTER_API_KEY: ""
+      AZURE_OPENAI_API_KEY: ""
       GITHUB_TOKEN: ""
+      GITHUB_ORG: ""
       SLACK_BOT_TOKEN: ""
       SLACK_WEBHOOK_URL: ""
+      SLACK_SIGNING_SECRET: ""
 
     steps:
       - name: Checkout
