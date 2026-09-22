@@ -107,6 +107,11 @@ def _quiet_peripherals():
 
 @pytest.mark.asyncio
 async def test_declare_incident_autofix_success_merges_into_metadata(orchestrated):
+    """
+    Situation: Auto-fix generates successfully.
+    Expected: Auto-fix result merged into incident metadata.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     autofix_result = {
         "status": "fix_generated",
         "fix": "--- a\n+++ b\n",
@@ -139,6 +144,11 @@ async def test_declare_incident_autofix_success_merges_into_metadata(orchestrate
 
 @pytest.mark.asyncio
 async def test_declare_incident_autofix_error_result_not_merged(orchestrated):
+    """
+    Situation: Auto-fix returns error.
+    Expected: Auto-fix not merged into metadata.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     fake_autofix = MagicMock()
     fake_autofix.generate_fix = AsyncMock(return_value={"error": "no code found"})
 
@@ -164,6 +174,11 @@ async def test_declare_incident_autofix_error_result_not_merged(orchestrated):
 
 @pytest.mark.asyncio
 async def test_declare_incident_autofix_exception_is_swallowed(orchestrated):
+    """
+    Situation: Auto-fix service raises exception.
+    Expected: Exception caught, incident still created, auto-fix not in metadata.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     fake_autofix = MagicMock()
     fake_autofix.generate_fix = AsyncMock(side_effect=RuntimeError("llm down"))
 
@@ -210,23 +225,43 @@ async def test_declare_incident_autofix_exception_is_swallowed(orchestrated):
     ("fail at AuthService:44", "AuthService", 44),
 ])
 def test_parse_stack_trace_patterns(service, trace, expected_file, expected_line):
+    """
+    Situation: Various stack trace formats.
+    Expected: Extracts file path and line number correctly.
+    Function: src.services.incident_service.IncidentService._parse_stack_trace
+    """
     result = service._parse_stack_trace(trace)
     assert result["file_path"] == expected_file
     assert result["line_number"] == expected_line
 
 
 def test_parse_stack_trace_no_match_returns_none_file(service):
+    """
+    Situation: Stack trace with no recognizable pattern.
+    Expected: Returns None for file and line.
+    Function: src.services.incident_service.IncidentService._parse_stack_trace
+    """
     result = service._parse_stack_trace("just some text with no trace")
     assert result["file_path"] is None
     assert result["line_number"] is None
 
 
 def test_parse_stack_trace_extracts_exception_type(service):
+    """
+    Situation: Stack trace with exception type.
+    Expected: Extracts exception type.
+    Function: src.services.incident_service.IncidentService._parse_stack_trace
+    """
     result = service._parse_stack_trace("java.io.IOException: file missing")
     assert result["exception_type"] == "IOException"
 
 
 def test_parse_stack_trace_stores_truncated_trace(service):
+    """
+    Situation: Very long stack trace.
+    Expected: Truncates to 500 chars in full_trace.
+    Function: src.services.incident_service.IncidentService._parse_stack_trace
+    """
     long_trace = "x" * 1000
     result = service._parse_stack_trace(long_trace)
     assert len(result["full_trace"]) == 500
@@ -238,6 +273,11 @@ def test_parse_stack_trace_stores_truncated_trace(service):
 
 @pytest.mark.asyncio
 async def test_save_incident_metadata_writes_json(service):
+    """
+    Situation: Valid metadata to save.
+    Expected: Writes JSON to DB, commits.
+    Function: src.services.incident_service.IncidentService.save_incident_metadata
+    """
     get_db, session = _mock_db()
     with patch("src.services.incident_service.get_db", get_db):
         result = await service.save_incident_metadata(
@@ -250,6 +290,11 @@ async def test_save_incident_metadata_writes_json(service):
 
 @pytest.mark.asyncio
 async def test_save_incident_metadata_db_error_returns_error_dict(service):
+    """
+    Situation: DB write fails.
+    Expected: Returns error dict.
+    Function: src.services.incident_service.IncidentService.save_incident_metadata
+    """
     get_db, session = _mock_db()
     session.execute = AsyncMock(side_effect=RuntimeError("db down"))
     with patch("src.services.incident_service.get_db", get_db):
@@ -265,6 +310,11 @@ async def test_save_incident_metadata_db_error_returns_error_dict(service):
 
 @pytest.mark.asyncio
 async def test_get_service_db_error_falls_back_to_mock(service):
+    """
+    Situation: DB query fails.
+    Expected: Falls back to mock service dict.
+    Function: src.services.incident_service.IncidentService.get_service
+    """
     get_db, session = _mock_db()
     session.execute = AsyncMock(side_effect=RuntimeError("db down"))
     with patch("src.services.incident_service.get_db", get_db):
@@ -276,6 +326,11 @@ async def test_get_service_db_error_falls_back_to_mock(service):
 
 @pytest.mark.asyncio
 async def test_list_services_db_error_falls_back_to_mock_list(service):
+    """
+    Situation: DB query fails.
+    Expected: Falls back to mock services list.
+    Function: src.services.incident_service.IncidentService.list_services
+    """
     get_db, session = _mock_db()
     session.execute = AsyncMock(side_effect=RuntimeError("db down"))
     with patch("src.services.incident_service.get_db", get_db):

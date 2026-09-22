@@ -76,6 +76,11 @@ def client_public():
 # ── Public endpoints ────────────────────────────────────────────────────
 
 def test_ping_returns_pong(client_public):
+    """
+    Situation: Ping endpoint called.
+    Expected: Returns pong with alive status.
+    Function: src.api.routes.ping
+    """
     r = client_public.get("/api/v1/ping")
     assert r.status_code == 200
     body = r.json()
@@ -84,6 +89,11 @@ def test_ping_returns_pong(client_public):
 
 
 def test_get_incident_returns_404_when_missing(client_public):
+    """
+    Situation: Incident not found.
+    Expected: Returns 404.
+    Function: src.api.routes.get_incident
+    """
     client_public.app.state.incident_service.get_incident = AsyncMock(
         return_value=None
     )
@@ -93,6 +103,11 @@ def test_get_incident_returns_404_when_missing(client_public):
 
 
 def test_get_incident_returns_incident_when_found(client_public):
+    """
+    Situation: Incident found.
+    Expected: Returns incident data.
+    Function: src.api.routes.get_incident
+    """
     client_public.app.state.incident_service.get_incident = AsyncMock(
         return_value={"incident_id": "INC-1", "title": "Test"}
     )
@@ -102,6 +117,11 @@ def test_get_incident_returns_incident_when_found(client_public):
 
 
 def test_list_incidents_returns_count_and_list(client_public):
+    """
+    Situation: List incidents called.
+    Expected: Returns incidents list with count.
+    Function: src.api.routes.list_incidents
+    """
     client_public.app.state.incident_service.get_all_incidents = AsyncMock(
         return_value=[{"incident_id": "INC-1"}, {"incident_id": "INC-2"}]
     )
@@ -113,6 +133,11 @@ def test_list_incidents_returns_count_and_list(client_public):
 
 
 def test_list_incidents_respects_limit(client_public):
+    """
+    Situation: List incidents with limit parameter.
+    Expected: Passes limit to service.
+    Function: src.api.routes.list_incidents
+    """
     client_public.app.state.incident_service.get_all_incidents = AsyncMock(
         return_value=[]
     )
@@ -121,6 +146,11 @@ def test_list_incidents_respects_limit(client_public):
 
 
 def test_list_services_returns_wrapper(client_public):
+    """
+    Situation: List services called.
+    Expected: Returns services list wrapped.
+    Function: src.api.routes.list_services
+    """
     client_public.app.state.incident_service.list_services = AsyncMock(
         return_value=[{"name": "auth"}]
     )
@@ -130,6 +160,11 @@ def test_list_services_returns_wrapper(client_public):
 
 
 def test_get_pending_fixes_returns_wrapper(client_public):
+    """
+    Situation: Get pending fixes called.
+    Expected: Returns fixes list with count.
+    Function: src.api.routes.get_pending_fixes
+    """
     fake_fixes = [{"incident_id": "INC-1", "status": "pr_draft"}]
     with patch("src.api.routes.AutoFixService") as MockAF:
         MockAF.return_value.get_pending_fixes = AsyncMock(return_value=fake_fixes)
@@ -141,6 +176,11 @@ def test_get_pending_fixes_returns_wrapper(client_public):
 
 
 def test_list_oncall_returns_wrapper(client_public):
+    """
+    Situation: List on-call roster called.
+    Expected: Returns roster with count.
+    Function: src.api.routes.list_oncall
+    """
     fake_roster = [{"name": "Marcus", "role": "primary"}]
     with patch("src.api.routes.OnCallService") as MockOC:
         MockOC.return_value.list_roster = AsyncMock(return_value=fake_roster)
@@ -152,6 +192,11 @@ def test_list_oncall_returns_wrapper(client_public):
 
 
 def test_list_oncall_passes_service_name(client_public):
+    """
+    Situation: List on-call with service_name query param.
+    Expected: Passes service_name to service.
+    Function: src.api.routes.list_oncall
+    """
     with patch("src.api.routes.OnCallService") as MockOC:
         MockOC.return_value.list_roster = AsyncMock(return_value=[])
         client_public.get("/api/v1/oncall?service_name=auth")
@@ -159,6 +204,11 @@ def test_list_oncall_passes_service_name(client_public):
 
 
 def test_get_alert_history_returns_wrapper(client_public):
+    """
+    Situation: Get alert history called.
+    Expected: Returns alerts with count.
+    Function: src.api.routes.get_alert_history
+    """
     fake_alerts = [{"engineer": "Marcus", "status": "sent"}]
     with patch("src.api.routes.AlertService") as MockAlert:
         MockAlert.return_value.get_alert_history = AsyncMock(return_value=fake_alerts)
@@ -172,6 +222,11 @@ def test_get_alert_history_returns_wrapper(client_public):
 # ── Auth-required: incident endpoints ───────────────────────────────────
 
 def test_declare_incident_calls_service(client_authed):
+    """
+    Situation: Valid incident declaration.
+    Expected: Calls incident service with payload.
+    Function: src.api.routes.declare_incident
+    """
     client_authed.app.state.incident_service.declare_incident = AsyncMock(
         return_value={"incident_id": "INC-NEW", "severity": "P1"}
     )
@@ -189,6 +244,11 @@ def test_declare_incident_calls_service(client_authed):
 
 
 def test_declare_incident_passes_stack_trace(client_authed):
+    """
+    Situation: Incident declaration with stack trace.
+    Expected: Passes stack trace to service.
+    Function: src.api.routes.declare_incident
+    """
     client_authed.app.state.incident_service.declare_incident = AsyncMock(
         return_value={"incident_id": "INC-NEW"}
     )
@@ -206,10 +266,9 @@ def test_declare_incident_passes_stack_trace(client_authed):
 
 def test_declare_incident_requires_auth():
     """
-    Without an override, a request with no token should be rejected.
-
-    We don't need to mock anything — we just build a fresh app with no
-    dependency_overrides and hit the endpoint.
+    Situation: Declare incident without auth token.
+    Expected: Returns 401/403.
+    Function: src.api.routes.declare_incident
     """
     app = _make_app()  # No overrides
     c = TestClient(app)
@@ -222,6 +281,11 @@ def test_declare_incident_requires_auth():
 
 
 def test_rollback_calls_service(client_authed):
+    """
+    Situation: Valid rollback request.
+    Expected: Calls incident service with incident_id.
+    Function: src.api.routes.rollback_incident
+    """
     client_authed.app.state.incident_service.rollback = AsyncMock(
         return_value={"incident_id": "INC-1", "status": "rollback_initiated"}
     )
@@ -235,6 +299,11 @@ def test_rollback_calls_service(client_authed):
 # ── Auth-required: auto-fix endpoints ───────────────────────────────────
 
 def test_approve_fix_returns_result(client_authed):
+    """
+    Situation: Approve fix succeeds.
+    Expected: Returns approval result.
+    Function: src.api.routes.approve_fix
+    """
     with patch("src.api.routes.AutoFixService") as MockAF:
         MockAF.return_value.approve_fix = AsyncMock(
             return_value={"status": "approved", "pr": {"pr_number": 1}}
@@ -246,6 +315,11 @@ def test_approve_fix_returns_result(client_authed):
 
 
 def test_approve_fix_raises_400_on_service_error(client_authed):
+    """
+    Situation: Approve fix fails with error.
+    Expected: Returns 400 with error message.
+    Function: src.api.routes.approve_fix
+    """
     with patch("src.api.routes.AutoFixService") as MockAF:
         MockAF.return_value.approve_fix = AsyncMock(
             return_value={"error": "No fix found"}
@@ -256,6 +330,11 @@ def test_approve_fix_raises_400_on_service_error(client_authed):
 
 
 def test_reject_fix_passes_reason(client_authed):
+    """
+    Situation: Reject fix with reason.
+    Expected: Passes reason to service.
+    Function: src.api.routes.reject_fix
+    """
     with patch("src.api.routes.AutoFixService") as MockAF:
         MockAF.return_value.reject_fix = AsyncMock(
             return_value={"status": "rejected"}
@@ -268,6 +347,11 @@ def test_reject_fix_passes_reason(client_authed):
 
 
 def test_reject_fix_defaults_to_none_reason(client_authed):
+    """
+    Situation: Reject fix without reason.
+    Expected: Passes None as reason.
+    Function: src.api.routes.reject_fix
+    """
     with patch("src.api.routes.AutoFixService") as MockAF:
         MockAF.return_value.reject_fix = AsyncMock(
             return_value={"status": "rejected"}
@@ -277,6 +361,11 @@ def test_reject_fix_defaults_to_none_reason(client_authed):
 
 
 def test_reject_fix_raises_400_on_error(client_authed):
+    """
+    Situation: Reject fix fails with error.
+    Expected: Returns 400 with error message.
+    Function: src.api.routes.reject_fix
+    """
     with patch("src.api.routes.AutoFixService") as MockAF:
         MockAF.return_value.reject_fix = AsyncMock(
             return_value={"error": "incident not found"}
@@ -286,6 +375,11 @@ def test_reject_fix_raises_400_on_error(client_authed):
 
 
 def test_approve_fix_from_ui_returns_result(client_authed):
+    """
+    Situation: Approve fix from UI endpoint.
+    Expected: Returns approval result.
+    Function: src.api.routes.approve_fix_from_ui
+    """
     with patch("src.api.routes.AutoFixService") as MockAF:
         MockAF.return_value.approve_fix = AsyncMock(
             return_value={"status": "approved"}
@@ -295,6 +389,11 @@ def test_approve_fix_from_ui_returns_result(client_authed):
 
 
 def test_reject_fix_from_ui(client_authed):
+    """
+    Situation: Reject fix from UI endpoint.
+    Expected: Passes reason to service.
+    Function: src.api.routes.reject_fix_from_ui
+    """
     with patch("src.api.routes.AutoFixService") as MockAF:
         MockAF.return_value.reject_fix = AsyncMock(
             return_value={"status": "rejected"}
@@ -309,6 +408,11 @@ def test_reject_fix_from_ui(client_authed):
 # ── Auth-required: service CRUD ─────────────────────────────────────────
 
 def test_create_service_passes_payload(client_authed):
+    """
+    Situation: Create service with full payload.
+    Expected: Passes payload to service.
+    Function: src.api.routes.create_service
+    """
     client_authed.app.state.incident_service.add_service = AsyncMock(
         return_value={"status": "created", "name": "new-svc"}
     )
@@ -330,6 +434,11 @@ def test_create_service_passes_payload(client_authed):
 
 
 def test_create_service_raises_400_on_error(client_authed):
+    """
+    Situation: Create service fails with error.
+    Expected: Returns 400 with error message.
+    Function: src.api.routes.create_service
+    """
     client_authed.app.state.incident_service.add_service = AsyncMock(
         side_effect=ValueError("duplicate name")
     )
@@ -339,6 +448,11 @@ def test_create_service_raises_400_on_error(client_authed):
 
 
 def test_delete_service(client_authed):
+    """
+    Situation: Delete service.
+    Expected: Calls service delete with name.
+    Function: src.api.routes.delete_service
+    """
     client_authed.app.state.incident_service.delete_service = AsyncMock(
         return_value={"status": "deleted", "name": "old-svc"}
     )
@@ -348,6 +462,11 @@ def test_delete_service(client_authed):
 
 
 def test_seed_services(client_authed):
+    """
+    Situation: Seed services.
+    Expected: Calls service seed, returns count.
+    Function: src.api.routes.seed_services
+    """
     client_authed.app.state.incident_service.seed_services = AsyncMock(
         return_value={"status": "seeded", "count": 8}
     )
@@ -359,6 +478,11 @@ def test_seed_services(client_authed):
 # ── Auth-required: on-call management ───────────────────────────────────
 
 def test_add_oncall_member(client_authed):
+    """
+    Situation: Add on-call member.
+    Expected: Passes payload to service.
+    Function: src.api.routes.add_oncall_member
+    """
     with patch("src.api.routes.OnCallService") as MockOC:
         MockOC.return_value.add_member = AsyncMock(
             return_value={"status": "created", "id": 1}
@@ -380,6 +504,11 @@ def test_add_oncall_member(client_authed):
 
 
 def test_add_oncall_member_raises_400(client_authed):
+    """
+    Situation: Add on-call member fails with error.
+    Expected: Returns 400 with error message.
+    Function: src.api.routes.add_oncall_member
+    """
     with patch("src.api.routes.OnCallService") as MockOC:
         MockOC.return_value.add_member = AsyncMock(
             side_effect=ValueError("invalid role")
@@ -392,6 +521,11 @@ def test_add_oncall_member_raises_400(client_authed):
 
 
 def test_remove_oncall_member(client_authed):
+    """
+    Situation: Remove on-call member.
+    Expected: Calls service remove with member_id.
+    Function: src.api.routes.remove_oncall_member
+    """
     with patch("src.api.routes.OnCallService") as MockOC:
         MockOC.return_value.remove_member = AsyncMock(
             return_value={"status": "deleted"}
@@ -404,6 +538,11 @@ def test_remove_oncall_member(client_authed):
 # ── Auth-required: on-call alert (the branching logic) ──────────────────
 
 def test_send_oncall_alert_to_everyone(client_authed):
+    """
+    Situation: Send alert with everyone=True.
+    Expected: Calls alert_everyone.
+    Function: src.api.routes.send_oncall_alert
+    """
     with patch("src.api.routes.AlertService") as MockAlert:
         MockAlert.return_value.alert_everyone = AsyncMock(
             return_value={"status": "alerted", "count": 5}
@@ -417,7 +556,11 @@ def test_send_oncall_alert_to_everyone(client_authed):
 
 
 def test_send_oncall_alert_target_everyone_keyword(client_authed):
-    """The literal string 'everyone' as target also triggers a broadcast."""
+    """
+    Situation: Send alert with target="everyone".
+    Expected: Calls alert_everyone (keyword triggers broadcast).
+    Function: src.api.routes.send_oncall_alert
+    """
     with patch("src.api.routes.AlertService") as MockAlert:
         MockAlert.return_value.alert_everyone = AsyncMock(
             return_value={"status": "alerted"}
@@ -430,7 +573,30 @@ def test_send_oncall_alert_target_everyone_keyword(client_authed):
     MockAlert.return_value.alert_everyone.assert_awaited_once()
 
 
+def test_send_oncall_alert_target_all_keyword(client_authed):
+    """
+    Situation: Send alert with target="all".
+    Expected: Calls alert_everyone (keyword triggers broadcast).
+    Function: src.api.routes.send_oncall_alert
+    """
+    with patch("src.api.routes.AlertService") as MockAlert:
+        MockAlert.return_value.alert_everyone = AsyncMock(
+            return_value={"status": "alerted"}
+        )
+        r = client_authed.post(
+            "/api/v1/oncall/alert",
+            json={"target": "all", "service_name": "auth"},
+        )
+    assert r.status_code == 200
+    MockAlert.return_value.alert_everyone.assert_awaited_once()
+
+
 def test_send_oncall_alert_to_person(client_authed):
+    """
+    Situation: Send alert to specific person.
+    Expected: Calls alert_person with target.
+    Function: src.api.routes.send_oncall_alert
+    """
     with patch("src.api.routes.AlertService") as MockAlert:
         MockAlert.return_value.alert_person = AsyncMock(
             return_value={"status": "sent"}
@@ -447,7 +613,47 @@ def test_send_oncall_alert_to_person(client_authed):
 
 
 def test_send_oncall_alert_no_target_no_everyone_returns_400(client_authed):
-    """Neither target nor everyone — the endpoint should reject with 400."""
+    """
+    Situation: Send alert without target or everyone.
+    Expected: Returns 400 with error message.
+    Function: src.api.routes.send_oncall_alert
+    """
     r = client_authed.post("/api/v1/oncall/alert", json={})
     assert r.status_code == 400
     assert "target" in r.json()["detail"].lower()
+
+
+def test_send_oncall_alert_default_message_with_incident_id(client_authed):
+    """
+    Situation: Send alert with incident_id, no custom message.
+    Expected: Uses default message with incident_id.
+    Function: src.api.routes.send_oncall_alert
+    """
+    with patch("src.api.routes.AlertService") as MockAlert:
+        MockAlert.return_value.alert_person = AsyncMock(
+            return_value={"status": "sent"}
+        )
+        r = client_authed.post(
+            "/api/v1/oncall/alert",
+            json={"target": "@marcus", "incident_id": "INC-1"},
+        )
+    call_kwargs = MockAlert.return_value.alert_person.call_args.kwargs
+    assert "INC-1" in call_kwargs["message"]
+
+
+def test_send_oncall_alert_default_message_without_incident_id(client_authed):
+    """
+    Situation: Send alert without incident_id, no custom message.
+    Expected: Uses default page message.
+    Function: src.api.routes.send_oncall_alert
+    """
+    with patch("src.api.routes.AlertService") as MockAlert:
+        MockAlert.return_value.alert_person = AsyncMock(
+            return_value={"status": "sent"}
+        )
+        r = client_authed.post(
+            "/api/v1/oncall/alert",
+            json={"target": "@marcus"},
+        )
+    call_kwargs = MockAlert.return_value.alert_person.call_args.kwargs
+    assert "please acknowledge" in call_kwargs["message"]

@@ -1,3 +1,11 @@
+"""
+Tests for LLM providers, chain, and factory.
+
+Covers:
+  - MockProvider: canned responses, default responses, format handling
+  - LLMChain: fallback behavior, provider selection, error handling
+  - Factory: provider loading, chain building, configuration
+"""
 import json
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
@@ -11,6 +19,11 @@ from src.llm.chain import LLMChain
 
 @pytest.mark.asyncio
 async def test_mock_provider_returns_canned_response():
+    """
+    Situation: MockProvider with canned response.
+    Expected: Returns canned response.
+    Function: src.llm.mock_provider.MockProvider.complete
+    """
     p = MockProvider(canned_response='{"severity": "P0"}')
     resp = await p.complete("analyze this")
     assert isinstance(resp, LLMResponse)
@@ -20,11 +33,27 @@ async def test_mock_provider_returns_canned_response():
 
 @pytest.mark.asyncio
 async def test_mock_provider_default_response_is_valid_json():
+    """
+    Situation: MockProvider without canned response.
+    Expected: Returns default incident analysis JSON.
+    Function: src.llm.mock_provider.MockProvider.complete
+    """
     p = MockProvider()
     resp = await p.complete("anything")
     parsed = json.loads(resp.content)
     for key in ("severity", "title", "root_cause", "suggested_fix", "confidence"):
         assert key in parsed
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_is_configured():
+    """
+    Situation: Check if MockProvider is configured.
+    Expected: Always returns True.
+    Function: src.llm.mock_provider.MockProvider.is_configured
+    """
+    p = MockProvider()
+    assert p.is_configured() is True
 
 
 # ── LLMChain ─────────────────────────────────────────────────
@@ -45,6 +74,11 @@ class _WorkingProvider:
 
 @pytest.mark.asyncio
 async def test_chain_falls_through_to_second_provider():
+    """
+    Situation: First provider fails, second succeeds.
+    Expected: Returns response from second provider.
+    Function: src.llm.chain.LLMChain.complete
+    """
     chain = LLMChain([_FailingProvider(), _WorkingProvider()])
     resp = await chain.complete("hi")
     assert resp is not None
@@ -54,20 +88,99 @@ async def test_chain_falls_through_to_second_provider():
 
 @pytest.mark.asyncio
 async def test_chain_returns_none_if_all_fail():
+    """
+    Situation: All providers fail.
+    Expected: Returns None.
+    Function: src.llm.chain.LLMChain.complete
+    """
     chain = LLMChain([_FailingProvider(), _FailingProvider()])
     resp = await chain.complete("hi")
     assert resp is None
 
 
 def test_chain_exposes_provider_names():
+    """
+    Situation: Chain with multiple providers.
+    Expected: Returns list of provider names.
+    Function: src.llm.chain.LLMChain.provider_names
+    """
     chain = LLMChain([_WorkingProvider(), _FailingProvider()])
     assert chain.provider_names() == ["working", "failing"]
+
+
+def test_chain_bool_true_with_providers():
+    """
+    Situation: Chain with providers.
+    Expected: Evaluates to True.
+    Function: src.llm.chain.LLMChain.__bool__
+    """
+    chain = LLMChain([_WorkingProvider()])
+    assert bool(chain) is True
+
+
+def test_chain_bool_false_without_providers():
+    """
+    Situation: Chain with no providers.
+    Expected: Evaluates to False.
+    Function: src.llm.chain.LLMChain.__bool__
+    """
+    chain = LLMChain([])
+    assert bool(chain) is False
+
+
+@pytest.mark.asyncio
+async def test_chain_filters_none_providers():
+    """
+    Situation: Chain initialized with None values.
+    Expected: Filters out None values.
+    Function: src.llm.chain.LLMChain.__init__
+    """
+    chain = LLMChain([None, _WorkingProvider(), None])
+    assert len(chain._providers) == 1
+    assert chain._providers[0].name == "working"
+
+
+@pytest.mark.asyncio
+async def test_chain_passes_parameters_to_provider():
+    """
+    Situation: Chain called with custom parameters.
+    Expected: Passes prompt, system, temperature, max_tokens, response_format to provider.
+    Function: src.llm.chain.LLMChain.complete
+    """
+    class ParamTrackingProvider:
+        name = "tracker"
+        def is_configured(self) -> bool: return True
+        def __init__(self):
+            self.received_kwargs = {}
+        async def complete(self, prompt, system=None, temperature=0.2, max_tokens=2048, response_format="text", **kwargs):
+            self.received_kwargs = {
+                "prompt": prompt,
+                "system": system,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": response_format,
+                "kwargs": kwargs
+            }
+            return LLMResponse(content="ok", provider="tracker", model="t-1")
+    
+    provider = ParamTrackingProvider()
+    chain = LLMChain([provider])
+    resp = await chain.complete("hi", temperature=0.5, max_tokens=1000)
+    
+    assert provider.received_kwargs["temperature"] == 0.5
+    assert provider.received_kwargs["max_tokens"] == 1000
+    assert provider.received_kwargs["prompt"] == "hi"
 
 
 # ── Provider internals (smoke tests) ─────────────────────────
 
 @pytest.mark.asyncio
 async def test_groq_provider_iterates_models_on_failure(monkeypatch):
+    """
+    Situation: Groq provider with model iteration.
+    Expected: Falls through to second model on failure.
+    Function: src.llm.groq_provider.GroqProvider.complete
+    """
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
     import importlib
     from src import config
@@ -95,6 +208,11 @@ async def test_groq_provider_iterates_models_on_failure(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ollama_provider_posts_to_generate_endpoint(monkeypatch):
+    """
+    Situation: Ollama provider called.
+    Expected: Posts to generate endpoint.
+    Function: src.llm.ollama_provider.OllamaProvider.complete
+    """
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
     import importlib
     from src import config
@@ -113,14 +231,17 @@ async def test_ollama_provider_posts_to_generate_endpoint(monkeypatch):
         resp = await p.complete("hi")
         assert resp.content == "ollama-ok"
         assert mock_post.call_args[0][0].endswith("/api/generate")
-        
-# ── #21 regression: json_array shape ─────────────────────────
+
+
+# ── Response format handling ─────────────────────────────────
+
 @pytest.mark.asyncio
 async def test_mock_provider_returns_array_for_json_array_format():
-    """Regression for #21: PR scoring expects a JSON array, not an object."""
-    import json
-    from src.llm.mock_provider import MockProvider
-
+    """
+    Situation: Request with json_array format.
+    Expected: Returns JSON array.
+    Function: src.llm.mock_provider.MockProvider.complete
+    """
     p = MockProvider()
     resp = await p.complete("score these PRs", response_format="json_array")
     parsed = json.loads(resp.content)
@@ -132,12 +253,26 @@ async def test_mock_provider_returns_array_for_json_array_format():
 
 @pytest.mark.asyncio
 async def test_mock_provider_returns_object_by_default():
-    """Default response_format is 'text' — object shape preserved for incidents."""
-    import json
-    from src.llm.mock_provider import MockProvider
-
+    """
+    Situation: Default response_format (text).
+    Expected: Returns JSON object for incidents.
+    Function: src.llm.mock_provider.MockProvider.complete
+    """
     p = MockProvider()
     resp = await p.complete("analyze this incident")
     parsed = json.loads(resp.content)
     assert isinstance(parsed, dict)
     assert "severity" in parsed
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_respects_json_object_format():
+    """
+    Situation: Request with json_object format.
+    Expected: Returns JSON object.
+    Function: src.llm.mock_provider.MockProvider.complete
+    """
+    p = MockProvider()
+    resp = await p.complete("analyze", response_format="json_object")
+    parsed = json.loads(resp.content)
+    assert isinstance(parsed, dict)

@@ -1,3 +1,9 @@
+"""
+Tests for GitHubService LLM integration.
+
+Verifies that GitHubService uses the LLM chain abstraction rather than
+direct provider clients.
+"""
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,9 +23,9 @@ class _StubProvider:
 @pytest.mark.asyncio
 async def test_github_service_uses_llm_chain_for_pr_scoring(monkeypatch):
     """
-    Regression test: GitHubService must not reach into LLMService.client,
-    .gemini_client, .openrouter_api_key, or .models. It must go through
-    the LLMService.complete_raw() abstraction.
+    Situation: GitHubService scores PR candidates.
+    Expected: Uses LLM chain abstraction, not direct provider clients.
+    Function: src.services.github_service.GitHubService._score_candidates_with_llm_service
     """
     monkeypatch.setenv("GITHUB_TOKEN", "")  # Avoid real GitHub calls
 
@@ -31,7 +37,7 @@ async def test_github_service_uses_llm_chain_for_pr_scoring(monkeypatch):
         def __init__(self):
             canned = (
                 '[{"number": 42, "score": 0.91, "reason": "modified exact line"},'
-                ' {"number": 43, "score": 0.45, "reason": "unrelated"}]'
+                '{"number": 43, "score": 0.45, "reason": "unrelated"}]'
             )
             self.chain = LLMChain([_StubProvider(canned)])
 
