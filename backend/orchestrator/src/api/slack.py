@@ -104,10 +104,12 @@ async def process_incident_command(data: dict):
             "data": result
         })
         
-        blocks = build_incident_blocks(result)
-        await send_slack_response(data.get('response_url'), {
-            "blocks": blocks,
-            "text": f"🚨 Incident {result['incident_id']}"
+        response_url = data.get('response_url')
+        if response_url:
+            blocks = build_incident_blocks(result)
+            await send_slack_response(response_url, {
+                "blocks": blocks,
+                "text": f"🚨 Incident {result['incident_id']}"
         })
         
     except Exception as e:

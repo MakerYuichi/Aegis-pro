@@ -21,6 +21,11 @@ from src.services.autofix_service import AutoFixService
 # ── read_only ────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_read_only_returns_skipped_without_touching_github(monkeypatch):
+    """
+    Situation: AUTO_FIX_MODE=read_only.
+    Expected: Returns skipped status, no PR payload.
+    Function: src.services.autofix_service.AutoFixService.create_pr
+    """
     monkeypatch.setattr(settings, "AUTO_FIX_MODE", "read_only")
 
     svc = AutoFixService()
@@ -44,6 +49,11 @@ async def test_read_only_returns_skipped_without_touching_github(monkeypatch):
 # ── pr_draft ─────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_pr_draft_stages_payload_for_approval(monkeypatch):
+    """
+    Situation: AUTO_FIX_MODE=pr_draft.
+    Expected: Returns pr_draft status with approval URL.
+    Function: src.services.autofix_service.AutoFixService.create_pr
+    """
     monkeypatch.setattr(settings, "AUTO_FIX_MODE", "pr_draft")
 
     svc = AutoFixService()
@@ -68,6 +78,11 @@ async def test_pr_draft_stages_payload_for_approval(monkeypatch):
 # ── auto_pr ──────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_auto_pr_raises_until_real_integration_lands(monkeypatch):
+    """
+    Situation: AUTO_FIX_MODE=auto_pr.
+    Expected: Raises NotImplementedError (not yet implemented).
+    Function: src.services.autofix_service.AutoFixService.create_pr
+    """
     monkeypatch.setattr(settings, "AUTO_FIX_MODE", "auto_pr")
 
     svc = AutoFixService()
@@ -84,6 +99,11 @@ async def test_auto_pr_raises_until_real_integration_lands(monkeypatch):
 # ── invalid mode ─────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_invalid_mode_raises_value_error(monkeypatch):
+    """
+    Situation: AUTO_FIX_MODE has invalid value.
+    Expected: Raises ValueError.
+    Function: src.services.autofix_service.AutoFixService.create_pr
+    """
     monkeypatch.setattr(settings, "AUTO_FIX_MODE", "yolo")
 
     svc = AutoFixService()
@@ -100,7 +120,11 @@ async def test_invalid_mode_raises_value_error(monkeypatch):
 # ── default behavior ─────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_default_mode_is_read_only(monkeypatch):
-    """When AUTO_FIX_MODE is unset, the service must default to read_only."""
+    """
+    Situation: AUTO_FIX_MODE is unset/empty.
+    Expected: Defaults to read_only.
+    Function: src.services.autofix_service.AutoFixService.create_pr
+    """
     monkeypatch.setattr(settings, "AUTO_FIX_MODE", "")
 
     svc = AutoFixService()
@@ -110,6 +134,50 @@ async def test_default_mode_is_read_only(monkeypatch):
         line_number=442,
         fix="diff",
         incident_id="INC-TEST-005",
+    )
+
+    assert result["mode"] == "read_only"
+    assert result["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_mode_whitespace_is_stripped(monkeypatch):
+    """
+    Situation: AUTO_FIX_MODE has leading/trailing whitespace.
+    Expected: Whitespace stripped before mode check.
+    Function: src.services.autofix_service.AutoFixService.create_pr
+    """
+    monkeypatch.setattr(settings, "AUTO_FIX_MODE", "  pr_draft  ")
+
+    svc = AutoFixService()
+    result = await svc.create_pr(
+        repo_name="mock-org/payment-api",
+        file_path="PaymentProcessor.java",
+        line_number=442,
+        fix="diff",
+        incident_id="INC-TEST-006",
+    )
+
+    assert result["mode"] == "pr_draft"
+    assert result["status"] == "pr_draft"
+
+
+@pytest.mark.asyncio
+async def test_mode_case_insensitive(monkeypatch):
+    """
+    Situation: AUTO_FIX_MODE has uppercase value.
+    Expected: Case-insensitive mode check.
+    Function: src.services.autofix_service.AutoFixService.create_pr
+    """
+    monkeypatch.setattr(settings, "AUTO_FIX_MODE", "READ_ONLY")
+
+    svc = AutoFixService()
+    result = await svc.create_pr(
+        repo_name="mock-org/payment-api",
+        file_path="PaymentProcessor.java",
+        line_number=442,
+        fix="diff",
+        incident_id="INC-TEST-007",
     )
 
     assert result["mode"] == "read_only"

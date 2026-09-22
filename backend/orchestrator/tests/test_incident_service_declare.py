@@ -96,6 +96,11 @@ def service_with_db(service):
 
 @pytest.mark.asyncio
 async def test_declare_incident_returns_expected_shape(service_with_db):
+    """
+    Situation: Valid incident declaration with all services available.
+    Expected: Returns incident with all expected fields.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     with patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
@@ -120,6 +125,11 @@ async def test_declare_incident_returns_expected_shape(service_with_db):
 
 @pytest.mark.asyncio
 async def test_declare_incident_unknown_service_returns_error(service):
+    """
+    Situation: Service not found.
+    Expected: Returns error with available services.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     with patch.object(service, "get_service", new=AsyncMock(return_value=None)), \
          patch.object(service, "list_services", new=AsyncMock(return_value=[{"name": "auth"}])):
         result = await service.declare_incident("nonexistent", "boom")
@@ -131,6 +141,11 @@ async def test_declare_incident_unknown_service_returns_error(service):
 
 @pytest.mark.asyncio
 async def test_declare_incident_calls_save_incident(service_with_db):
+    """
+    Situation: Valid incident declaration.
+    Expected: Calls save_incident with correct data.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     with patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
@@ -152,6 +167,11 @@ async def test_declare_incident_calls_save_incident(service_with_db):
 
 @pytest.mark.asyncio
 async def test_declare_incident_stores_in_rag(service_with_db):
+    """
+    Situation: Valid incident declaration.
+    Expected: Stores incident in RAG.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     with patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
@@ -169,6 +189,11 @@ async def test_declare_incident_stores_in_rag(service_with_db):
 
 @pytest.mark.asyncio
 async def test_declare_incident_broadcasts_over_websocket(service_with_db):
+    """
+    Situation: Valid incident declaration.
+    Expected: Broadcasts new incident over WebSocket.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     with patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
@@ -189,6 +214,11 @@ async def test_declare_incident_broadcasts_over_websocket(service_with_db):
 
 @pytest.mark.asyncio
 async def test_declare_incident_uses_rag_context_when_available(service_with_db):
+    """
+    Situation: RAG finds similar incidents.
+    Expected: Uses RAG context in analysis, rag_context_used True.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     service_with_db._rag_mock.generate_context_prompt = AsyncMock(return_value="similar past incident")
 
     with patch("src.services.incident_service.OnCallService") as OnCall, \
@@ -212,6 +242,11 @@ async def test_declare_incident_uses_rag_context_when_available(service_with_db)
 
 @pytest.mark.asyncio
 async def test_declare_incident_parses_stack_trace_into_fields(service_with_db):
+    """
+    Situation: Stack trace provided.
+    Expected: Parses into exception_type, file_path, line_number.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     with patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
@@ -238,6 +273,11 @@ async def test_declare_incident_parses_stack_trace_into_fields(service_with_db):
 
 @pytest.mark.asyncio
 async def test_declare_incident_fetches_github_context_when_repo_set(service_with_db):
+    """
+    Situation: Service has repo_name and stack trace.
+    Expected: Fetches GitHub context (PRs, blame, code content).
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     fake_github = MagicMock()
     fake_github.get_recent_prs = AsyncMock(return_value=[{"number": 1}])
     fake_github.get_blame_with_pr = AsyncMock(return_value={
@@ -274,6 +314,11 @@ async def test_declare_incident_fetches_github_context_when_repo_set(service_wit
 
 @pytest.mark.asyncio
 async def test_declare_incident_github_error_does_not_break(service_with_db):
+    """
+    Situation: GitHub service fails.
+    Expected: Incident still created, GitHub error logged.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     fake_github = MagicMock()
     fake_github.get_recent_prs = AsyncMock(side_effect=RuntimeError("github down"))
 
@@ -303,6 +348,11 @@ async def test_declare_incident_github_error_does_not_break(service_with_db):
 
 @pytest.mark.asyncio
 async def test_declare_incident_sends_alerts_to_oncall(service_with_db):
+    """
+    Situation: Valid incident with on-call roster.
+    Expected: Sends alerts to on-call engineers.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     on_call_result = {"primary": {"name": "Alice", "slack": "@alice"},
                       "secondary": None, "tertiary": None}
 
@@ -325,6 +375,11 @@ async def test_declare_incident_sends_alerts_to_oncall(service_with_db):
 
 @pytest.mark.asyncio
 async def test_declare_incident_alert_failure_does_not_break(service_with_db):
+    """
+    Situation: Alert service fails.
+    Expected: Incident still created, alert error logged.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     with patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
@@ -338,10 +393,16 @@ async def test_declare_incident_alert_failure_does_not_break(service_with_db):
         result = await service_with_db.declare_incident("payment-api", "DB down")
 
     assert "error" not in result
+    assert result["incident_id"].startswith("INC-")
 
 
 @pytest.mark.asyncio
 async def test_declare_incident_k8s_failure_does_not_break(service_with_db):
+    """
+    Situation: Kubernetes service fails.
+    Expected: Incident still created, K8s error logged.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     with patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
@@ -359,6 +420,11 @@ async def test_declare_incident_k8s_failure_does_not_break(service_with_db):
 
 @pytest.mark.asyncio
 async def test_declare_incident_websocket_failure_does_not_break(service_with_db):
+    """
+    Situation: WebSocket broadcast fails.
+    Expected: Incident still created, WebSocket error logged.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     with patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
@@ -376,6 +442,11 @@ async def test_declare_incident_websocket_failure_does_not_break(service_with_db
 
 @pytest.mark.asyncio
 async def test_declare_incident_rag_store_failure_does_not_break(service_with_db):
+    """
+    Situation: RAG store_incident fails.
+    Expected: Raises (current behavior - not wrapped in try/except).
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
     service_with_db._rag_mock.store_incident = AsyncMock(side_effect=RuntimeError("embedding down"))
 
     with patch("src.services.incident_service.OnCallService") as OnCall, \
