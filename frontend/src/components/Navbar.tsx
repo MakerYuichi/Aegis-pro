@@ -1,12 +1,17 @@
 import { Link, useLocation } from 'react-router-dom';
-import { Shield, Zap, Moon, Sun, LayoutDashboard, AlertTriangle, Server, Users, Settings as SettingsIcon, LogOut, Sparkles } from 'lucide-react';
+import {
+  Shield, Zap, Moon, Sun, LayoutDashboard, AlertTriangle, Server,
+  Users, Settings, Activity, LogOut, Sparkles,
+} from 'lucide-react';
 import { useAuth0 } from '@auth0/auth0-react';
 import { useTheme } from './ThemeProvider';
+import { useIsAdmin } from '../hooks/useIsAdmin';
 
 export function Navbar() {
   const { theme, toggleTheme } = useTheme();
   const location = useLocation();
   const { user, logout } = useAuth0();
+  const { isAdmin } = useIsAdmin();
 
   const navItems = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -14,9 +19,15 @@ export function Navbar() {
     { path: '/services', label: 'Services', icon: Server },
     { path: '/oncall', label: 'On-Call', icon: Users },
     { path: '/approvals', label: 'Approvals', icon: Zap },
-    { path: '/settings', label: 'Settings', icon: SettingsIcon },
+    { path: '/settings', label: 'Settings', icon: Settings },
     { path: '/demo', label: 'Demo', icon: Sparkles },
   ];
+
+  // Base navigation is always shown. The Admin link is appended only
+  // when /api/v1/me reports is_admin: true.
+  const visibleNavItems = isAdmin
+    ? [...navItems, { path: '/admin/demo-activity', label: 'Admin', icon: Activity }]
+    : navItems;
 
   const handleLogout = () =>
     logout({ logoutParams: { returnTo: window.location.origin } });
@@ -44,9 +55,12 @@ export function Navbar() {
 
           {/* Navigation */}
           <div className="hidden md:flex items-center gap-1">
-            {navItems.map((item) => {
+            {visibleNavItems.map((item) => {
               const Icon = item.icon;
-              const isActive = location.pathname === item.path;
+              const isActive =
+                location.pathname === item.path ||
+                (item.path === '/admin/demo-activity' &&
+                  location.pathname.startsWith('/admin/'));
               return (
                 <Link
                   key={item.path}
@@ -85,7 +99,7 @@ export function Navbar() {
               )}
             </button>
 
-            {/* === NEW: User + Logout === */}
+            {/* User + Logout */}
             {user && (
               <div className="flex items-center gap-2 pl-3 border-l border-light-border dark:border-dark-border">
                 <div className="hidden sm:flex flex-col items-end">
