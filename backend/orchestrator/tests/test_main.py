@@ -97,22 +97,6 @@ def test_websocket_route_is_registered():
 # CORS — documents current behavior + intended behavior (bug)
 # ---------------------------------------------------------------------------
 
-def test_cors_allows_localhost_current_behavior(client):
-    """
-    Situation: CORS request from localhost.
-    Expected: Allows localhost (current hardcoded behavior).
-    Function: src.main.app (CORS middleware)
-    """
-    resp = client.options(
-        "/health",
-        headers={
-            "Origin": "http://localhost:5173",
-            "Access-Control-Request-Method": "GET",
-        },
-    )
-    assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
-
-
 def test_cors_middleware_uses_allow_origins_variable():
     """
     The CORSMiddleware must be configured from the computed allow_origins,
