@@ -10,6 +10,7 @@ Covers:
 """
 import json
 import pytest
+from urllib.parse import urlparse
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -208,7 +209,8 @@ async def test_notify_slack_posts_to_hardcoded_placeholder():
 
     client.post.assert_awaited_once()
     url = client.post.await_args.args[0]
-    assert "hooks.slack.com" in url
+    parsed = urlparse(url)
+    assert parsed.hostname == "hooks.slack.com"
     assert "xxx" in url  # placeholder, not a real webhook
 
 
