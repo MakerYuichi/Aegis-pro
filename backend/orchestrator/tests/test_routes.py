@@ -32,6 +32,7 @@ Two categories:
 
 import pytest
 from fastapi import FastAPI
+from src.main import app
 from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -657,3 +658,34 @@ def test_send_oncall_alert_default_message_without_incident_id(client_authed):
         )
     call_kwargs = MockAlert.return_value.alert_person.call_args.kwargs
     assert "please acknowledge" in call_kwargs["message"]
+    
+# ── /me ─────────────────────────────────────────────────────
+
+def test_me_returns_email_and_admin_flag(monkeypatch):
+    monkeypatch.setattr("src.auth.settings.ADMIN_EMAILS", "admin@x.com")
+    from src.auth import require_auth
+    from src.main import app
+
+    app.dependency_overrides[require_auth] = lambda: {"email": "admin@x.com"}
+    try:
+        with TestClient(app) as c:
+            resp = c.get("/api/v1/me")
+        assert resp.status_code == 200
+        assert resp.json() == {"email": "admin@x.com", "is_admin": True}
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_me_reports_non_admin_false(monkeypatch):
+    monkeypatch.setattr("src.auth.settings.ADMIN_EMAILS", "admin@x.com")
+    from src.auth import require_auth
+    from src.main import app
+
+    app.dependency_overrides[require_auth] = lambda: {"email": "nobody@y.com"}
+    try:
+        with TestClient(app) as c:
+            resp = c.get("/api/v1/me")
+        assert resp.status_code == 200
+        assert resp.json() == {"email": "nobody@y.com", "is_admin": False}
+    finally:
+        app.dependency_overrides.clear()
