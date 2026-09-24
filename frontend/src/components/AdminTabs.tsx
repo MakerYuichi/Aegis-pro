@@ -8,7 +8,7 @@
  * /admin/demo-sessions/:id) keep their parent tab highlighted.
  */
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Sparkles, Activity, BarChart3 } from 'lucide-react';
+import { LayoutDashboard, Activity, BarChart3 } from 'lucide-react';
 
 type Tab = {
   path: string;
