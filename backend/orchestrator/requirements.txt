@@ -10,7 +10,7 @@ python-dotenv==1.0.1
 # Database
 sqlalchemy==2.0.25
 asyncpg==0.29.0
-pgvector==0.2.5
+pgvector==0.5.0
 
 # Cache & Queue
 redis==5.0.1
