@@ -44,7 +44,7 @@ export function AdminAuditLogPage() {
     try {
       setLoading(true);
       setError(null);
-      const [sessions, alerts] = await Promise.all([
+      const [sessions, alertHistory] = await Promise.all([
         adminApi.fetchSessions(200),
         getAlertHistory(50),
       ]);
@@ -61,7 +61,7 @@ export function AdminAuditLogPage() {
           : (s.error_reason ?? undefined),
       }));
 
-      const alertEntries: LogEntry[] = alerts.map((a: Alert) => ({
+      const alertEntries: LogEntry[] = (alertHistory.alerts ?? []).map((a: Alert) => ({
         id: `alert-${a.id}`,
         timestamp: a.timestamp,
         source: 'alert',
