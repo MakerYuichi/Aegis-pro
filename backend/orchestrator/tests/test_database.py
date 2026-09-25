@@ -12,6 +12,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src import database as db_module
+from src.database import get_db_session
 
 
 # ---------------------------------------------------------------------------
@@ -128,57 +129,70 @@ async def test_init_db_table_already_exists():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_get_db_returns_async_context_manager():
-    """Situation: get_db is called. Expected: Returns an object that supports async context manager protocol."""
+async def test_get_db_session_is_async_context_manager():
+    """
+    Situation: get_db_session is called.
+    Expected: It returns an async context manager yielding a session.
+    """
     with patch("src.database.AsyncSessionLocal") as mock_factory:
         mock_session = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
         mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_session)
         mock_factory.return_value.__aexit__ = AsyncMock(return_value=None)
 
-        session = await db_module.get_db()
-
-        # The returned session should support async with
-        assert session is not None
+        async with get_db_session() as session:
+            assert session is mock_session
 
 
 @pytest.mark.asyncio
 async def test_get_db_session_supports_execute():
-    """Situation: Session from get_db is used. Expected: Session has execute method."""
+    """
+    Situation: A session from get_db_session is used.
+    Expected: The session has execute and awaits it correctly.
+    """
     with patch("src.database.AsyncSessionLocal") as mock_factory:
         mock_session = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.execute = AsyncMock(return_value=MagicMock())
         mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_session)
         mock_factory.return_value.__aexit__ = AsyncMock(return_value=None)
 
-        session = await db_module.get_db()
-        assert hasattr(session, "execute")
+        async with get_db_session() as session:
+            result = await session.execute("SELECT 1")
+            assert result is not None
+            session.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_get_db_session_supports_commit():
-    """Situation: Session from get_db is used. Expected: Session has commit method."""
+    """
+    Situation: A session from get_db_session is committed.
+    Expected: The session has commit and awaits it correctly.
+    """
     with patch("src.database.AsyncSessionLocal") as mock_factory:
         mock_session = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.commit = AsyncMock()
         mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_session)
         mock_factory.return_value.__aexit__ = AsyncMock(return_value=None)
 
-        session = await db_module.get_db()
-        assert hasattr(session, "commit")
+        async with get_db_session() as session:
+            await session.commit()
+            session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_get_db_pool_exhaustion_propagates():
-    """Situation: Pool is exhausted. Expected: Error propagates (no swallowing in get_db)."""
+async def test_get_db_session_pool_exhaustion_propagates():
+    """
+    Situation: The connection pool is exhausted.
+    Expected: The error propagates out of the context manager.
+    """
     with patch("src.database.AsyncSessionLocal") as mock_factory:
-        mock_factory.side_effect = RuntimeError("pool exhausted")
+        mock_factory.return_value.__aenter__ = AsyncMock(
+            side_effect=RuntimeError("pool exhausted")
+        )
+        mock_factory.return_value.__aexit__ = AsyncMock(return_value=None)
 
         with pytest.raises(RuntimeError, match="pool exhausted"):
-            await db_module.get_db()
+            async with get_db_session():
+                pass
 
 
 # ---------------------------------------------------------------------------
