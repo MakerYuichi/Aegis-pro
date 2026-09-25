@@ -131,7 +131,7 @@ export function IncidentView({
               <Brain className="w-5 h-5 text-brand-primary" />
               <h3 className="text-sm font-semibold text-brand-primary">AI Analysis</h3>
               <span className="text-xs bg-brand-primary/20 text-brand-primary px-2 py-0.5 rounded-full ml-auto">
-                {(incident.confidence_score * 100).toFixed(0)}% confidence
+                {(incident.confidence_score * 100).toFixed(2)}% confidence
               </span>
             </div>
 
@@ -169,12 +169,12 @@ export function IncidentView({
             <div className="mt-4">
               <div className="flex justify-between text-xs text-light-muted dark:text-dark-muted mb-1">
                 <span>Confidence Score</span>
-                <span>{(incident.confidence_score * 100).toFixed(0)}%</span>
+                <span>{(incident.confidence_score * 100).toFixed(2)}%</span>
               </div>
               <div className="h-2 bg-light-border dark:bg-dark-border rounded-full overflow-hidden">
                 <motion.div
                   initial={{ width: 0 }}
-                  animate={{ width: `${(incident.confidence_score * 100).toFixed(0)}%` }}
+                  animate={{ width: `${(incident.confidence_score * 100).toFixed(2)}%` }}
                   transition={{ duration: 1, ease: 'easeOut' }}
                   className={`h-full rounded-full ${
                     incident.confidence_score > 0.8 ? 'bg-brand-success' :
@@ -448,13 +448,13 @@ export function IncidentView({
                             <div className="flex items-center gap-2 mb-1">
                               <span className="text-xs text-light-muted dark:text-dark-muted">Relevance</span>
                               <span className="text-xs font-semibold text-brand-primary">
-                                {(pr.relevance_score * 100).toFixed(1)}%
+                                {(pr.relevance_score * 100).toFixed(2)}%
                               </span>
                             </div>
                             <div className="w-20 h-2 bg-light-bg dark:bg-dark-bg rounded-full overflow-hidden">
                               <div
                                 className="h-full bg-gradient-to-r from-brand-primary to-brand-secondary"
-                                style={{ width: `${(pr.relevance_score * 100).toFixed(1)}%` }}
+                                style={{ width: `${(pr.relevance_score * 100).toFixed(2)}%` }}
                               />
                             </div>
                           </div>
@@ -647,7 +647,7 @@ export function IncidentView({
               </div>
               <div className="flex justify-between">
                 <span className="text-light-muted dark:text-dark-muted">Confidence</span>
-                <span>{(incident.confidence_score * 100).toFixed(0)}%</span>
+                <span>{(incident.confidence_score * 100).toFixed(2)}%</span>
               </div>
             </div>
           </div>

@@ -322,4 +322,5 @@ async def test_fetch_related_prs_falls_back_when_llm_fails(monkeypatch):
 
     changes = await gh.fetch_related_prs("o", "r", "src/x.py", 42)
     assert len(changes) == 1
-    assert changes[0]["relevance_score"] == 1.0
+    assert changes[0]["relevance_score"] == 0.0
+    assert "Not scored" in changes[0]["reason"] or "unavailable" in changes[0]["reason"]

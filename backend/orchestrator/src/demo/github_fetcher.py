@@ -62,10 +62,14 @@ class GitHubNetworkError(GitHubFetchError):
 
 
 def _headers() -> dict[str, str]:
-    return {
+    headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/vnd.github+json",
     }
+    from src.config import settings
+    if settings.GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {settings.GITHUB_TOKEN}"
+    return headers
 
 
 def _handle_response(resp: httpx.Response, owner: str, repo: str) -> None:
@@ -415,16 +419,19 @@ The failing line is at line {line_number} of {file_path}.
 Changes that touched this file (most recent first):
 {json.dumps(prompt_items, indent=2)}
 
-Score each change from 0.0 to 1.0 based on how likely it is to be the
+Score each change from 0.0000 to 1.0000 based on how likely it is to be the
 cause of a failure at line {line_number}:
 
-- 0.90-1.00: the commit message or PR title indicates a change at the failing line
-- 0.70-0.89: the change is clearly related to the code around line {line_number}
-- 0.50-0.69: the change touched the same file but in a different area
-- 0.30-0.49: same file, unclear relation
-- 0.00-0.29: unrelated
+- 0.9000-1.0000: the commit message or PR title indicates a change at the failing line
+- 0.7000-0.8999: the change is clearly related to the code around line {line_number}
+- 0.5000-0.6999: the change touched the same file but in a different area
+- 0.3000-0.4999: same file, unclear relation
+- 0.0000-0.2999: unrelated
 
-Give exact float scores with two decimal places (e.g. 0.73, 0.86, 0.42). Do not round to 0.1 intervals.
+Score each change with four decimal places (e.g. 0.7245, 0.9312, 0.6187,
+0.4501, 0.3999). Do not round to two decimals or whole percentages. A
+score of "0.92" is invalid — write "0.9200" or a more precise value
+like "0.9187".
 
 For each reason, reference the commit message or PR title. Do NOT
 invent line numbers or describe changes you cannot see. If the commit
@@ -432,7 +439,7 @@ message does not describe a change near line {line_number}, say so and
 score it accordingly.
 
 Return ONLY a JSON array with one object per change:
-[{{"index": 0, "score": 0.87, "reason": "Commit 'refactor: fix null check' touches the area around line {line_number}."}}]
+[{{"index": 0, "score": 0.8743, "reason": "Commit 'refactor: fix null check' touches the area around line {line_number}."}}]
 """
 
     system = (
@@ -482,11 +489,11 @@ Return ONLY a JSON array with one object per change:
             try:
                 score = float(s["score"])
             except (TypeError, ValueError):
-                score = 1.0
+                score = 0.0
             reason = str(s.get("reason") or _default_reason(it, file_path))
         else:
-            score = 1.0
-            reason = _default_reason(it, file_path)
+            score = 0.0
+            reason = "Not scored by model."
         out.append({
             **it,
             "relevance_score": max(0.0, min(1.0, score)),
@@ -512,8 +519,8 @@ def _fallback_scores(items: list[dict], file_path: str) -> list[dict]:
     return [
         {
             **it,
-            "relevance_score": 1.0,
-            "reason": _default_reason(it, file_path),
+            "relevance_score": 0.0,
+            "reason": "Not scored — LLM unavailable.",
         }
         for it in items
     ]

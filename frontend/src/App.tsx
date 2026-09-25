@@ -11,9 +11,14 @@ import { Settings } from './pages/Settings';
 import { Navbar } from './components/Navbar';
 import { LoginGate } from './components/LoginGate';
 import { DemoPage } from './pages/DemoPage';
+import { AdminHomePage } from './pages/AdminHomePage';
+import { AdminDemoPage } from './pages/AdminDemoPage';
 import { DemoActivityPage } from './pages/DemoActivityPage';
 import { DemoStatsPage } from './pages/DemoStatsPage';
 import { SessionReplayPage } from './pages/SessionReplayPage';
+import { AdminUsersPage } from './pages/AdminUsersPage';
+import { AdminAuditLogPage } from './pages/AdminAuditLogPage';
+import { AdminLayout } from './components/AdminLayout';
 import { useIsAdmin } from './hooks/useIsAdmin';
 import type { ReactNode } from 'react';
 
@@ -28,14 +33,6 @@ function LoadingScreen() {
   );
 }
 
-/**
- * Wraps a route that requires authentication.
- *
- * When signed out, renders the LoginGate instead of the protected page.
- * When signed in, renders the standard authenticated shell — Navbar plus
- * a main container. The demo routes (`/` when signed out, `/demo` always)
- * do NOT use this wrapper and therefore render without a Navbar.
- */
 function RequireAuth({
   isAuthenticated,
   error,
@@ -57,11 +54,8 @@ function RequireAuth({
 }
 
 /**
- * Wraps a route that requires admin access.
- *
- * Composes RequireAuth (renders LoginGate if signed out) with an
- * is_admin check. Non-admins are redirected to `/` rather than shown
- * a 403 page — the admin panel simply doesn't exist for them.
+ * Admin shell (Option C). No dashboard Navbar. AdminLayout provides
+ * its own top bar and sub-navigation.
  */
 function RequireAdmin({
   isAuthenticated,
@@ -89,8 +83,9 @@ function RequireAdmin({
   }
   return (
     <div className="min-h-screen bg-light-bg dark:bg-dark-bg transition-colors">
-      <Navbar />
-      <main className="container mx-auto px-4 py-8">{children}</main>
+      <main className="container mx-auto px-4 py-6">
+        <AdminLayout>{children}</AdminLayout>
+      </main>
     </div>
   );
 }
@@ -106,14 +101,10 @@ function App() {
     <ThemeProvider defaultTheme="light">
       <BrowserRouter>
         <Routes>
-          {/* ── Public demo routes ────────────────────────────────── */}
-
-          {/* `/demo` is always the demo, even when signed in — an escape
-              hatch for the operator to preview what a prospect sees. */}
+          {/* Public demo */}
           <Route path="/demo" element={<DemoPage />} />
 
-          {/* `/` is the demo when signed out, the Dashboard when signed in.
-              This is the primary landing page for prospects. */}
+          {/* `/` is the demo when signed out, the Dashboard when signed in. */}
           <Route
             path="/"
             element={
@@ -127,86 +118,23 @@ function App() {
             }
           />
 
-          {/* ── Authenticated routes ──────────────────────────────── */}
+          {/* Authenticated dashboard routes */}
+          <Route path="/incident/:id" element={<RequireAuth isAuthenticated={isAuthenticated} error={error}><IncidentDetail /></RequireAuth>} />
+          <Route path="/incidents"    element={<RequireAuth isAuthenticated={isAuthenticated} error={error}><IncidentsPage /></RequireAuth>} />
+          <Route path="/services"     element={<RequireAuth isAuthenticated={isAuthenticated} error={error}><ServicesPage /></RequireAuth>} />
+          <Route path="/oncall"       element={<RequireAuth isAuthenticated={isAuthenticated} error={error}><OnCallPage /></RequireAuth>} />
+          <Route path="/settings"     element={<RequireAuth isAuthenticated={isAuthenticated} error={error}><Settings /></RequireAuth>} />
+          <Route path="/approvals"    element={<RequireAuth isAuthenticated={isAuthenticated} error={error}><ApprovalDashboard /></RequireAuth>} />
 
-          <Route
-            path="/incident/:id"
-            element={
-              <RequireAuth isAuthenticated={isAuthenticated} error={error}>
-                <IncidentDetail />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/incidents"
-            element={
-              <RequireAuth isAuthenticated={isAuthenticated} error={error}>
-                <IncidentsPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/services"
-            element={
-              <RequireAuth isAuthenticated={isAuthenticated} error={error}>
-                <ServicesPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/oncall"
-            element={
-              <RequireAuth isAuthenticated={isAuthenticated} error={error}>
-                <OnCallPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/settings"
-            element={
-              <RequireAuth isAuthenticated={isAuthenticated} error={error}>
-                <Settings />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/approvals"
-            element={
-              <RequireAuth isAuthenticated={isAuthenticated} error={error}>
-                <ApprovalDashboard />
-              </RequireAuth>
-            }
-          />
+          {/* Admin shell (Option C) */}
+          <Route path="/admin"                    element={<RequireAdmin isAuthenticated={isAuthenticated} error={error}><AdminHomePage /></RequireAdmin>} />
+          <Route path="/admin/demo"               element={<RequireAdmin isAuthenticated={isAuthenticated} error={error}><AdminDemoPage /></RequireAdmin>} />
+          <Route path="/admin/demo-activity"      element={<RequireAdmin isAuthenticated={isAuthenticated} error={error}><DemoActivityPage /></RequireAdmin>} />
+          <Route path="/admin/demo-stats"         element={<RequireAdmin isAuthenticated={isAuthenticated} error={error}><DemoStatsPage /></RequireAdmin>} />
+          <Route path="/admin/demo-sessions/:id"  element={<RequireAdmin isAuthenticated={isAuthenticated} error={error}><SessionReplayPage /></RequireAdmin>} />
+          <Route path="/admin/users"              element={<RequireAdmin isAuthenticated={isAuthenticated} error={error}><AdminUsersPage /></RequireAdmin>} />
+          <Route path="/admin/audit-log"          element={<RequireAdmin isAuthenticated={isAuthenticated} error={error}><AdminAuditLogPage /></RequireAdmin>} />
 
-          {/* ── Admin routes ──────────────────────────────────────── */}
-
-<Route
-  path="/admin/demo-activity"
-  element={
-    <RequireAdmin isAuthenticated={isAuthenticated} error={error}>
-      <DemoActivityPage />
-    </RequireAdmin>
-  }
-/>
-<Route
-  path="/admin/demo-stats"
-  element={
-    <RequireAdmin isAuthenticated={isAuthenticated} error={error}>
-      <DemoStatsPage />
-    </RequireAdmin>
-  }
-/>
-<Route
-  path="/admin/demo-sessions/:id"
-  element={
-    <RequireAdmin isAuthenticated={isAuthenticated} error={error}>
-      <SessionReplayPage />
-    </RequireAdmin>
-  }
-/>
-
-          {/* Anything unknown → home. The home handler decides
-              demo vs. dashboard based on auth state. */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>

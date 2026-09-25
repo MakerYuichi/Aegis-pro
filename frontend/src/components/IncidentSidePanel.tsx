@@ -148,7 +148,7 @@ export function IncidentSidePanel({ incidentId, onClose }: IncidentSidePanelProp
                         <Brain className="w-5 h-5 text-brand-primary" />
                         <h4 className="text-sm font-semibold text-brand-primary">AI Analysis</h4>
                         <span className="text-xs bg-brand-primary/20 text-brand-primary px-2 py-0.5 rounded-full ml-auto">
-                          {(incident.confidence_score * 100).toFixed(0)}% confidence
+                          {(incident.confidence_score * 100).toFixed(2)}% confidence
                         </span>
                       </div>
                       <div className="space-y-3">

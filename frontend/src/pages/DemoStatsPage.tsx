@@ -67,9 +67,6 @@ export function DemoStatsPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-light-text dark:text-dark-text">
-            Demo Stats
-          </h1>
           <p className="text-sm text-light-muted dark:text-dark-muted mt-0.5">
             Trailing {stats.window_days}-day window
           </p>

@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import {
   Loader2,
   Search,
@@ -601,7 +600,7 @@ export function DemoPage() {
                     </span>
                     <span>·</span>
                     <span>
-                      {Math.round(defaultIncident.confidence_score * 100)}%
+                      {(defaultIncident.confidence_score * 100).toFixed(2)}%
                       confidence
                     </span>
                   </div>
