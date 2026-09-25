@@ -45,6 +45,7 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       LLM_FALLBACKS: ${LLM_FALLBACKS-gemini,openrouter}
       AUTO_FIX_MODE: ${AUTO_FIX_MODE:-read_only}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
     depends_on:
       postgres:
         condition: service_healthy
