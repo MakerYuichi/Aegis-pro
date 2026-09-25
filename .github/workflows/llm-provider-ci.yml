@@ -52,14 +52,30 @@ jobs:
           echo "Redis did not start in time"
           exit 1
 
-      - name: Run tests
+      # ------------------------------------------------------------------
+      # This workflow is scoped to LLM provider behavior. It runs the
+      # three test files that exercise the provider interface, the
+      # factory/chain, and the LLM-integrated PR scoring path.
+      #
+      # It does NOT run the full test suite:
+      #   - DB integration tests need Postgres. See test-backend.yml.
+      #   - Route/service tests are covered by test-backend.yml.
+      #
+      # If you add a new test file that exercises LLM providers, add it
+      # to the list below. If you find yourself wanting to add
+      # "everything else," that's a sign this workflow has drifted from
+      # its purpose. Keep it narrow.
+      # ------------------------------------------------------------------
+      - name: Run LLM provider tests
         working-directory: backend/orchestrator
         env:
           LLM_PROVIDER: mock
           LLM_FALLBACKS: ""
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test
           REDIS_URL: redis://localhost:6379/0
           AUTH0_DOMAIN: test-tenant.us.auth0.com
           AUTH0_AUDIENCE: https://test-api
         run: |
-          pytest tests/ -v --tb=short
+          pytest tests/test_llm_providers.py \
+                 tests/test_llm_factory.py \
+                 tests/test_github_service_llm_integration.py \
+                 -v --tb=short
