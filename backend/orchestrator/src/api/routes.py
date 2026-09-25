@@ -46,6 +46,27 @@ class CreateServiceRequest(BaseModel):
 async def ping():
     return {"message": "pong", "status": "alive"}
 
+
+# ── Whoami ──────────────────────────────────────────────────
+@router.get("/me")
+async def whoami(claims: dict = Depends(require_auth)):
+    """
+    Return the caller's email and admin status.
+
+    Called once by the frontend after login to decide whether to show
+    the admin navbar link. Always 200 for an authenticated user —
+    non-admins get is_admin: false, not 403. The /admin/* routes
+    themselves still 403 for non-admins.
+    """
+    from src.auth import _claim_email, _admin_allowlist
+
+    email = _claim_email(claims)
+    return {
+        "email": email,
+        "is_admin": bool(email and email in _admin_allowlist()),
+    }
+
+
 # ── Incident declaration ────────────────────────────────────
 @router.post("/incident/declare")
 async def declare_incident(

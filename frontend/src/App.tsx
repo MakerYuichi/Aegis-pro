@@ -11,6 +11,10 @@ import { Settings } from './pages/Settings';
 import { Navbar } from './components/Navbar';
 import { LoginGate } from './components/LoginGate';
 import { DemoPage } from './pages/DemoPage';
+import { DemoActivityPage } from './pages/DemoActivityPage';
+import { DemoStatsPage } from './pages/DemoStatsPage';
+import { SessionReplayPage } from './pages/SessionReplayPage';
+import { useIsAdmin } from './hooks/useIsAdmin';
 import type { ReactNode } from 'react';
 
 function LoadingScreen() {
@@ -43,6 +47,45 @@ function RequireAuth({
 }) {
   if (!isAuthenticated) {
     return <LoginGate error={error ?? undefined} />;
+  }
+  return (
+    <div className="min-h-screen bg-light-bg dark:bg-dark-bg transition-colors">
+      <Navbar />
+      <main className="container mx-auto px-4 py-8">{children}</main>
+    </div>
+  );
+}
+
+/**
+ * Wraps a route that requires admin access.
+ *
+ * Composes RequireAuth (renders LoginGate if signed out) with an
+ * is_admin check. Non-admins are redirected to `/` rather than shown
+ * a 403 page — the admin panel simply doesn't exist for them.
+ */
+function RequireAdmin({
+  isAuthenticated,
+  error,
+  children,
+}: {
+  isAuthenticated: boolean;
+  error: Error | null | undefined;
+  children: ReactNode;
+}) {
+  const { isAdmin, loading } = useIsAdmin();
+
+  if (!isAuthenticated) {
+    return <LoginGate error={error ?? undefined} />;
+  }
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-light-bg dark:bg-dark-bg">
+        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-brand-primary" />
+      </div>
+    );
+  }
+  if (!isAdmin) {
+    return <Navigate to="/" replace />;
   }
   return (
     <div className="min-h-screen bg-light-bg dark:bg-dark-bg transition-colors">
@@ -134,6 +177,33 @@ function App() {
               </RequireAuth>
             }
           />
+
+          {/* ── Admin routes ──────────────────────────────────────── */}
+
+<Route
+  path="/admin/demo-activity"
+  element={
+    <RequireAdmin isAuthenticated={isAuthenticated} error={error}>
+      <DemoActivityPage />
+    </RequireAdmin>
+  }
+/>
+<Route
+  path="/admin/demo-stats"
+  element={
+    <RequireAdmin isAuthenticated={isAuthenticated} error={error}>
+      <DemoStatsPage />
+    </RequireAdmin>
+  }
+/>
+<Route
+  path="/admin/demo-sessions/:id"
+  element={
+    <RequireAdmin isAuthenticated={isAuthenticated} error={error}>
+      <SessionReplayPage />
+    </RequireAdmin>
+  }
+/>
 
           {/* Anything unknown → home. The home handler decides
               demo vs. dashboard based on auth state. */}

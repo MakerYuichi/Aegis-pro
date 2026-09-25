@@ -229,6 +229,57 @@ export type AlertRequest = {
   service_name?: string;
 };
 
+// ── Admin (see backend: src/api/admin.py) ──────────────────────────────
+
+export type AdminMeResponse = {
+  email: string;
+  is_admin: boolean;
+};
+
+export type AdminDemoSession = {
+  id: number;
+  session_id: string;
+  raw_input: string | null;
+  parsed_org: string | null;
+  parsed_repo: string | null;
+  language_inferred: string | null;
+  parse_ok: boolean;
+  error_reason: string | null;
+  incident_id: string | null;
+  created_at: string | null;
+  last_seen_at: string | null;
+};
+
+export type AdminDemoSessionDetail = {
+  session_id: string;
+  first_seen: string | null;
+  last_seen: string | null;
+  call_count: number;
+  calls: Array<{
+    id: number;
+    raw_input: string | null;
+    parsed_org: string | null;
+    parsed_repo: string | null;
+    language_inferred: string | null;
+    parse_ok: boolean;
+    error_reason: string | null;
+    incident_payload: Incident | null;
+    incident_id: string | null;
+    created_at: string | null;
+  }>;
+};
+
+export type AdminDemoStats = {
+  window_days: number;
+  total_sessions: number;
+  sessions_by_day: Array<{ date: string; count: number }>;
+  top_orgs: Array<{ org: string; count: number }>;
+  parse_failures: {
+    total: number;
+    by_reason: Array<{ reason: string; count: number }>;
+  };
+};
+
 export const isPendingAutoFix = (autoFix?: NonNullable<Incident['extra_metadata']>['auto_fix']) => {
   if (!autoFix) return false;
   const status = (autoFix.status || autoFix.pr?.status || '').toLowerCase();
@@ -352,6 +403,36 @@ export const resetDemo = async (): Promise<{ status: string }> => {
   return response.data;
 };
 
+// ── Admin endpoints (require an admin bearer token) ────────────────────
+// Read-only. For mutations, use useAdminApi below.
+
+export const fetchAdminMe = async (): Promise<AdminMeResponse> => {
+  const response = await api.get('/api/v1/me');
+  return response.data;
+};
+
+export const fetchAdminSessions = async (
+  limit: number = 50
+): Promise<{ sessions: AdminDemoSession[]; count: number; limit: number }> => {
+  const response = await api.get(`/api/v1/admin/demo-sessions?limit=${limit}`);
+  return response.data;
+};
+
+export const fetchAdminStats = async (
+  days: number = 30
+): Promise<AdminDemoStats> => {
+  const response = await api.get(`/api/v1/admin/demo-stats?days=${days}`);
+  return response.data;
+};
+
+export const fetchAdminSessionDetail = async (
+  sessionId: string
+): Promise<AdminDemoSessionDetail> => {
+  const response = await api.get(
+    `/api/v1/admin/demo-sessions/${encodeURIComponent(sessionId)}`
+  );
+  return response.data;
+};
 /**
  * Returns an axios instance wired with the current Auth0 access token.
  * Use for protected (mutating) endpoints only.
@@ -478,3 +559,37 @@ export function useProtectedApi() {
   }), [api]);
 }
 
+/**
+ * Hook exposing the admin API with an Auth0 bearer token.
+ * Mirrors useProtectedApi — same shape, different endpoints.
+ */
+export function useAdminApi() {
+  const api = useApiClient();
+
+  return useMemo(() => ({
+    fetchMe: async (): Promise<AdminMeResponse> => {
+      const res = await api.get('/api/v1/me');
+      return res.data;
+    },
+    fetchSessions: async (limit = 50): Promise<{
+      sessions: AdminDemoSession[];
+      count: number;
+      limit: number;
+    }> => {
+      const res = await api.get(`/api/v1/admin/demo-sessions?limit=${limit}`);
+      return res.data;
+    },
+    fetchStats: async (days = 30): Promise<AdminDemoStats> => {
+      const res = await api.get(`/api/v1/admin/demo-stats?days=${days}`);
+      return res.data;
+    },
+    fetchSessionDetail: async (
+      sessionId: string
+    ): Promise<AdminDemoSessionDetail> => {
+      const res = await api.get(
+        `/api/v1/admin/demo-sessions/${encodeURIComponent(sessionId)}`
+      );
+      return res.data;
+    },
+  }), [api]);
+}

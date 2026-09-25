@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     K8S_API_URL: Optional[str] = None
     K8S_TOKEN: Optional[str] = None
     K8S_NAMESPACE: str = "production"
+    
+    ADMIN_EMAILS: str = ""
 
     # App
     SECRET_KEY: str = "dev-secret-key-change-in-production"

@@ -11,6 +11,7 @@ from src.database import init_db
 from src.services.incident_service import IncidentService
 from src.api.webhook import router as webhook_router
 from src.demo.endpoints import router as demo_router
+from src.api.admin import router as admin_router
 from src.config import settings
 from src.websocket import manager
 from src.auth import auth0
@@ -85,6 +86,7 @@ app.add_middleware(
 logger.info(f"🔓 CORS allow_origins={allow_origins} credentials={'*' not in allow_origins}")
 
 # Include routes
+app.include_router(admin_router, prefix="/api/v1")
 app.include_router(router, prefix="/api/v1")
 app.include_router(slack_router)
 app.include_router(webhook_router)
