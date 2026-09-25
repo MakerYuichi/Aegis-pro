@@ -318,7 +318,9 @@ export const getOnCallRoster = async (serviceName?: string): Promise<{ roster: O
   return response.data;
 };
 
-export const getAlertHistory = async (limit: number = 20): Promise<{ alerts: Alert[]; count: number }> => {
+export const getAlertHistory = async (limit: number = 20): Promise<{
+    map(arg0: (a: Alert) => { id: string; timestamp: string; source: string; actor: string; action: string; status: string; detail: string; }): { id: string; timestamp: string; source: "demo" | "alert"; actor: string; action: string; status: "ok" | "failed" | "neutral"; detail?: string; }[]; alerts: Alert[]; count: number 
+}> => {
   const response = await api.get(`/api/v1/oncall/alert/history?limit=${limit}`);
   return response.data;
 };

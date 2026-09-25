@@ -89,16 +89,6 @@ export function SessionReplayPage() {
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <Link
-          to="/admin/demo-activity"
-          className="inline-flex items-center gap-1.5 text-sm text-brand-primary hover:underline mb-3"
-        >
-          <ArrowLeft className="w-3.5 h-3.5" />
-          Back to activity
-        </Link>
-        <h1 className="text-2xl font-bold text-light-text dark:text-dark-text">
-          Session Replay
-        </h1>
         <p className="text-sm text-light-muted dark:text-dark-muted font-mono mt-1">
           {detail.session_id}
         </p>

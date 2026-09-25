@@ -24,9 +24,10 @@ export function Navbar() {
   ];
 
   // Base navigation is always shown. The Admin link is appended only
-  // when /api/v1/me reports is_admin: true.
+  // when /api/v1/me reports is_admin: true. It points at the admin hub,
+  // not at a specific sub-page — the hub has tabs for the sub-pages.
   const visibleNavItems = isAdmin
-    ? [...navItems, { path: '/admin/demo-activity', label: 'Admin', icon: Activity }]
+    ? [...navItems, { path: '/admin', label: 'Admin', icon: Activity }]
     : navItems;
 
   const handleLogout = () =>
@@ -57,10 +58,12 @@ export function Navbar() {
           <div className="hidden md:flex items-center gap-1">
             {visibleNavItems.map((item) => {
               const Icon = item.icon;
+              // The Admin button stays highlighted across the entire
+              // /admin/* section, including sub-routes.
               const isActive =
                 location.pathname === item.path ||
-                (item.path === '/admin/demo-activity' &&
-                  location.pathname.startsWith('/admin/'));
+                (item.path === '/admin' &&
+                  location.pathname.startsWith('/admin'));
               return (
                 <Link
                   key={item.path}

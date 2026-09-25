@@ -80,10 +80,7 @@ export function DemoActivityPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-light-text dark:text-dark-text">
-            Demo Activity
-          </h1>
-          <p className="text-sm text-light-muted dark:text-dark-muted mt-0.5">
+            <p className="text-sm text-light-muted dark:text-dark-muted">
             {sessions.length} session{sessions.length !== 1 ? 's' : ''}
             <span className="ml-2 px-2 py-0.5 bg-brand-success/15 text-brand-success border border-brand-success/30 rounded-full text-xs font-semibold">
               {okCount} parsed
