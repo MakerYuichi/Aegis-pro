@@ -5,7 +5,7 @@
  *   - demo_sessions rows (from /admin/demo-sessions)
  *   - alert_history rows (from /api/v1/oncall/alert/history)
  *
- * When the `audit_log` table lands (see issue #<audit-issue>), this
+ * When the `audit_log` table lands (see issue #86), this
  * page reads from GET /admin/audit-log instead.
  *
  * Route: /admin/audit-log

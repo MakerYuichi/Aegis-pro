@@ -25,7 +25,7 @@ const RATE_MAX = 20;
 const RATE_WINDOW_SECONDS = 3600;
 const RATE_MIN_INTERVAL_SECONDS = 3;
 const MAX_TRIES = 3;
-const EDITABLE_DEMO_ISSUE = '#84'; // ← update with the actual issue number
+const EDITABLE_DEMO_ISSUE = '#85'; // ← update with the actual issue number
 
 export function AdminDemoPage() {
   const [incident, setIncident] = useState<Incident | null>(null);

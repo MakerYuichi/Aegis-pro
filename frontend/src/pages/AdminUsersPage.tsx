@@ -5,7 +5,7 @@
  *   - orgs that tried the demo (from /admin/demo-stats → top_orgs)
  *   - engineers who were paged (from /api/v1/oncall/alert/history)
  *
- * When the `users` table lands (see issue #<users-issue>), this page
+ * When the `users` table lands (see issue #86), this page
  * reads from GET /admin/users instead.
  *
  * Route: /admin/users
