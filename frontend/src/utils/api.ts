@@ -280,6 +280,21 @@ export type AdminDemoStats = {
   };
 };
 
+export type MyDemoSession = {
+  id: number;
+  session_id: string;
+  parsed_org: string;
+  parsed_repo: string;
+  language_inferred: string | null;
+  incident_id: string | null;
+  created_at: string | null;
+};
+
+export type MyDemoSessionsResponse = {
+  sessions: MyDemoSession[];
+  count: number;
+};
+
 export const isPendingAutoFix = (autoFix?: NonNullable<Incident['extra_metadata']>['auto_fix']) => {
   if (!autoFix) return false;
   const status = (autoFix.status || autoFix.pr?.status || '').toLowerCase();
@@ -447,6 +462,7 @@ export function useApiClient() {
       baseURL: API_URL,
       headers: { 'Content-Type': 'application/json' },
       timeout: 60000,
+      withCredentials: true,
     });
 
     instance.interceptors.request.use(async (config) => {
@@ -558,9 +574,27 @@ export function useProtectedApi() {
       const res = await api.post('/api/v1/oncall/alert', data);
       return res.data;
     },
-  }), [api]);
+    // ── Phase 10: demo-to-dashboard continuity ─────────────────────
+    listMyDemoSessions: async (limit = 10): Promise<MyDemoSessionsResponse> => {
+      const res = await api.get(`/api/v1/me/demo-sessions?limit=${limit}`);
+      return res.data;
+    },
+    linkDemoSession: async (): Promise<{ status: string; session_id?: string }> => {
+      const res = await api.post('/api/v1/me/link-demo-session');
+      return res.data;
+    },
+    markOnboardingInterest: async (
+      repo: string,
+      session_id?: string,
+    ): Promise<{ status: string }> => {
+      const res = await api.post('/api/v1/me/onboarding-interest', {
+        repo,
+        session_id,
+      });
+      return res.data;
+    },
+  }), [api]);     // ← the closing stays exactly where it was
 }
-
 /**
  * Hook exposing the admin API with an Auth0 bearer token.
  * Mirrors useProtectedApi — same shape, different endpoints.

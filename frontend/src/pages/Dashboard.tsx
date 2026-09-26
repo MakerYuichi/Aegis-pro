@@ -4,6 +4,9 @@ import { Stats } from '../components/Stats';
 import { DeclareIncidentModal } from '../components/DeclareIncidentModal';
 import { ActivityFeed } from '../components/ActivityFeed';
 import { OnCallSummary } from '../components/OnCallSummary';
+import { DemoSessionCard } from '../components/DemoSessionCard';
+import { useDemoSessionLink } from "../hooks/useDemoSessionLink";
+
 import {
   getIncidents, getServices, useProtectedApi, getOnCallRoster,
   type Incident, type Service, type OnCallMember,
@@ -16,6 +19,7 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 
 export function Dashboard() {
+  useDemoSessionLink(); 
   const { seedServices, sendAlert } = useProtectedApi();
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [services, setServices] = useState<Service[]>([]);
@@ -300,6 +304,7 @@ export function Dashboard() {
 
         {hasServices ? (
           <div className="space-y-6">
+            <DemoSessionCard />
             {/* Stats Cards */}
             <Stats incidents={incidents} />
 
