@@ -3,7 +3,7 @@ from loguru import logger
 from src.services.factory import get_slack_service
 from src.services.oncall_service import OnCallService
 from sqlalchemy import text
-from src.database import get_db
+from src.database import get_db_session
 from datetime import datetime
 
 class AlertService:
@@ -89,8 +89,7 @@ class AlertService:
         
         # Record alert in database
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 await session.execute(
                     text("""
                         INSERT INTO alert_history (engineer_name, service_name, message, status)
@@ -141,8 +140,7 @@ class AlertService:
     async def get_alert_history(self, limit: int = 20) -> list:
         """Get recent alert history from database."""
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("""
                         SELECT

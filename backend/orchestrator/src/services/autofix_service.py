@@ -1,5 +1,5 @@
 from sqlalchemy import text
-from src.database import get_db
+from src.database import get_db_session
 from src.services.factory import get_github_service
 from src.services.llm_service import LLMService
 from src.config import settings
@@ -168,8 +168,7 @@ class AutoFixService:
         extra_metadata: dict,
         incident_status: str,
     ) -> None:
-        session = await get_db()
-        async with session:
+        async with get_db_session() as session:
             await session.execute(
                 text(
                     """
@@ -188,8 +187,7 @@ class AutoFixService:
             await session.commit()
 
     async def get_pending_fixes(self) -> list:
-        session = await get_db()
-        async with session:
+        async with get_db_session() as session:
             result = await session.execute(
                 text(
                     """

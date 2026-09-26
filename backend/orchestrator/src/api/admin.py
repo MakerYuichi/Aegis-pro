@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 
 from src.auth import require_admin
-from src.database import get_db
+from src.database import get_db_session
 from sqlalchemy import text
 
 
@@ -46,8 +46,7 @@ async def list_demo_sessions(
     """
     limit = max(1, min(limit, 500))
 
-    session = await get_db()
-    async with session:
+    async with get_db_session() as session:
         result = await session.execute(
             text(
                 """
@@ -100,8 +99,7 @@ async def demo_stats(
     """
     days = max(1, min(days, 365))
 
-    session = await get_db()
-    async with session:
+    async with get_db_session() as session:
         total = (await session.execute(
             text(
                 """
@@ -188,8 +186,7 @@ async def demo_session_detail(
     every call in order, with the decoded incident payload so an operator
     can see exactly what the buyer saw.
     """
-    session = await get_db()
-    async with session:
+    async with get_db_session() as session:
         result = await session.execute(
             text(
                 """

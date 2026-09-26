@@ -1,6 +1,6 @@
 from typing import Optional
 from sqlalchemy import text
-from src.database import get_db
+from src.database import get_db_session
 from loguru import logger
 import json
 
@@ -24,8 +24,7 @@ class OnCallService:
     async def get_on_call(self, service_name: str) -> dict:
         """Get current on-call engineers for a service."""
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("""
                         SELECT
@@ -74,8 +73,7 @@ class OnCallService:
 
     async def _fallback_from_service(self, service_name: str) -> dict:
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("SELECT on_call FROM services WHERE name = :name"),
                     {"name": service_name}
@@ -103,8 +101,7 @@ class OnCallService:
     async def list_roster(self, service_name: Optional[str] = None) -> list:
         """List on-call people, optionally filtered by service."""
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 if service_name:
                     result = await session.execute(
                         text("""
@@ -136,8 +133,7 @@ class OnCallService:
 
     async def _roster_from_services(self, service_name: Optional[str] = None) -> list:
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 if service_name:
                     result = await session.execute(
                         text("SELECT name, on_call FROM services WHERE name = :name"),
@@ -166,8 +162,7 @@ class OnCallService:
             return []
 
     async def add_member(self, member: dict) -> dict:
-        session = await get_db()
-        async with session:
+        async with get_db_session() as session:
             result = await session.execute(
                 text("""
                     INSERT INTO oncall_rotations
@@ -209,8 +204,7 @@ class OnCallService:
             return {"id": member_id, "status": "created"}
 
     async def remove_member(self, member_id: int) -> dict:
-        session = await get_db()
-        async with session:
+        async with get_db_session() as session:
             await session.execute(
                 text("UPDATE oncall_rotations SET is_active = FALSE WHERE id = :id"),
                 {"id": member_id}
@@ -220,8 +214,7 @@ class OnCallService:
 
     async def get_escalation_policy(self, service_name: str, severity: str) -> list:
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("""
                         SELECT
