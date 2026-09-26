@@ -1,28 +1,38 @@
 """
 Tests for src/main.py — app construction, /health, root, WebSocket route.
 
-The lifespan is exercised implicitly by TestClient. DB/Redis connection
-attempts inside lifespan are expected to fail in the test environment and
-are handled gracefully by the app (it logs a warning and continues).
+Uses httpx.AsyncClient + ASGITransport so the app runs in the same
+event loop as pytest-asyncio's session-scoped fixtures. TestClient
+opens a separate loop, which poisons the asyncpg pool for every later
+real-DB test in the session.
+
+Lifespan is run explicitly inside the fixture via
+app.router.lifespan_context(app), so app.state.* is populated
+(db_connected, redis_connected, incident_service).
 """
+import httpx
 import pytest
-from fastapi.testclient import TestClient
+import pytest_asyncio
+from httpx import ASGITransport
 
 from src.main import app
 
 
-@pytest.fixture
-def client():
-    # TestClient runs lifespan on __enter__; connection failures are caught.
-    with TestClient(app) as c:
-        yield c
+@pytest_asyncio.fixture
+async def client():
+    """Run lifespan, then yield an in-loop HTTP client."""
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
 
 
 # ---------------------------------------------------------------------------
 # App boots
 # ---------------------------------------------------------------------------
 
-def test_app_boots_and_lifespan_runs(client):
+@pytest.mark.asyncio
+async def test_app_boots_and_lifespan_runs(client):
     assert app.title == "AEGIS PRO"
     assert app.version == "1.0.0"
     # lifespan sets these on app.state
@@ -31,8 +41,9 @@ def test_app_boots_and_lifespan_runs(client):
     assert hasattr(app.state, "incident_service")
 
 
-def test_root_returns_service_banner(client):
-    resp = client.get("/")
+@pytest.mark.asyncio
+async def test_root_returns_service_banner(client):
+    resp = await client.get("/")
     assert resp.status_code == 200
     body = resp.json()
     assert body["service"] == "AEGIS PRO"
@@ -41,15 +52,15 @@ def test_root_returns_service_banner(client):
     assert "websocket" in body["endpoints"]
 
 
-def test_health_endpoint_returns_expected_shape(client):
-    resp = client.get("/health")
+@pytest.mark.asyncio
+async def test_health_endpoint_returns_expected_shape(client):
+    resp = await client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
     assert body["version"] == "1.0.0"
     assert "auto_fix_mode" in body
     assert "demo_mode" in body
     assert set(body["services"].keys()) == {"database", "redis"}
-    # status is healthy only when both are connected
     expected = "healthy" if (
         body["services"]["database"] == "connected"
         and body["services"]["redis"] == "connected"
@@ -57,11 +68,12 @@ def test_health_endpoint_returns_expected_shape(client):
     assert body["status"] == expected
 
 
-def test_health_reports_degraded_when_db_disconnected(client):
-    # In tests, DB is not available, so state flags are False.
+@pytest.mark.asyncio
+async def test_health_reports_degraded_when_db_disconnected(client):
     app.state.db_connected = False
     app.state.redis_connected = False
-    body = client.get("/health").json()
+    resp = await client.get("/health")
+    body = resp.json()
     assert body["status"] == "degraded"
     assert body["services"]["database"] == "disconnected"
 
@@ -70,17 +82,15 @@ def test_health_reports_degraded_when_db_disconnected(client):
 # Routers mounted
 # ---------------------------------------------------------------------------
 
-def test_demo_router_mounted(client):
-    # /api/v1/demo/default exists regardless of DEMO_MODE flag;
-    # when DEMO_MODE is off it returns 404 (covered in test_demo_endpoints).
-    resp = client.get("/api/v1/demo/default")
+@pytest.mark.asyncio
+async def test_demo_router_mounted(client):
+    resp = await client.get("/api/v1/demo/default")
     assert resp.status_code in (200, 404)
 
 
-def test_api_v1_ping_router_mounted(client):
-    # If the ping route exists in routes.py it returns 200; otherwise 404.
-    # This test asserts the /api/v1 prefix is wired.
-    resp = client.get("/api/v1/ping")
+@pytest.mark.asyncio
+async def test_api_v1_ping_router_mounted(client):
+    resp = await client.get("/api/v1/ping")
     assert resp.status_code in (200, 404, 405)
 
 
@@ -94,14 +104,13 @@ def test_websocket_route_is_registered():
 
 
 # ---------------------------------------------------------------------------
-# CORS — documents current behavior + intended behavior (bug)
+# CORS
 # ---------------------------------------------------------------------------
 
 def test_cors_middleware_uses_allow_origins_variable():
     """
     The CORSMiddleware must be configured from the computed allow_origins,
-    not a hardcoded list. Since the value is fixed at import time, we
-    inspect the middleware stack directly.
+    not a hardcoded list.
     """
     from src.main import app, allow_origins
     from starlette.middleware.cors import CORSMiddleware
@@ -109,8 +118,6 @@ def test_cors_middleware_uses_allow_origins_variable():
     for mw in app.user_middleware:
         if mw.cls is CORSMiddleware:
             assert mw.kwargs["allow_origins"] == allow_origins
-            # Credentials must be disabled when origins is a wildcard
             assert mw.kwargs["allow_credentials"] == ("*" not in allow_origins)
             return
     pytest.fail("CORSMiddleware not found in app middleware stack")
-

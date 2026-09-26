@@ -6,7 +6,7 @@ from loguru import logger
 from sqlalchemy import text
 
 from src.config import settings
-from src.database import get_db
+from src.database import get_db_session
 from src.demo.repo_parser import ParseResult
 
 
@@ -35,8 +35,7 @@ async def record_session(
         payload_json = json.dumps(incident_payload) if incident_payload else None
         incident_id = incident_payload.get("incident_id") if incident_payload else None
 
-        session = await get_db()
-        async with session:
+        async with get_db_session() as session:
             # Retention: delete old rows opportunistically. Cheap because
             # the table is small and the index is on created_at.
             await session.execute(
@@ -85,8 +84,7 @@ async def count_successful_tries(session_id: str) -> int:
         return 0
 
     try:
-        session = await get_db()
-        async with session:
+        async with get_db_session() as session:
             result = await session.execute(
                 text(
                     """

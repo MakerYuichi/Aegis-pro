@@ -1,196 +1,187 @@
-"""Tests for /api/v1/admin/* endpoints."""
-from datetime import datetime, timezone, date
-from unittest.mock import AsyncMock, MagicMock, patch
+"""
+Tests for /api/v1/admin/* endpoints.
 
+Real-DB tests. Uses httpx.AsyncClient with ASGITransport so the app runs
+in the same event loop as the pytest-asyncio fixtures (TestClient runs the
+app in a separate loop, which breaks engine session sharing).
+
+Auth is overridden via app.dependency_overrides[require_admin].
+"""
 import pytest
-from fastapi.testclient import TestClient
+import pytest_asyncio
+import httpx
+from httpx import ASGITransport
 
 from src.main import app
 
 
-def _mock_db(sequence=None):
+@pytest_asyncio.fixture
+async def admin_client(monkeypatch):
     """
-    Build a get_db replacement that returns responses in a fixed order.
+    Async HTTP client that runs the ASGI app in this test's event loop.
 
-    `sequence` is an ordered list of items, one per execute() call the
-    endpoint under test makes:
-
-      - a list  → this call returns fetchall() with that list
-      - a scalar → this call returns scalar() with that value
-
-    The endpoint runs its queries in a deterministic order (see src/api/admin.py).
-    The test must provide items in that same order.
+    Does NOT run the app's lifespan — init_db and backfill are not needed
+    for the admin endpoints (they operate on tables that already exist
+    and are populated by migrations).
     """
-    queue = list(sequence or [])
-
-    session = MagicMock()
-
-    async def _execute(*args, **kwargs):
-        if not queue:
-            raise AssertionError(
-                "session.execute called more times than the test provided "
-                "responses for (queue exhausted)"
-            )
-        item = queue.pop(0)
-        m = MagicMock()
-        if isinstance(item, list):
-            m.fetchall.return_value = item
-        else:
-            m.scalar.return_value = item
-        return m
-
-    session.execute = AsyncMock(side_effect=_execute)
-    session.__aenter__ = AsyncMock(return_value=session)
-    session.__aexit__ = AsyncMock(return_value=None)
-
-    async def _get_db():
-        return session
-
-    return _get_db, session
-
-
-@pytest.fixture
-def admin_client(monkeypatch):
-    """A TestClient where require_admin always passes."""
     monkeypatch.setattr("src.auth.settings.ADMIN_EMAILS", "admin@x.com")
     from src.auth import require_admin
     app.dependency_overrides[require_admin] = lambda: {"email": "admin@x.com"}
-    with TestClient(app) as c:
-        yield c
+
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+
     app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def anon_client():
+    """Async client with no admin override — for the 401 test."""
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
 
 
 # ── /admin/me ──────────────────────────────────────────────────────────
 
-def test_admin_me_returns_is_admin(admin_client):
-    resp = admin_client.get("/api/v1/admin/me")
+@pytest.mark.asyncio
+async def test_admin_me_returns_is_admin(admin_client):
+    resp = await admin_client.get("/api/v1/admin/me")
     assert resp.status_code == 200
     assert resp.json()["is_admin"] is True
+    assert resp.json()["email"] == "admin@x.com"
 
 
-def test_admin_me_403_for_non_admin():
-    with TestClient(app) as c:
-        resp = c.get("/api/v1/admin/me")
+@pytest.mark.asyncio
+async def test_admin_me_401_for_non_admin(anon_client):
+    """No dependency override → real require_admin → 401 (no token)."""
+    resp = await anon_client.get("/api/v1/admin/me")
     assert resp.status_code == 401
 
 
-# ── /admin/demo-sessions ───────────────────────────────────────────────
+# ── /admin/demo-sessions (list) ────────────────────────────────────────
 
-def test_list_demo_sessions_shapes_rows(admin_client):
-    ts = datetime(2026, 9, 23, 14, 22, tzinfo=timezone.utc)
-    rows = [
-        (1, "sess-abc", "https://github.com/stripe/connect", "stripe",
-         "connect", "Java", True, None, "INC-DEMO-1", ts, ts),
-    ]
-    get_db, _ = _mock_db(sequence=[rows])
-    with patch("src.api.admin.get_db", get_db):
-        resp = admin_client.get("/api/v1/admin/demo-sessions?limit=10")
-
+@pytest.mark.asyncio
+async def test_list_demo_sessions_returns_all_seeded(admin_client, seeded_demo_sessions):
+    resp = await admin_client.get("/api/v1/admin/demo-sessions?limit=50")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["count"] == 1
-    assert body["limit"] == 10
-    s = body["sessions"][0]
-    assert s["session_id"] == "sess-abc"
+    assert body["count"] == 5
+    assert body["limit"] == 50
+
+    ids = [s["session_id"] for s in body["sessions"]]
+    assert ids == ["sess-e", "sess-d", "sess-c", "sess-b", "sess-a"]
+
+
+@pytest.mark.asyncio
+async def test_list_demo_sessions_shapes_row(admin_client, seeded_demo_sessions):
+    resp = await admin_client.get("/api/v1/admin/demo-sessions?limit=10")
+    s = next(
+        s for s in resp.json()["sessions"] if s["session_id"] == "sess-a"
+    )
     assert s["parsed_org"] == "stripe"
+    assert s["parsed_repo"] == "connect"
+    assert s["language_inferred"] == "Java"
     assert s["parse_ok"] is True
     assert s["error_reason"] is None
+    assert s["incident_id"] == "INC-DEMO-1"
+    assert s["created_at"] is not None
+    assert s["last_seen_at"] is not None
 
 
-def test_list_demo_sessions_clamps_limit(admin_client):
-    get_db, _ = _mock_db(sequence=[[]])
-    with patch("src.api.admin.get_db", get_db):
-        resp = admin_client.get("/api/v1/admin/demo-sessions?limit=9999")
+@pytest.mark.asyncio
+async def test_list_demo_sessions_clamps_limit(admin_client, seeded_demo_sessions):
+    resp = await admin_client.get("/api/v1/admin/demo-sessions?limit=9999")
     assert resp.json()["limit"] == 500
 
 
-def test_list_demo_sessions_empty(admin_client):
-    get_db, _ = _mock_db(sequence=[[]])
-    with patch("src.api.admin.get_db", get_db):
-        resp = admin_client.get("/api/v1/admin/demo-sessions")
+@pytest.mark.asyncio
+async def test_list_demo_sessions_clamps_limit_floor(admin_client, seeded_demo_sessions):
+    resp = await admin_client.get("/api/v1/admin/demo-sessions?limit=0")
+    assert resp.json()["limit"] == 1
+
+
+@pytest.mark.asyncio
+async def test_list_demo_sessions_empty(admin_client, db_session):
+    from sqlalchemy import text
+    await db_session.execute(text("DELETE FROM demo_sessions"))
+    await db_session.flush()
+    resp = await admin_client.get("/api/v1/admin/demo-sessions")
     body = resp.json()
     assert body["sessions"] == []
     assert body["count"] == 0
 
 
-# ── /admin/demo-stats ──────────────────────────────────────────────────
+# ── /admin/demo-stats (aggregates) ─────────────────────────────────────
 
-def test_demo_stats_shapes_aggregates(admin_client):
-    total = 42
-    by_day = [(date(2026, 9, 22), 10), (date(2026, 9, 23), 32)]
-    top_orgs = [("stripe", 9), ("airbnb", 6)]
-    failures = [("unsupported_host", 18), ("malformed", 9)]
-
-    get_db, _ = _mock_db(sequence=[total, by_day, top_orgs, failures])
-    with patch("src.api.admin.get_db", get_db):
-        resp = admin_client.get("/api/v1/admin/demo-stats?days=7")
-
+@pytest.mark.asyncio
+async def test_demo_stats_shapes_aggregates(admin_client, seeded_demo_sessions):
+    resp = await admin_client.get("/api/v1/admin/demo-stats?days=365")
+    assert resp.status_code == 200
     body = resp.json()
-    assert body["window_days"] == 7
-    assert body["total_sessions"] == 42
-    assert body["sessions_by_day"] == [
-        {"date": "2026-09-22", "count": 10},
-        {"date": "2026-09-23", "count": 32},
-    ]
-    assert body["top_orgs"] == [
-        {"org": "stripe", "count": 9},
-        {"org": "airbnb", "count": 6},
-    ]
-    assert body["parse_failures"]["total"] == 27
-    assert body["parse_failures"]["by_reason"][0] == {
-        "reason": "unsupported_host", "count": 18,
+
+    assert body["window_days"] == 365
+    assert body["total_sessions"] == 5
+
+    by_day = {row["date"]: row["count"] for row in body["sessions_by_day"]}
+    assert by_day == {
+        "2026-09-24": 1,
+        "2026-09-23": 1,
+        "2026-09-22": 3,
     }
 
+    top = {row["org"]: row["count"] for row in body["top_orgs"]}
+    assert top == {"stripe": 2, "airbnb": 1}
 
-def test_demo_stats_empty_database(admin_client):
-    get_db, _ = _mock_db(sequence=[0, [], [], []])
-    with patch("src.api.admin.get_db", get_db):
-        resp = admin_client.get("/api/v1/admin/demo-stats")
+    assert body["parse_failures"]["total"] == 2
+    reasons = {row["reason"]: row["count"] for row in body["parse_failures"]["by_reason"]}
+    assert reasons == {"unsupported_host": 1, "malformed": 1}
+
+
+@pytest.mark.asyncio
+async def test_demo_stats_empty_database(admin_client, db_session):
+    from sqlalchemy import text
+    await db_session.execute(text("DELETE FROM demo_sessions"))
+    await db_session.flush()
+    resp = await admin_client.get("/api/v1/admin/demo-stats")
     body = resp.json()
     assert body["total_sessions"] == 0
+    assert body["sessions_by_day"] == []
+    assert body["top_orgs"] == []
     assert body["parse_failures"]["total"] == 0
+    assert body["parse_failures"]["by_reason"] == []
 
 
-def test_demo_stats_clamps_days(admin_client):
-    get_db, _ = _mock_db(sequence=[0, [], [], []])
-    with patch("src.api.admin.get_db", get_db):
-        assert admin_client.get(
-            "/api/v1/admin/demo-stats?days=9999"
-        ).json()["window_days"] == 365
-
-    get_db, _ = _mock_db(sequence=[0, [], [], []])
-    with patch("src.api.admin.get_db", get_db):
-        assert admin_client.get(
-            "/api/v1/admin/demo-stats?days=0"
-        ).json()["window_days"] == 1
+@pytest.mark.asyncio
+async def test_demo_stats_clamps_days_upper(admin_client, seeded_demo_sessions):
+    resp = await admin_client.get("/api/v1/admin/demo-stats?days=9999")
+    assert resp.json()["window_days"] == 365
 
 
-# ── /admin/demo-sessions/{id} ──────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_demo_stats_clamps_days_lower(admin_client, seeded_demo_sessions):
+    resp = await admin_client.get("/api/v1/admin/demo-stats?days=0")
+    assert resp.json()["window_days"] == 1
 
-def test_demo_session_detail_returns_all_calls(admin_client):
-    ts1 = datetime(2026, 9, 23, 14, 0, tzinfo=timezone.utc)
-    ts2 = datetime(2026, 9, 23, 14, 5, tzinfo=timezone.utc)
-    payload = {"incident_id": "INC-1", "title": "test"}
-    rows = [
-        (1, "https://github.com/a/b", "a", "b", "Java", True, None, payload,
-         "INC-1", ts1),
-        (2, "https://github.com/a/b", "a", "b", "Java", False, "rate_limited",
-         None, None, ts2),
-    ]
-    get_db, _ = _mock_db(sequence=[rows])
-    with patch("src.api.admin.get_db", get_db):
-        resp = admin_client.get("/api/v1/admin/demo-sessions/sess-abc")
 
+# ── /admin/demo-sessions/{id} (replay) ─────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_demo_session_detail_returns_call(admin_client, seeded_demo_sessions):
+    resp = await admin_client.get("/api/v1/admin/demo-sessions/sess-a")
+    assert resp.status_code == 200
     body = resp.json()
-    assert body["session_id"] == "sess-abc"
-    assert body["call_count"] == 2
-    assert body["calls"][0]["incident_payload"] == payload
-    assert body["calls"][1]["parse_ok"] is False
-    assert body["calls"][1]["error_reason"] == "rate_limited"
+    assert body["session_id"] == "sess-a"
+    assert body["call_count"] == 1
+    call = body["calls"][0]
+    assert call["raw_input"] == "https://github.com/stripe/connect"
+    assert call["parsed_org"] == "stripe"
+    assert call["parse_ok"] is True
+    assert call["incident_payload"] == {"incident_id": "INC-DEMO-1", "title": "t1"}
 
 
-def test_demo_session_detail_404_when_missing(admin_client):
-    get_db, _ = _mock_db(sequence=[[]])
-    with patch("src.api.admin.get_db", get_db):
-        resp = admin_client.get("/api/v1/admin/demo-sessions/does-not-exist")
+@pytest.mark.asyncio
+async def test_demo_session_detail_404_when_missing(admin_client, seeded_demo_sessions):
+    resp = await admin_client.get("/api/v1/admin/demo-sessions/does-not-exist")
     assert resp.status_code == 404

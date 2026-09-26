@@ -1,5 +1,5 @@
 from sqlalchemy import text
-from src.database import get_db
+from src.database import get_db_session
 from loguru import logger
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -37,8 +37,7 @@ class RAGService:
                 embedding_list = embedding.tolist()
                 embedding_str = '[' + ','.join(str(x) for x in embedding_list) + ']'
                 
-                session = await get_db()
-                async with session:
+                async with get_db_session() as session:
                     await session.execute(
                         text("""
                             UPDATE incidents 
@@ -73,8 +72,7 @@ class RAGService:
                     embedding_list = query_embedding.tolist()
                     embedding_str = '[' + ','.join(str(x) for x in embedding_list) + ']'
                     
-                    session = await get_db()
-                    async with session:
+                    async with get_db_session() as session:
                         result = await session.execute(
                             text("""
                                 SELECT 
@@ -144,8 +142,7 @@ class RAGService:
             where_clause = " OR ".join(conditions)
             params["limit"] = limit
             
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 result = await session.execute(
                     text(f"""
                         SELECT 

@@ -12,7 +12,7 @@ from loguru import logger
 from sqlalchemy import text
 
 from src.config import settings
-from src.database import get_db
+from src.database import get_db_session
 
 
 async def backfill_demo_embeddings(rag_service) -> int:
@@ -26,8 +26,7 @@ async def backfill_demo_embeddings(rag_service) -> int:
         return 0
 
     try:
-        session = await get_db()
-        async with session:
+        async with get_db_session() as session:
             result = await session.execute(
                 text(
                     """

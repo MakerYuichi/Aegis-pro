@@ -2,58 +2,22 @@
 Tests for IncidentService helper methods and edge-case blocks.
 
 Covers:
-  - Autofix block in declare_incident (lines 129-160)
-  - _parse_stack_trace fallback regexes (lines 522-550)
-  - save_incident_metadata (lines 615-621)
-  - get_service / list_services error fallbacks (lines 341-352)
+  - Autofix block in declare_incident
+  - _parse_stack_trace fallback regexes
+  - save_incident_metadata (real DB)
+  - get_service / list_services error fallbacks (via db_error fixture)
 
 Does NOT cover update_incident — that touches the ORM models in
 src/models/ which have 0% coverage and belong in a separate PR.
 """
 import json
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from sqlalchemy import text
 
 from src.services.incident_service import IncidentService
 
-
-@pytest.fixture
-def service():
-    with patch("src.services.incident_service.LLMService") as llm_cls, \
-         patch("src.services.incident_service.RAGService") as rag_cls:
-        llm = MagicMock()
-        llm.analyze_incident = AsyncMock(return_value=STUB_ANALYSIS)
-        llm_cls.return_value = llm
-
-        rag = MagicMock()
-        rag.generate_context_prompt = AsyncMock(return_value="")
-        rag.store_incident = AsyncMock()
-        rag_cls.return_value = rag
-
-        svc = IncidentService()
-        # Stash the mocks so tests can reconfigure them without re-patching.
-        svc._llm_mock = llm
-        svc._rag_mock = rag
-    return svc
-
-
-def _mock_db(session=None):
-    if session is None:
-        session = MagicMock()
-        session.execute = AsyncMock()
-        session.commit = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-
-    async def _get_db():
-        return session
-
-    return _get_db, session
-
-
-# ===========================================================================
-# Autofix block in declare_incident
-# ===========================================================================
 
 STUB_SERVICE = {
     "name": "payment-api",
@@ -73,11 +37,28 @@ STACK = "java.sql.SQLException: refused\n    at com.acme.DB.execute(DBConnection
 
 
 @pytest.fixture
+def service():
+    with patch("src.services.incident_service.LLMService") as llm_cls, \
+         patch("src.services.incident_service.RAGService") as rag_cls:
+        llm = MagicMock()
+        llm.analyze_incident = AsyncMock(return_value=STUB_ANALYSIS)
+        llm_cls.return_value = llm
+
+        rag = MagicMock()
+        rag.generate_context_prompt = AsyncMock(return_value="")
+        rag.store_incident = AsyncMock()
+        rag_cls.return_value = rag
+
+        svc = IncidentService()
+        svc._llm_mock = llm
+        svc._rag_mock = rag
+    return svc
+
+
+@pytest.fixture
 def orchestrated(service):
     """Service with all external boundaries stubbed, ready for declare_incident."""
-    get_db, session = _mock_db()
-    with patch("src.services.incident_service.get_db", get_db), \
-         patch.object(service, "get_service", new=AsyncMock(return_value=STUB_SERVICE)), \
+    with patch.object(service, "get_service", new=AsyncMock(return_value=STUB_SERVICE)), \
          patch.object(service, "save_incident", new=AsyncMock()), \
          patch.object(service, "calculate_blast_radius",
                       new=AsyncMock(return_value={"root": "payment-api",
@@ -105,13 +86,12 @@ def _quiet_peripherals():
     return oncall, alert, k8s, ws, gh
 
 
+# ===========================================================================
+# Autofix block in declare_incident
+# ===========================================================================
+
 @pytest.mark.asyncio
 async def test_declare_incident_autofix_success_merges_into_metadata(orchestrated):
-    """
-    Situation: Auto-fix generates successfully.
-    Expected: Auto-fix result merged into incident metadata.
-    Function: src.services.incident_service.IncidentService.declare_incident
-    """
     autofix_result = {
         "status": "fix_generated",
         "fix": "--- a\n+++ b\n",
@@ -144,11 +124,6 @@ async def test_declare_incident_autofix_success_merges_into_metadata(orchestrate
 
 @pytest.mark.asyncio
 async def test_declare_incident_autofix_error_result_not_merged(orchestrated):
-    """
-    Situation: Auto-fix returns error.
-    Expected: Auto-fix not merged into metadata.
-    Function: src.services.incident_service.IncidentService.declare_incident
-    """
     fake_autofix = MagicMock()
     fake_autofix.generate_fix = AsyncMock(return_value={"error": "no code found"})
 
@@ -174,11 +149,6 @@ async def test_declare_incident_autofix_error_result_not_merged(orchestrated):
 
 @pytest.mark.asyncio
 async def test_declare_incident_autofix_exception_is_swallowed(orchestrated):
-    """
-    Situation: Auto-fix service raises exception.
-    Expected: Exception caught, incident still created, auto-fix not in metadata.
-    Function: src.services.incident_service.IncidentService.declare_incident
-    """
     fake_autofix = MagicMock()
     fake_autofix.generate_fix = AsyncMock(side_effect=RuntimeError("llm down"))
 
@@ -197,7 +167,6 @@ async def test_declare_incident_autofix_exception_is_swallowed(orchestrated):
             "payment-api", "DB down", stack_trace=STACK
         )
 
-    # Incident still returns successfully
     assert "error" not in result
     saved = orchestrated.save_incident.await_args.args[0]
     metadata = json.loads(saved["extra_metadata"])
@@ -209,132 +178,85 @@ async def test_declare_incident_autofix_exception_is_swallowed(orchestrated):
 # ===========================================================================
 
 @pytest.mark.parametrize("trace,expected_file,expected_line", [
-    # Java standard: at com.foo.Bar.method(File.java:123)
     ("java.lang.RuntimeException: boom\n    at com.acme.Foo.bar(Foo.java:42)",
      "Foo.java", 42),
-    # Java short: at File.java:123
     ("Exception in thread main\n    at Bar.java:55", "Bar.java", 55),
-    # Python: File "x.py", line 123
     ('Traceback (most recent call last):\n  File "src/app.py", line 7, in <module>',
      "src/app.py", 7),
-    # Simple: file.py:123
     ("error at db.py:99", "db.py", 99),
-    # Java class: ClassName.java:123
     ("at ClassName.java:12", "ClassName.java", 12),
-    # Service: AuthService:123
     ("fail at AuthService:44", "AuthService", 44),
 ])
 def test_parse_stack_trace_patterns(service, trace, expected_file, expected_line):
-    """
-    Situation: Various stack trace formats.
-    Expected: Extracts file path and line number correctly.
-    Function: src.services.incident_service.IncidentService._parse_stack_trace
-    """
     result = service._parse_stack_trace(trace)
     assert result["file_path"] == expected_file
     assert result["line_number"] == expected_line
 
 
 def test_parse_stack_trace_no_match_returns_none_file(service):
-    """
-    Situation: Stack trace with no recognizable pattern.
-    Expected: Returns None for file and line.
-    Function: src.services.incident_service.IncidentService._parse_stack_trace
-    """
     result = service._parse_stack_trace("just some text with no trace")
     assert result["file_path"] is None
     assert result["line_number"] is None
 
 
 def test_parse_stack_trace_extracts_exception_type(service):
-    """
-    Situation: Stack trace with exception type.
-    Expected: Extracts exception type.
-    Function: src.services.incident_service.IncidentService._parse_stack_trace
-    """
     result = service._parse_stack_trace("java.io.IOException: file missing")
     assert result["exception_type"] == "IOException"
 
 
 def test_parse_stack_trace_stores_truncated_trace(service):
-    """
-    Situation: Very long stack trace.
-    Expected: Truncates to 500 chars in full_trace.
-    Function: src.services.incident_service.IncidentService._parse_stack_trace
-    """
     long_trace = "x" * 1000
     result = service._parse_stack_trace(long_trace)
     assert len(result["full_trace"]) == 500
 
 
 # ===========================================================================
-# save_incident_metadata
+# save_incident_metadata — real DB
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_save_incident_metadata_writes_json(service):
-    """
-    Situation: Valid metadata to save.
-    Expected: Writes JSON to DB, commits.
-    Function: src.services.incident_service.IncidentService.save_incident_metadata
-    """
-    get_db, session = _mock_db()
-    with patch("src.services.incident_service.get_db", get_db):
-        result = await service.save_incident_metadata(
-            "INC-1", {"auto_fix": {"status": "approved"}}
-        )
+async def test_save_incident_metadata_writes_json(service, make_incident, db_session):
+    """Real DB: save_incident_metadata updates the row's extra_metadata."""
+    await make_incident({
+        "incident_id": "INC-META-1",
+        "extra_metadata": "{}",
+    })
 
-    assert result == {"status": "updated", "incident_id": "INC-1"}
-    session.commit.assert_awaited_once()
+    result = await service.save_incident_metadata(
+        "INC-META-1", {"auto_fix": {"status": "approved"}}
+    )
+    assert result == {"status": "updated", "incident_id": "INC-META-1"}
+
+    row = (await db_session.execute(
+        text("SELECT extra_metadata FROM incidents WHERE incident_id = :iid"),
+        {"iid": "INC-META-1"},
+    )).fetchone()
+    meta = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    assert meta == {"auto_fix": {"status": "approved"}}
 
 
 @pytest.mark.asyncio
-async def test_save_incident_metadata_db_error_returns_error_dict(service):
-    """
-    Situation: DB write fails.
-    Expected: Returns error dict.
-    Function: src.services.incident_service.IncidentService.save_incident_metadata
-    """
-    get_db, session = _mock_db()
-    session.execute = AsyncMock(side_effect=RuntimeError("db down"))
-    with patch("src.services.incident_service.get_db", get_db):
-        result = await service.save_incident_metadata("INC-1", {})
-
+async def test_save_incident_metadata_db_error_returns_error_dict(service, db_error):
+    """db_error forces the UPDATE to fail; service returns error dict."""
+    result = await service.save_incident_metadata("INC-1", {})
     assert "error" in result
-    assert "db down" in result["error"]
 
 
 # ===========================================================================
-# get_service / list_services fallback branches
+# get_service / list_services fallback branches — db_error
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_get_service_db_error_falls_back_to_mock(service):
-    """
-    Situation: DB query fails.
-    Expected: Falls back to mock service dict.
-    Function: src.services.incident_service.IncidentService.get_service
-    """
-    get_db, session = _mock_db()
-    session.execute = AsyncMock(side_effect=RuntimeError("db down"))
-    with patch("src.services.incident_service.get_db", get_db):
-        result = await service.get_service("payment-api")
-
+async def test_get_service_db_error_falls_back_to_mock(service, db_error):
+    """db_error forces DB failure; get_service returns mock dict."""
+    result = await service.get_service("payment-api")
     assert result["name"] == "payment-api"
     assert result["on_call"] == ["@marcus", "@prisha"]
 
 
 @pytest.mark.asyncio
-async def test_list_services_db_error_falls_back_to_mock_list(service):
-    """
-    Situation: DB query fails.
-    Expected: Falls back to mock services list.
-    Function: src.services.incident_service.IncidentService.list_services
-    """
-    get_db, session = _mock_db()
-    session.execute = AsyncMock(side_effect=RuntimeError("db down"))
-    with patch("src.services.incident_service.get_db", get_db):
-        result = await service.list_services()
-
+async def test_list_services_db_error_falls_back_to_mock_list(service, db_error):
+    """db_error forces DB failure; list_services returns mock list."""
+    result = await service.list_services()
     assert len(result) == 8
     assert {s["name"] for s in result} >= {"payment-api", "auth", "database"}

@@ -4,7 +4,7 @@ import uuid
 import json
 from loguru import logger
 
-from src.database import get_db
+from src.database import get_db_session
 from src.services.llm_service import LLMService
 from src.services.rag_service import RAGService
 from src.services.autofix_service import AutoFixService
@@ -252,8 +252,7 @@ class IncidentService:
     
     async def get_service(self, service_name: str) -> dict:
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("SELECT * FROM services WHERE name = :name"),
                     {"name": service_name}
@@ -268,8 +267,7 @@ class IncidentService:
     
     async def list_services(self) -> list:
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("""
                         SELECT 
@@ -301,8 +299,7 @@ class IncidentService:
     
     async def save_incident(self, incident_data: dict):
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 await session.execute(
                     text("""
                         INSERT INTO incidents (
@@ -326,8 +323,7 @@ class IncidentService:
     
     async def get_incident(self, incident_id: str) -> dict:
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("SELECT * FROM incidents WHERE incident_id = :incident_id"),
                     {"incident_id": incident_id}
@@ -353,8 +349,7 @@ class IncidentService:
     
     async def get_all_incidents(self, limit: int = 200) -> list:
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 result = await session.execute(
                     text("""
                         SELECT 
@@ -461,8 +456,7 @@ class IncidentService:
             return {"error": "Incident not found"}
         
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 await session.execute(
                     text("UPDATE incidents SET status = 'resolved', resolved_at = NOW() WHERE incident_id = :incident_id"),
                     {"incident_id": incident_id}
@@ -481,8 +475,7 @@ class IncidentService:
     
     async def seed_services(self) -> dict:
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 await session.execute(text("DELETE FROM services"))
 
                 services = [
@@ -519,8 +512,7 @@ class IncidentService:
             return {"status": "error", "message": str(e)}
     
     async def add_service(self, service: dict) -> dict:
-        session = await get_db()
-        async with session:
+        async with get_db_session() as session:
             deps = service.get("dependencies") or []
             on_call = service.get("on_call") or []
             if isinstance(deps, str):
@@ -543,8 +535,7 @@ class IncidentService:
             return {"status": "created", "name": service["name"]}
     
     async def delete_service(self, name: str) -> dict:
-        session = await get_db()
-        async with session:
+        async with get_db_session() as session:
             await session.execute(text("DELETE FROM services WHERE name = :name"), {"name": name})
             await session.commit()
             return {"status": "deleted", "name": name}
@@ -649,12 +640,11 @@ class IncidentService:
     
     async def save_incident_metadata(self, incident_id: str, extra_metadata: dict) -> dict:
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 await session.execute(
                     text("""
                         UPDATE incidents 
-                        SET extra_metadata = :extra_metadata::jsonb
+                        SET extra_metadata = CAST(:extra_metadata AS jsonb)
                         WHERE incident_id = :incident_id
                     """),
                     {
@@ -671,8 +661,7 @@ class IncidentService:
     
     async def update_incident(self, incident_id: str, update_data: dict) -> dict:
         try:
-            session = await get_db()
-            async with session:
+            async with get_db_session() as session:
                 from sqlalchemy import update
                 from src.models import Incident
                 
