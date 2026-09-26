@@ -220,7 +220,10 @@ class IncidentService:
         except Exception as e:
             logger.error(f"K8s error: {e}")
         
-        await self.rag.store_incident(incident_data)
+        try:
+            await self.rag.store_incident(incident_data)
+        except Exception as e:
+            logger.error(f"RAG store error: {e}")
         
         try:
             await manager.broadcast({

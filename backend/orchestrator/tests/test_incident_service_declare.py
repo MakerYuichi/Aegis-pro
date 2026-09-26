@@ -446,7 +446,7 @@ async def test_declare_incident_websocket_failure_does_not_break(service_with_db
 async def test_declare_incident_rag_store_failure_does_not_break(service_with_db):
     """
     Situation: RAG store_incident fails.
-    Expected: Raises (current behavior - not wrapped in try/except).
+    Expected: Incident still created, RAG error logged, no exception raised.
     Function: src.services.incident_service.IncidentService.declare_incident
     """
     service_with_db._rag_mock.store_incident = AsyncMock(side_effect=RuntimeError("embedding down"))
@@ -461,7 +461,37 @@ async def test_declare_incident_rag_store_failure_does_not_break(service_with_db
         K8s.return_value.get_deployment_status = AsyncMock(return_value="ok")
         ws.broadcast = AsyncMock()
 
-        # Note: this will raise because store_incident is not wrapped in try/except
-        # in the source. Documenting current behavior.
-        with pytest.raises(RuntimeError, match="embedding down"):
-            await service_with_db.declare_incident("payment-api", "DB down")
+        result = await service_with_db.declare_incident("payment-api", "DB down")
+
+    assert "error" not in result
+    assert result["incident_id"].startswith("INC-")
+    assert result["service"] == "payment-api"
+
+@pytest.mark.asyncio
+async def test_declare_incident_rag_failure_is_logged(service_with_db):
+    """
+    Situation: RAG store_incident fails.
+    Expected: The failure is logged via loguru, not swallowed silently.
+    Function: src.services.incident_service.IncidentService.declare_incident
+    """
+    service_with_db._rag_mock.store_incident = AsyncMock(side_effect=RuntimeError("embedding down"))
+
+    with patch("src.services.incident_service.OnCallService") as OnCall, \
+         patch("src.services.incident_service.AlertService") as Alert, \
+         patch("src.services.incident_service.KubernetesService") as K8s, \
+         patch("src.services.incident_service.manager") as ws, \
+         patch("src.services.incident_service.logger") as mock_logger:
+        OnCall.return_value.get_on_call = AsyncMock(return_value={"primary": None, "secondary": None, "tertiary": None})
+        OnCall.return_value.get_escalation_policy = AsyncMock(return_value=[])
+        Alert.return_value.send_alerts = AsyncMock()
+        K8s.return_value.get_deployment_status = AsyncMock(return_value="ok")
+        ws.broadcast = AsyncMock()
+
+        await service_with_db.declare_incident("payment-api", "DB down")
+
+    # logger.error was called with a message containing the RAG failure
+    error_calls = [str(c) for c in mock_logger.error.call_args_list]
+    assert any("RAG store error" in c for c in error_calls), (
+        f"Expected 'RAG store error' in logger.error calls, got: {error_calls}"
+    )
+    assert any("embedding down" in c for c in error_calls)
