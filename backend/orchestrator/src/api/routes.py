@@ -269,3 +269,102 @@ async def send_oncall_alert(
         incident_id=request.incident_id,
     )
     return result
+
+# ── Phase 10: demo-to-dashboard continuity ──────────────────────────────
+
+from pydantic import BaseModel as _BaseModel  # local to this section
+
+class _LinkDemoSessionRequest(_BaseModel):
+    session_id: str
+
+
+class _OnboardingInterestRequest(_BaseModel):
+    session_id: Optional[str] = None
+    repo: Optional[str] = None
+
+
+@router.get("/me/demo-sessions")
+async def list_my_demo_sessions(
+    limit: int = 10,
+    claims: dict = Depends(require_auth),
+):
+    """
+    Return the signed-in user's linked demo sessions, newest first.
+
+    Used by the dashboard card to show "You tried <org>/<repo> in the
+    demo." Returns an empty list for users who never demoed, or who
+    demoed without ever linking.
+    """
+    from src.auth import _claim_email
+    from src.demo import session_service
+
+    email = _claim_email(claims)
+    if not email:
+        raise HTTPException(
+            status_code=403,
+            detail="Token has no email claim — cannot look up demo sessions.",
+        )
+
+    limit = max(1, min(limit, 50))  # clamp
+    sessions = await session_service.list_for_user(email, limit=limit)
+    return {"sessions": sessions, "count": len(sessions)}
+
+
+@router.post("/me/link-demo-session")
+async def link_my_demo_session(
+    request: Request,
+    claims: dict = Depends(require_auth),
+):
+    """
+    Link the caller's demo session to their email.
+
+    Reads the demo_session_id cookie directly — the cookie is
+    httpOnly, so the frontend cannot read it, but the browser sends
+    it automatically on the request. No body parameter needed.
+    """
+    from src.auth import _claim_email
+    from src.demo import session_service
+    from src.demo.endpoints import SESSION_COOKIE
+
+    email = _claim_email(claims)
+    if not email:
+        raise HTTPException(status_code=403, detail="Token has no email claim")
+
+    session_id = request.cookies.get(SESSION_COOKIE)
+    if not session_id:
+        return {"status": "no_cookie", "email": email}
+
+    linked = await session_service.link_to_user(session_id, email)
+    return {
+        "status": "linked" if linked else "no_match",
+        "session_id": session_id,
+        "email": email,
+    }
+
+
+@router.post("/me/onboarding-interest")
+async def mark_onboarding_interest(
+    body: _OnboardingInterestRequest,
+    claims: dict = Depends(require_auth),
+):
+    """
+    Record that the user clicked "Connect it now" for their demo session.
+
+    The session_id is optional — if omitted, we mark the user's most
+    recent linked session (the one the card was showing).
+
+    Fails silently for the caller: always returns 200, with a flag
+    indicating whether a row was updated. The frontend shows the
+    thank-you either way.
+    """
+    from src.auth import _claim_email
+    from src.demo import session_service
+
+    email = _claim_email(claims)
+    if not email:
+        raise HTTPException(403, "Token has no email claim")
+
+    recorded = await session_service.mark_onboarding_interest(
+        email, body.session_id
+    )
+    return {"status": "recorded" if recorded else "no_match", "email": email}

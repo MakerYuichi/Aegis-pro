@@ -100,3 +100,151 @@ async def count_successful_tries(session_id: str) -> int:
     except Exception as e:
         logger.warning(f"⚠️ Failed to count demo tries: {e}")
         return 0
+
+# ── Phase 10: demo-to-dashboard continuity ──────────────────────────────
+
+async def link_to_user(session_id: str, email: str) -> bool:
+    """
+    Attach a signed-in user's email to their demo session.
+
+    Idempotent — calling twice with the same (session_id, email) is a
+    no-op. Calling with a different email overwrites: the same browser
+    may be used by two people, and the last sign-in wins.
+
+    Returns True if a row was updated, False if no row matched.
+    Never raises — the dashboard card is non-essential, and a failed
+    link must not break the sign-in flow.
+    """
+    if not settings.DEMO_MODE:
+        return False
+    if not email:
+        return False
+
+    try:
+        async with get_db_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    UPDATE demo_sessions
+                    SET user_email = :email
+                    WHERE session_id = :sid
+                    """
+                ),
+                {"email": email.lower(), "sid": session_id},
+            )
+            await session.commit()
+            matched = result.rowcount > 0
+            if matched:
+                logger.debug(f"🔗 Linked {session_id} to {email}")
+            return matched
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to link demo session {session_id}: {e}")
+        return False
+
+
+async def list_for_user(email: str, limit: int = 10) -> list[dict]:
+    """
+    Return this user's linked demo sessions, newest first.
+
+    Only rows with parse_ok = true and a non-null parsed_org/parsed_repo
+    are returned — those are the ones the dashboard card can act on.
+
+    Never raises — returns [] on error.
+    """
+    if not settings.DEMO_MODE:
+        return []
+    if not email:
+        return []
+
+    try:
+        async with get_db_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT id, session_id, parsed_org, parsed_repo,
+                           language_inferred, incident_id, created_at
+                    FROM demo_sessions
+                    WHERE user_email = :email
+                      AND parse_ok = true
+                      AND parsed_org IS NOT NULL
+                      AND parsed_repo IS NOT NULL
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"email": email.lower(), "limit": limit},
+            )
+            rows = result.fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "session_id": r[1],
+                    "parsed_org": r[2],
+                    "parsed_repo": r[3],
+                    "language_inferred": r[4],
+                    "incident_id": r[5],
+                    "created_at": r[6].isoformat() if r[6] else None,
+                }
+                for r in rows
+            ]
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to list demo sessions for {email}: {e}")
+        return []
+
+
+async def mark_onboarding_interest(email: str, session_id: str | None) -> bool:
+    """
+    Record that a user clicked "Connect it now" for their demo session.
+
+    Writes onboarding_clicked_at on the matching row. If session_id is
+    None, marks the user's most recent linked session instead — that's
+    the one the dashboard card was showing.
+
+    Never raises — the click is a lead signal, not a transactional
+    requirement.
+    """
+    if not settings.DEMO_MODE:
+        return False
+    if not email:
+        return False
+
+    try:
+        async with get_db_session() as session:
+            if session_id:
+                result = await session.execute(
+                    text(
+                        """
+                        UPDATE demo_sessions
+                        SET onboarding_clicked_at = NOW()
+                        WHERE session_id = :sid
+                          AND user_email = :email
+                        """
+                    ),
+                    {"sid": session_id, "email": email.lower()},
+                )
+            else:
+                result = await session.execute(
+                    text(
+                        """
+                        UPDATE demo_sessions
+                        SET onboarding_clicked_at = NOW()
+                        WHERE id = (
+                            SELECT id FROM demo_sessions
+                            WHERE user_email = :email
+                              AND parse_ok = true
+                              AND parsed_org IS NOT NULL
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                        )
+                        """
+                    ),
+                    {"email": email.lower()},
+                )
+            await session.commit()
+            matched = result.rowcount > 0
+            if matched:
+                logger.info(f"📩 Onboarding interest recorded for {email}")
+            return matched
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to record onboarding interest for {email}: {e}")
+        return False

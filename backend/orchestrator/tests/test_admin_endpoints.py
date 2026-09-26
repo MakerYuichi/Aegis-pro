@@ -9,6 +9,7 @@ Auth is overridden via app.dependency_overrides[require_admin].
 """
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 import httpx
 from httpx import ASGITransport
 
@@ -63,10 +64,22 @@ async def test_admin_me_401_for_non_admin(anon_client):
 # ── /admin/demo-sessions (list) ────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_list_demo_sessions_returns_all_seeded(admin_client, seeded_demo_sessions):
+async def test_list_demo_sessions_returns_all_seeded(
+    admin_client, seeded_demo_sessions, db_session
+):
+    # The admin endpoint queries the whole table. Committed rows from
+    # manual browser testing are visible outside the test transaction,
+    # so we delete them here — inside the transaction — to assert on
+    # an exact count. Rolled back at teardown.
+    await db_session.execute(
+        text("DELETE FROM demo_sessions WHERE session_id NOT LIKE 'sess-%'")
+    )
+    await db_session.flush()
+
     resp = await admin_client.get("/api/v1/admin/demo-sessions?limit=50")
     assert resp.status_code == 200
     body = resp.json()
+
     assert body["count"] == 5
     assert body["limit"] == 50
 
@@ -116,7 +129,15 @@ async def test_list_demo_sessions_empty(admin_client, db_session):
 # ── /admin/demo-stats (aggregates) ─────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_demo_stats_shapes_aggregates(admin_client, seeded_demo_sessions):
+async def test_demo_stats_shapes_aggregates(
+    admin_client, seeded_demo_sessions, db_session
+):
+    # Same isolation as above.
+    await db_session.execute(
+        text("DELETE FROM demo_sessions WHERE session_id NOT LIKE 'sess-%'")
+    )
+    await db_session.flush()
+
     resp = await admin_client.get("/api/v1/admin/demo-stats?days=365")
     assert resp.status_code == 200
     body = resp.json()
@@ -125,17 +146,16 @@ async def test_demo_stats_shapes_aggregates(admin_client, seeded_demo_sessions):
     assert body["total_sessions"] == 5
 
     by_day = {row["date"]: row["count"] for row in body["sessions_by_day"]}
-    assert by_day == {
-        "2026-09-24": 1,
-        "2026-09-23": 1,
-        "2026-09-22": 3,
-    }
+    assert by_day == {"2026-09-24": 1, "2026-09-23": 1, "2026-09-22": 3}
 
     top = {row["org"]: row["count"] for row in body["top_orgs"]}
     assert top == {"stripe": 2, "airbnb": 1}
 
     assert body["parse_failures"]["total"] == 2
-    reasons = {row["reason"]: row["count"] for row in body["parse_failures"]["by_reason"]}
+    reasons = {
+        row["reason"]: row["count"]
+        for row in body["parse_failures"]["by_reason"]
+    }
     assert reasons == {"unsupported_host": 1, "malformed": 1}
 
 

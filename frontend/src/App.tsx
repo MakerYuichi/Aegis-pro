@@ -18,6 +18,7 @@ import { DemoStatsPage } from './pages/DemoStatsPage';
 import { SessionReplayPage } from './pages/SessionReplayPage';
 import { AdminUsersPage } from './pages/AdminUsersPage';
 import { AdminAuditLogPage } from './pages/AdminAuditLogPage';
+import { OnboardingPage } from './pages/OnboardingPage';
 import { AdminLayout } from './components/AdminLayout';
 import { useIsAdmin } from './hooks/useIsAdmin';
 import type { ReactNode } from 'react';
@@ -125,6 +126,7 @@ function App() {
           <Route path="/oncall"       element={<RequireAuth isAuthenticated={isAuthenticated} error={error}><OnCallPage /></RequireAuth>} />
           <Route path="/settings"     element={<RequireAuth isAuthenticated={isAuthenticated} error={error}><Settings /></RequireAuth>} />
           <Route path="/approvals"    element={<RequireAuth isAuthenticated={isAuthenticated} error={error}><ApprovalDashboard /></RequireAuth>} />
+          <Route path="/onboarding"  element={<RequireAuth isAuthenticated={isAuthenticated} error={error}><OnboardingPage /></RequireAuth>} />
 
           {/* Admin shell (Option C) */}
           <Route path="/admin"                    element={<RequireAdmin isAuthenticated={isAuthenticated} error={error}><AdminHomePage /></RequireAdmin>} />
