@@ -78,10 +78,12 @@ def _mock_db():
 
 @pytest.fixture
 def service_with_db(service):
-    """IncidentService with get_db patched and get_service / save_incident stubbed."""
-    get_db, session = _mock_db()
-    with patch("src.services.incident_service.get_db", get_db), \
-         patch.object(service, "get_service", new=AsyncMock(return_value=STUB_SERVICE)), \
+    """
+    IncidentService with get_service / save_incident / calculate_blast_radius
+    stubbed. No DB access happens in these tests — declare_incident touches
+    the DB only via get_service and save_incident, both mocked here.
+    """
+    with patch.object(service, "get_service", new=AsyncMock(return_value=STUB_SERVICE)), \
          patch.object(service, "save_incident", new=AsyncMock()), \
          patch.object(service, "calculate_blast_radius",
                       new=AsyncMock(return_value={"root": "payment-api",
