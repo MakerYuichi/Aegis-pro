@@ -1,4 +1,5 @@
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -109,11 +110,12 @@ async def test_backfill_is_idempotent_when_no_rows(monkeypatch):
 
         async def __aexit__(self, *a):
             return False
+        
+    @asynccontextmanager
+    async def fake_get_db_session():
+        yield FakeSession()
 
-    async def fake_get_db():
-        return FakeSession()
-
-    monkeypatch.setattr(mod, "get_db", fake_get_db)
+    monkeypatch.setattr(mod, "get_db_session", fake_get_db_session)
 
     calls = []
 
