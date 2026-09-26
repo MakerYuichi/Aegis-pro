@@ -430,3 +430,21 @@ async def seeded_alert_history(db_session):
         ids.append(result.scalar())
     await db_session.flush()
     yield ids
+    
+@pytest_asyncio.fixture
+async def seeded_inactive_oncall(db_session):
+    """
+    Insert one inactive on-call row for a service we control.
+    Used by filter tests to verify is_active=TRUE is honored.
+    """
+    await db_session.execute(
+        text("""
+            INSERT INTO oncall_rotations
+                (service_name, engineer_name, slack_handle, role, is_active)
+            VALUES
+                ('inactive-test-svc', 'Ghost Engineer', '@ghost', 'primary', FALSE)
+            ON CONFLICT DO NOTHING
+        """)
+    )
+    await db_session.flush()
+    yield "@ghost"
