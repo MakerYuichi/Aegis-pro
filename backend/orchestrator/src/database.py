@@ -34,18 +34,8 @@ async def init_db():
     """Initialize database connection and create tables if needed."""
     try:
         async with engine.begin() as conn:
+            await conn.execute(text("SELECT 1"))
             logger.info("✅ Database connected successfully")
-            await conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS alert_history (
-                    id SERIAL PRIMARY KEY,
-                    engineer_name VARCHAR(255),
-                    service_name VARCHAR(255),
-                    message TEXT,
-                    status VARCHAR(50) DEFAULT 'sent',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """))
-            await conn.commit()
     except Exception as e:
         logger.warning(f"⚠️ Database connection failed (continuing without DB): {e}")
 

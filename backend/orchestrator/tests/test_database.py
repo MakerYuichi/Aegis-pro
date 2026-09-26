@@ -71,25 +71,34 @@ def test_engine_pool_configuration():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_init_db_success_creates_table():
-    """Situation: Database connection succeeds, table doesn't exist. Expected: Table created, connection logged."""
+async def test_init_db_success_runs_connectivity_check():
+    """
+    Situation: Database connection succeeds.
+    Expected: init_db runs a connectivity query and returns without raising.
+    Function: src.database.init_db
+
+    Schema is managed by migrations (see database/migrations/), not by
+    init_db. This test asserts the function only touches the DB to
+    verify the connection.
+    """
     with patch("src.database.engine") as mock_engine:
         mock_conn = AsyncMock()
         mock_engine.begin.return_value.__aenter__.return_value = mock_conn
         mock_conn.execute = AsyncMock()
-        mock_conn.commit = AsyncMock()
 
         await db_module.init_db()
 
+        # Exactly one query: SELECT 1 (connectivity probe)
         mock_conn.execute.assert_awaited_once()
-        mock_conn.commit.assert_awaited_once()
-        # The actual SQL with CREATE TABLE is at lines 35-44 in source
-        # We verify execute was called
 
 
 @pytest.mark.asyncio
 async def test_init_db_connection_failure_logs_warning():
-    """Situation: Database connection fails. Expected: Exception caught, warning logged, does not raise."""
+    """
+    Situation: Database connection fails.
+    Expected: Exception caught, warning logged, does not raise.
+    Function: src.database.init_db
+    """
     with patch("src.database.engine") as mock_engine:
         mock_engine.begin.side_effect = RuntimeError("connection refused")
 
@@ -98,8 +107,12 @@ async def test_init_db_connection_failure_logs_warning():
 
 
 @pytest.mark.asyncio
-async def test_init_db_table_creation_failure_logs_warning():
-    """Situation: Connection succeeds but table creation fails. Expected: Exception caught, warning logged."""
+async def test_init_db_query_failure_logs_warning():
+    """
+    Situation: Connection succeeds but the probe query fails.
+    Expected: Exception caught, warning logged, does not raise.
+    Function: src.database.init_db
+    """
     with patch("src.database.engine") as mock_engine:
         mock_conn = AsyncMock()
         mock_engine.begin.return_value.__aenter__.return_value = mock_conn
@@ -107,21 +120,6 @@ async def test_init_db_table_creation_failure_logs_warning():
 
         # Should not raise
         await db_module.init_db()
-
-
-@pytest.mark.asyncio
-async def test_init_db_table_already_exists():
-    """Situation: Table already exists. Expected: CREATE TABLE IF NOT EXISTS succeeds without error."""
-    with patch("src.database.engine") as mock_engine:
-        mock_conn = AsyncMock()
-        mock_engine.begin.return_value.__aenter__.return_value = mock_conn
-        mock_conn.execute = AsyncMock()
-        mock_conn.commit = AsyncMock()
-
-        await db_module.init_db()
-
-        # Should succeed - IF NOT EXISTS handles it
-        mock_conn.execute.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
