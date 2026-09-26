@@ -80,6 +80,28 @@ jobs:
           pip install -r requirements.txt
 
       # ------------------------------------------------------------------
+      # Schema load — required since the test suite now includes real-DB
+      # tests (test_database_lifecycle, test_admin_endpoints, etc.).
+      # The service container starts empty; migrations must run before
+      # pytest touches any table.
+      # ------------------------------------------------------------------
+      - name: Install postgresql-client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Load schema
+        working-directory: backend/orchestrator
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for f in ../../database/migrations/*.sql; do
+            echo "Loading $f"
+            psql -h localhost -U postgres -d aegis_test -f "$f" || exit 1
+          done
+          echo "=== Tables loaded ==="
+          psql -h localhost -U postgres -d aegis_test -c "\dt"
+      # ------------------------------------------------------------------
+
+      # ------------------------------------------------------------------
       # DIAGNOSTIC — remove once CI is green
       # ------------------------------------------------------------------
       - name: Verify services are reachable
