@@ -52,6 +52,17 @@ class Settings(BaseSettings):
     
     # Demo mode — enables public demo endpoints and mock services
     DEMO_MODE: bool = False
+    
+    # Verifier — sandboxed test execution before reporting a fix.
+    # Off by default until the hosted Docker implementation is proven
+    # in production. When false, the pipeline runs as if verification
+    # succeeded, with reason="disabled" recorded so downstream
+    # consumers can tell the difference.
+    VERIFY_BEFORE_REPORT: bool = False
+    VERIFY_TIMEOUT_SECONDS: int = 120
+    VERIFY_MAX_ATTEMPTS: int = 2
+    VERIFY_DOCKER_IMAGE_PYTHON: str = "python:3.11-slim"
+    VERIFY_DOCKER_IMAGE_NODE: str = "node:20-slim"
 
     # Kubernetes (optional)
     K8S_API_URL: Optional[str] = None
