@@ -6,7 +6,7 @@ from loguru import logger
 
 from src.database import get_db_session
 from src.services.llm_service import LLMService
-from src.services.rag_service import RAGService
+from src.services.rag_service import get_rag_service
 from src.services.autofix_service import AutoFixService
 from src.services.oncall_service import OnCallService
 from src.services.kubernetes_service import KubernetesService
@@ -57,9 +57,9 @@ def merge_incident_metadata(existing_json, key: str, value) -> str:
 class IncidentService:
     def __init__(self):
         self.llm = LLMService()
-        self.rag = RAGService()
-        logger.info("✅ IncidentService initialized with RAG")
-
+        self.rag = get_rag_service()
+        logger.info("✅ IncidentService initialized with RAG (singleton)")
+    
     async def declare_incident(self, service_name: str, message: str, stack_trace: str = None, reported_by: str = None) -> dict:
         incident_id = f"INC-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 

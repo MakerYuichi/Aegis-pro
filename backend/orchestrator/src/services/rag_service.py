@@ -4,6 +4,68 @@ from loguru import logger
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
+import threading
+
+# ---------------------------------------------------------------------------
+# Process-wide singleton
+# ---------------------------------------------------------------------------
+#
+# RAGService.__init__ loads SentenceTransformer('all-MiniLM-L6-v2'), which
+# takes seconds on a cold cache. The class is constructed from seven call
+# sites today (main.py lifespan, three Slack handlers, one webhook handler,
+# two autofix callbacks), and prior to this singleton each one paid that
+# cost independently — once per request in the Slack and webhook paths.
+#
+# The accessor below makes the model load exactly once per process. Call
+# sites don't change; they construct IncidentService(), which now calls
+# get_rag_service() instead of RAGService().
+#
+# Caveat for multi-worker deployments: each Uvicorn/Gunicorn worker process
+# has its own memory, so N workers still load the model N times. That's
+# expected. There's no in-process trick that shares memory across OS
+# processes; the alternative is a shared inference service, which is a
+# larger change and not this PR's scope.
+
+_rag_instance = None
+_rag_lock = threading.Lock()
+
+
+def get_rag_service() -> "RAGService":
+    """
+    Return the process-wide RAGService singleton, constructing it on
+    first call.
+
+    Thread-safe via _rag_lock. The lock is not strictly needed today
+    because the app loads RAG eagerly at startup, so first construction
+    happens before any request can race it. But that safety is an
+    implicit property of the startup sequence, not a guarantee the code
+    enforces. A lock costs nothing and makes the singleton correct
+    regardless of how future code calls it.
+    """
+    global _rag_instance
+    if _rag_instance is None:
+        with _rag_lock:
+            if _rag_instance is None:
+                _rag_instance = RAGService()
+    return _rag_instance
+
+
+def _reset_rag_singleton():
+    """
+    Drop the cached instance so the next get_rag_service() call
+    constructs a fresh RAGService.
+
+    Test-only. Do NOT call from production code — every call forces a
+    model reload, which is the exact cost this singleton exists to
+    avoid.
+
+    Lives here, next to the module-level state it resets, so the reset
+    logic doesn't reach into this module from another file.
+    """
+    global _rag_instance
+    with _rag_lock:
+        _rag_instance = None
+
 
 class RAGService:
     def __init__(self):
