@@ -31,7 +31,7 @@ def _make_service() -> IncidentService:
     patched before instantiation.
     """
     with patch("src.services.incident_service.LLMService"), \
-         patch("src.services.incident_service.RAGService"):
+         patch("src.services.incident_service.get_rag_service"):
         svc = IncidentService()
     svc.llm = MagicMock()
     svc.rag = MagicMock()
