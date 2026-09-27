@@ -26,9 +26,8 @@ def _make_service() -> IncidentService:
     """
     Build an IncidentService with LLM and RAG mocked.
 
-    The __init__ creates real LLMService() and RAGService() objects,
-    which try to hit Groq and load a transformer model. Both must be
-    patched before instantiation.
+    The __init__ creates a real LLMService() and calls get_rag_service().
+    Both must be patched before instantiation.
     """
     with patch("src.services.incident_service.LLMService"), \
          patch("src.services.incident_service.get_rag_service"):
