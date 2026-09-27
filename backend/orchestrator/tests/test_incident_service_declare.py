@@ -17,6 +17,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.services.incident_service import IncidentService
+from src.agents.verifier import VerificationResult
 
 
 STUB_SERVICE = {
@@ -666,3 +667,90 @@ async def test_record_method_raises_on_db_error(db_error):
     svc = IncidentService()
     with pytest.raises(RuntimeError, match="forced DB error"):
         await svc.record_github_context("INC-1", {"recent_prs": []})
+
+
+@pytest.mark.asyncio
+async def test_record_verification_preserves_auto_fix(make_incident):
+    """
+    Situation: auto_fix written first, then verification.
+    Expected: both present, neither dropped.
+    """
+    from src.services.incident_service import IncidentService
+
+    iid = await make_incident({
+        "incident_id": "INC-VERIFY-1",
+        "extra_metadata": json.dumps({
+            "auto_fix": {"status": "fix_generated", "fix": "diff"},
+        }),
+    })
+
+    svc = IncidentService()
+    await svc.record_verification(iid, {
+        "passed": True,
+        "reason": "tests_passed",
+        "output": "3 passed",
+        "duration_ms": 1200,
+        "attempts": [{"attempt": 1, "passed": True, "output": "3 passed"}],
+        "verifier": "hosted",
+    })
+
+    incident = await svc.get_incident(iid)
+    meta = incident["extra_metadata"]
+    assert meta["auto_fix"]["status"] == "fix_generated"
+    assert meta["verification"]["passed"] is True
+    assert meta["verification"]["reason"] == "tests_passed"
+    assert meta["verification"]["attempts"][0]["attempt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_record_verification_merges_not_overwrites(make_incident):
+    """
+    Situation: verification written twice (retry scenario).
+    Expected: second write replaces the verification key without
+    affecting siblings.
+    """
+    from src.services.incident_service import IncidentService
+
+    iid = await make_incident({
+        "incident_id": "INC-VERIFY-2",
+        "extra_metadata": json.dumps({
+            "code_context": {"file_path": "x.py"},
+            "verification": {"passed": False, "reason": "tests_failed"},
+        }),
+    })
+
+    svc = IncidentService()
+    await svc.record_verification(iid, {
+        "passed": True,
+        "reason": "tests_passed",
+        "verifier": "hosted",
+    })
+
+    incident = await svc.get_incident(iid)
+    meta = incident["extra_metadata"]
+    assert meta["code_context"]["file_path"] == "x.py"
+    assert meta["verification"]["passed"] is True
+    assert meta["verification"]["reason"] == "tests_passed"
+
+
+@pytest.mark.asyncio
+async def test_record_verification_logs_warning_on_missing_row():
+    """
+    Situation: incident_id does not exist.
+    Expected: warning logged, no exception.
+    """
+    from src.services.incident_service import IncidentService
+    from loguru import logger as loguru_logger
+
+    svc = IncidentService()
+    messages = []
+    sink_id = loguru_logger.add(
+        lambda m: messages.append(m.record["message"]),
+        level="WARNING",
+    )
+    try:
+        await svc.record_verification("INC-DOES-NOT-EXIST", {"passed": True})
+    finally:
+        loguru_logger.remove(sink_id)
+
+    assert any("INC-DOES-NOT-EXIST" in m for m in messages)

@@ -133,8 +133,13 @@ class IncidentService:
                 context["incident_id"], context["auto_fix"]
             )
 
-        # Stage 4 — Verifier (Verify). No-op until the sandbox lands.
+        # Stage 4 — Verifier (Verify). Gated by VERIFY_BEFORE_REPORT.
         context.update(await self._stage_verifier(context))
+
+        if context.get("verification"):
+            await self.record_verification(
+                context["incident_id"], context["verification"]
+            )
 
         # Stage 5 — Communicator (Report). Side effects only.
         await self._stage_communicator(context)
@@ -381,18 +386,90 @@ class IncidentService:
 
     async def _stage_verifier(self, context: dict) -> dict:
         """
-        Verify. Currently a no-op stub. The real implementation (sandboxed
-        test execution, retry loop) lands in a follow-up issue.
+        Verify. Runs the auto-fix diff against the repo's own tests in
+        a sandbox, gated by VERIFY_BEFORE_REPORT. The Verifier
+        implementation is selected via get_verifier() — hosted Docker
+        today, phone-home runner later.
 
         Returns:
-            {verified: True, verify_reason: "not_implemented"} — no write,
-            no behavior change to the pipeline. When the real Verifier
-            lands, it adds record_verification to the coordinator.
+            {verification: VerificationResult-as-dict} — the coordinator
+            persists it via record_verification when present.
+
+        No diff, or the feature flag off, returns a result with
+        reason="disabled" or "no_diff" so downstream consumers can
+        tell "verified and passed" from "not verified."
         """
-        return {
-            "verified": True,
-            "verify_reason": "not_implemented",
+        from src.agents.verifier import get_verifier
+
+        auto_fix = context.get("auto_fix") or {}
+        diff = auto_fix.get("fix")
+
+        if not diff:
+            return {"verification": {
+                "passed": False,
+                "reason": "no_diff",
+                "verifier": "n/a",
+            }}
+
+        service = context["service"]
+        language = context.get("language") or self._infer_language(
+            context.get("stack_analysis") or {},
+            service.get("repo_name") or context["service_name"],
+        )
+
+        try:
+            verifier = get_verifier(has_runner=False)
+            result = await verifier.verify(
+                repo_name=service.get("repo_name") or context["service_name"],
+                commit_sha=context.get("commit_sha", "HEAD"),
+                diff=diff,
+                language=language,
+                context=context,
+            )
+        except Exception as e:
+            logger.error(f"Verifier error: {e}")
+            return {"verification": {
+                "passed": False,
+                "reason": "verifier_exception",
+                "verifier": "unknown",
+            }}
+
+        return {"verification": {
+            "passed": result.passed,
+            "reason": result.reason,
+            "output": result.output,
+            "duration_ms": result.duration_ms,
+            "attempts": result.attempts,
+            "verifier": result.verifier,
+        }}
+
+    def _infer_language(self, stack_analysis: dict, repo_name: str) -> str:
+        """
+        Best-effort language inference for the verifier's base-image
+        selection. Falls back to "Python" — the most common language
+        for backend repos and the safest guess when nothing else is
+        available.
+        """
+        file_path = (stack_analysis or {}).get("file_path") or ""
+        suffix_map = {
+            ".py": "Python",
+            ".js": "Node",
+            ".ts": "Node",
+            ".jsx": "Node",
+            ".tsx": "Node",
         }
+        for suffix, language in suffix_map.items():
+            if file_path.endswith(suffix):
+                return language
+
+        # Repo-name hints, matching the demo parser's keyword set.
+        name_lower = (repo_name or "").lower()
+        if "python" in name_lower or name_lower.startswith("py-") or name_lower.endswith("-py"):
+            return "Python"
+        if any(k in name_lower for k in ("node", "-js", "-ts", "web-ts")):
+            return "Node"
+
+        return "Python"
 
     # ------------------------------------------------------------------
     # Stage 5 — Communicator (Report)
@@ -655,6 +732,22 @@ class IncidentService:
         except (TypeError, json.JSONDecodeError):
             return {}
         return loaded if isinstance(loaded, dict) else {}
+    
+    
+    async def record_verification(self, incident_id: str, verification: dict):
+        """Merge the verification result into extra_metadata.verification."""
+        async with get_db_session() as session:
+            existing, found = await self._load_extra_metadata(session, incident_id)
+            if not found:
+                logger.warning(f"record_verification: incident {incident_id} not found")
+                return
+
+            merged = merge_incident_metadata(existing, "verification", verification)
+            await session.execute(
+                text("UPDATE incidents SET extra_metadata = CAST(:m AS jsonb) WHERE incident_id = :id"),
+                {"m": merged, "id": incident_id}
+            )
+            await session.commit()
 
     # ------------------------------------------------------------------
     # Read APIs (unchanged from before 12.1a)
