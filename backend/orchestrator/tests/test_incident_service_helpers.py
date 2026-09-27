@@ -59,14 +59,36 @@ def service():
 def orchestrated(service):
     """Service with all external boundaries stubbed, ready for declare_incident."""
     with patch.object(service, "get_service", new=AsyncMock(return_value=STUB_SERVICE)), \
-         patch.object(service, "save_incident", new=AsyncMock()), \
+         patch.object(service, "_persist_diagnosed_incident", new=AsyncMock()), \
+         patch.object(service, "record_github_context", new=AsyncMock()), \
+         patch.object(service, "record_code_context", new=AsyncMock()), \
+         patch.object(service, "record_related_prs", new=AsyncMock()), \
+         patch.object(service, "record_auto_fix", new=AsyncMock()), \
          patch.object(service, "calculate_blast_radius",
                       new=AsyncMock(return_value={"root": "payment-api",
                                                    "affected": ["payment-api"],
                                                    "count": 1, "severity": "MEDIUM"})):
-        service._llm_mock.analyze_incident = AsyncMock(return_value=STUB_ANALYSIS)
-        service._rag_mock.generate_context_prompt = AsyncMock(return_value="")
-        service._rag_mock.store_incident = AsyncMock()
+        yield service
+        
+
+@pytest.fixture
+def autofix_orchestrated(service, db_session, seeded_services):
+    """
+    Real-DB variant of `orchestrated` for the autofix tests.
+
+    Persistence and record_auto_fix run against the test transaction,
+    so the assertions can check the actual row rather than a mock
+    payload. Only the external boundaries are stubbed: GitHub, LLM
+    analysis, alerts, K8s, WebSocket, and AutoFixService.
+
+    The `seeded_services` fixture provides payment-api with
+    repo_name="payment-service", so declare_incident's fixer block
+    has a real service to look up.
+    """
+    with patch.object(service, "calculate_blast_radius",
+                      new=AsyncMock(return_value={"root": "payment-api",
+                                                   "affected": ["payment-api"],
+                                                   "count": 1, "severity": "MEDIUM"})):
         yield service
 
 
@@ -91,7 +113,13 @@ def _quiet_peripherals():
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_declare_incident_autofix_success_merges_into_metadata(orchestrated):
+async def test_declare_incident_autofix_success_merges_into_metadata(
+    autofix_orchestrated, seeded_services
+):
+    """
+    Real DB: a successful fix from AutoFixService lands in the
+    extra_metadata.auto_fix key on the persisted incident row.
+    """
     autofix_result = {
         "status": "fix_generated",
         "fix": "--- a\n+++ b\n",
@@ -103,7 +131,7 @@ async def test_declare_incident_autofix_success_merges_into_metadata(orchestrate
 
     oncall, alert, k8s, ws, gh = _quiet_peripherals()
     with oncall as OnCall, alert as Alert, k8s as K8s, ws as ws_mock, gh, \
-         patch("src.services.autofix_service.AutoFixService",
+         patch("src.services.incident_service.AutoFixService",
                return_value=fake_autofix):
         OnCall.return_value.get_on_call = AsyncMock(
             return_value={"primary": None, "secondary": None, "tertiary": None})
@@ -112,24 +140,35 @@ async def test_declare_incident_autofix_success_merges_into_metadata(orchestrate
         K8s.return_value.get_deployment_status = AsyncMock(return_value="ok")
         ws_mock.broadcast = AsyncMock()
 
-        await orchestrated.declare_incident(
+        result = await autofix_orchestrated.declare_incident(
             "payment-api", "DB down", stack_trace=STACK
         )
 
     fake_autofix.generate_fix.assert_awaited_once()
-    saved = orchestrated.save_incident.await_args.args[0]
-    metadata = json.loads(saved["extra_metadata"])
-    assert metadata["auto_fix"] == autofix_result
+
+    # Assert against the real row, not a mock payload.
+    incident = await autofix_orchestrated.get_incident(result["incident_id"])
+    assert incident is not None
+    meta = incident["extra_metadata"]
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+    assert meta["auto_fix"] == autofix_result
 
 
 @pytest.mark.asyncio
-async def test_declare_incident_autofix_error_result_not_merged(orchestrated):
+async def test_declare_incident_autofix_error_result_not_merged(
+    autofix_orchestrated, seeded_services
+):
+    """
+    Real DB: when AutoFixService returns {"error": ...}, the row's
+    extra_metadata must NOT have an auto_fix key.
+    """
     fake_autofix = MagicMock()
     fake_autofix.generate_fix = AsyncMock(return_value={"error": "no code found"})
 
     oncall, alert, k8s, ws, gh = _quiet_peripherals()
     with oncall as OnCall, alert as Alert, k8s as K8s, ws as ws_mock, gh, \
-         patch("src.services.autofix_service.AutoFixService",
+         patch("src.services.incident_service.AutoFixService",
                return_value=fake_autofix):
         OnCall.return_value.get_on_call = AsyncMock(
             return_value={"primary": None, "secondary": None, "tertiary": None})
@@ -138,23 +177,32 @@ async def test_declare_incident_autofix_error_result_not_merged(orchestrated):
         K8s.return_value.get_deployment_status = AsyncMock(return_value="ok")
         ws_mock.broadcast = AsyncMock()
 
-        await orchestrated.declare_incident(
+        result = await autofix_orchestrated.declare_incident(
             "payment-api", "DB down", stack_trace=STACK
         )
 
-    saved = orchestrated.save_incident.await_args.args[0]
-    metadata = json.loads(saved["extra_metadata"])
-    assert "auto_fix" not in metadata
+    incident = await autofix_orchestrated.get_incident(result["incident_id"])
+    meta = incident["extra_metadata"]
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+    assert "auto_fix" not in meta
 
 
 @pytest.mark.asyncio
-async def test_declare_incident_autofix_exception_is_swallowed(orchestrated):
+async def test_declare_incident_autofix_exception_is_swallowed(
+    autofix_orchestrated, seeded_services
+):
+    """
+    Real DB: when AutoFixService.generate_fix raises, declare_incident
+    still persists the incident and returns success. The auto_fix key
+    is absent.
+    """
     fake_autofix = MagicMock()
     fake_autofix.generate_fix = AsyncMock(side_effect=RuntimeError("llm down"))
 
     oncall, alert, k8s, ws, gh = _quiet_peripherals()
     with oncall as OnCall, alert as Alert, k8s as K8s, ws as ws_mock, gh, \
-         patch("src.services.autofix_service.AutoFixService",
+         patch("src.services.incident_service.AutoFixService",
                return_value=fake_autofix):
         OnCall.return_value.get_on_call = AsyncMock(
             return_value={"primary": None, "secondary": None, "tertiary": None})
@@ -163,14 +211,16 @@ async def test_declare_incident_autofix_exception_is_swallowed(orchestrated):
         K8s.return_value.get_deployment_status = AsyncMock(return_value="ok")
         ws_mock.broadcast = AsyncMock()
 
-        result = await orchestrated.declare_incident(
+        result = await autofix_orchestrated.declare_incident(
             "payment-api", "DB down", stack_trace=STACK
         )
 
     assert "error" not in result
-    saved = orchestrated.save_incident.await_args.args[0]
-    metadata = json.loads(saved["extra_metadata"])
-    assert "auto_fix" not in metadata
+    incident = await autofix_orchestrated.get_incident(result["incident_id"])
+    meta = incident["extra_metadata"]
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+    assert "auto_fix" not in meta
 
 
 # ===========================================================================
@@ -208,38 +258,6 @@ def test_parse_stack_trace_stores_truncated_trace(service):
     long_trace = "x" * 1000
     result = service._parse_stack_trace(long_trace)
     assert len(result["full_trace"]) == 500
-
-
-# ===========================================================================
-# save_incident_metadata — real DB
-# ===========================================================================
-
-@pytest.mark.asyncio
-async def test_save_incident_metadata_writes_json(service, make_incident, db_session):
-    """Real DB: save_incident_metadata updates the row's extra_metadata."""
-    await make_incident({
-        "incident_id": "INC-META-1",
-        "extra_metadata": "{}",
-    })
-
-    result = await service.save_incident_metadata(
-        "INC-META-1", {"auto_fix": {"status": "approved"}}
-    )
-    assert result == {"status": "updated", "incident_id": "INC-META-1"}
-
-    row = (await db_session.execute(
-        text("SELECT extra_metadata FROM incidents WHERE incident_id = :iid"),
-        {"iid": "INC-META-1"},
-    )).fetchone()
-    meta = row[0] if isinstance(row[0], dict) else json.loads(row[0])
-    assert meta == {"auto_fix": {"status": "approved"}}
-
-
-@pytest.mark.asyncio
-async def test_save_incident_metadata_db_error_returns_error_dict(service, db_error):
-    """db_error forces the UPDATE to fail; service returns error dict."""
-    result = await service.save_incident_metadata("INC-1", {})
-    assert "error" in result
 
 
 # ===========================================================================

@@ -79,12 +79,18 @@ def _mock_db():
 @pytest.fixture
 def service_with_db(service):
     """
-    IncidentService with get_service / save_incident / calculate_blast_radius
-    stubbed. No DB access happens in these tests — declare_incident touches
-    the DB only via get_service and save_incident, both mocked here.
+    IncidentService with get_service / _persist_diagnosed_incident /
+    calculate_blast_radius stubbed, plus all four record_* methods
+    stubbed. No DB access happens in these tests — declare_incident
+    persists via _persist_diagnosed_incident (mocked here) and enriches
+    via the record_* methods (also mocked).
     """
     with patch.object(service, "get_service", new=AsyncMock(return_value=STUB_SERVICE)), \
-         patch.object(service, "save_incident", new=AsyncMock()), \
+         patch.object(service, "_persist_diagnosed_incident", new=AsyncMock()), \
+         patch.object(service, "record_github_context", new=AsyncMock()), \
+         patch.object(service, "record_code_context", new=AsyncMock()), \
+         patch.object(service, "record_related_prs", new=AsyncMock()), \
+         patch.object(service, "record_auto_fix", new=AsyncMock()), \
          patch.object(service, "calculate_blast_radius",
                       new=AsyncMock(return_value={"root": "payment-api",
                                                    "affected": ["payment-api"],
@@ -142,13 +148,20 @@ async def test_declare_incident_unknown_service_returns_error(service):
 
 
 @pytest.mark.asyncio
-async def test_declare_incident_calls_save_incident(service_with_db):
+async def test_declare_incident_persists_before_enrichment(service_with_db):
     """
     Situation: Valid incident declaration.
-    Expected: Calls save_incident with correct data.
+    Expected: _persist_diagnosed_incident is called with the diagnosis
+    data, before any enrichment blocks run.
     Function: src.services.incident_service.IncidentService.declare_incident
     """
-    with patch("src.services.incident_service.OnCallService") as OnCall, \
+    with patch.object(service_with_db, "_persist_diagnosed_incident",
+                      new=AsyncMock()) as mock_persist, \
+         patch.object(service_with_db, "record_github_context", new=AsyncMock()), \
+         patch.object(service_with_db, "record_code_context", new=AsyncMock()), \
+         patch.object(service_with_db, "record_related_prs", new=AsyncMock()), \
+         patch.object(service_with_db, "record_auto_fix", new=AsyncMock()), \
+         patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
          patch("src.services.incident_service.manager") as ws:
@@ -160,8 +173,8 @@ async def test_declare_incident_calls_save_incident(service_with_db):
 
         await service_with_db.declare_incident("payment-api", "DB down")
 
-    service_with_db.save_incident.assert_awaited_once()
-    saved = service_with_db.save_incident.await_args.args[0]
+    mock_persist.assert_awaited_once()
+    saved = mock_persist.await_args.args[0]
     assert saved["service_name"] == "payment-api"
     assert saved["severity"] == "P1"
     assert saved["status"] == "active"
@@ -263,7 +276,7 @@ async def test_declare_incident_parses_stack_trace_into_fields(service_with_db):
             "payment-api", "DB down", stack_trace=STACK_TRACE
         )
 
-    saved = service_with_db.save_incident.await_args.args[0]
+    saved = service_with_db._persist_diagnosed_incident.await_args.args[0]
     assert saved["exception_type"] == "SQLException"
     assert saved["file_path"] == "DBConnection.java"
     assert saved["line_number"] == 88
@@ -308,10 +321,12 @@ async def test_declare_incident_fetches_github_context_when_repo_set(service_wit
 
     fake_github.get_recent_prs.assert_awaited_once_with("payment-service")
     fake_github.get_blame_with_pr.assert_awaited_once()
-    saved = service_with_db.save_incident.await_args.args[0]
-    metadata = json.loads(saved["extra_metadata"])
-    assert "github" in metadata
-    assert metadata["github"]["blame"]["author"] == "eng@acme.com"
+    # GitHub context now lands via record_github_context, not the
+    # initial persist call. Assert on the enrichment call.
+    service_with_db.record_github_context.assert_awaited_once()
+    call_args = service_with_db.record_github_context.await_args
+    _incident_id, github_context = call_args.args
+    assert github_context["blame"]["author"] == "eng@acme.com"
 
 
 @pytest.mark.asyncio
@@ -495,3 +510,159 @@ async def test_declare_incident_rag_failure_is_logged(service_with_db):
         f"Expected 'RAG store error' in logger.error calls, got: {error_calls}"
     )
     assert any("embedding down" in c for c in error_calls)
+    
+# ---------------------------------------------------------------------------
+# record_* methods — read-merge-write semantics
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_record_github_context_preserves_sibling_keys(make_incident):
+    """
+    Situation: extra_metadata already has rag_context_used and reported_by.
+    Expected: record_github_context adds github.* without dropping siblings.
+    """
+    from src.services.incident_service import IncidentService
+
+    iid = await make_incident({
+        "incident_id": "INC-MERGE-1",
+        "extra_metadata": json.dumps({
+            "rag_context_used": True,
+            "reported_by": "alice",
+        }),
+    })
+
+    svc = IncidentService()
+    await svc.record_github_context(iid, {"recent_prs": [{"number": 1}]})
+
+    incident = await svc.get_incident(iid)
+    meta = incident["extra_metadata"]
+    assert meta["rag_context_used"] is True
+    assert meta["reported_by"] == "alice"
+    assert meta["github"]["recent_prs"] == [{"number": 1}]
+
+
+@pytest.mark.asyncio
+async def test_record_related_prs_preserves_github_siblings(make_incident):
+    """
+    Situation: record_github_context ran first and wrote github.blame.
+    Expected: record_related_prs adds github.related_prs without
+    dropping github.blame.
+    """
+    from src.services.incident_service import IncidentService
+
+    iid = await make_incident({
+        "incident_id": "INC-MERGE-2",
+        "extra_metadata": json.dumps({
+            "github": {"blame": {"author": "eng@acme.com"}},
+        }),
+    })
+
+    svc = IncidentService()
+    await svc.record_related_prs(iid, [{"number": 42}])
+
+    incident = await svc.get_incident(iid)
+    meta = incident["extra_metadata"]
+    assert meta["github"]["blame"]["author"] == "eng@acme.com"
+    assert meta["github"]["related_prs"] == [{"number": 42}]
+
+
+@pytest.mark.asyncio
+async def test_record_related_prs_works_when_github_key_absent(make_incident):
+    """
+    Situation: no github key yet.
+    Expected: record_related_prs creates the parent dict.
+    """
+    from src.services.incident_service import IncidentService
+
+    iid = await make_incident({
+        "incident_id": "INC-MERGE-3",
+        "extra_metadata": json.dumps({"rag_context_used": False}),
+    })
+
+    svc = IncidentService()
+    await svc.record_related_prs(iid, [{"number": 7}])
+
+    incident = await svc.get_incident(iid)
+    meta = incident["extra_metadata"]
+    assert meta["rag_context_used"] is False
+    assert meta["github"]["related_prs"] == [{"number": 7}]
+
+
+@pytest.mark.asyncio
+async def test_record_related_prs_overwrites_non_dict_github(make_incident):
+    """
+    Situation: github key exists but is a string (stale/bad data).
+    Expected: record_related_prs replaces it with a dict, no crash.
+    """
+    from src.services.incident_service import IncidentService
+
+    iid = await make_incident({
+        "incident_id": "INC-MERGE-4",
+        "extra_metadata": json.dumps({"github": "not-a-dict"}),
+    })
+
+    svc = IncidentService()
+    await svc.record_related_prs(iid, [{"number": 1}])
+
+    incident = await svc.get_incident(iid)
+    assert incident["extra_metadata"]["github"] == {"related_prs": [{"number": 1}]}
+
+
+@pytest.mark.asyncio
+async def test_record_auto_fix_preserves_code_context(make_incident):
+    """
+    Situation: code_context written first, then auto_fix.
+    Expected: both present, neither dropped.
+    """
+    from src.services.incident_service import IncidentService
+
+    iid = await make_incident({
+        "incident_id": "INC-MERGE-5",
+        "extra_metadata": json.dumps({
+            "code_context": {"file_path": "x.py", "line_number": 42},
+        }),
+    })
+
+    svc = IncidentService()
+    await svc.record_auto_fix(iid, {"status": "fix_generated", "fix": "diff"})
+
+    incident = await svc.get_incident(iid)
+    meta = incident["extra_metadata"]
+    assert meta["code_context"]["file_path"] == "x.py"
+    assert meta["auto_fix"]["status"] == "fix_generated"
+
+
+@pytest.mark.asyncio
+async def test_record_methods_log_warning_on_missing_row(caplog):
+    """
+    Situation: incident_id does not exist.
+    Expected: warning logged, no exception.
+    """
+    from src.services.incident_service import IncidentService
+    from loguru import logger as loguru_logger
+
+    svc = IncidentService()
+
+    messages = []
+    sink_id = loguru_logger.add(lambda m: messages.append(m.record["message"]), level="WARNING")
+    try:
+        await svc.record_code_context("INC-DOES-NOT-EXIST", {"file": "x"})
+    finally:
+        loguru_logger.remove(sink_id)
+
+    assert any("INC-DOES-NOT-EXIST" in m for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_record_method_raises_on_db_error(db_error):
+    """
+    Situation: DB is unreachable.
+    Expected: the record_* method lets the exception propagate — the
+    caller (declare_incident) is responsible for wrapping it.
+    Function: IncidentService.record_github_context
+    """
+    from src.services.incident_service import IncidentService
+
+    svc = IncidentService()
+    with pytest.raises(RuntimeError, match="forced DB error"):
+        await svc.record_github_context("INC-1", {"recent_prs": []})
