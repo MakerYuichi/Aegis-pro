@@ -15,40 +15,79 @@ from src.services.alert_service import AlertService
 from src.config import settings
 from src.websocket import manager
 
+
+def merge_incident_metadata(existing_json, key: str, value) -> str:
+    """
+    Read-merge-write for the extra_metadata JSONB column.
+
+    This is the ONLY correct way to add a key to extra_metadata after
+    the initial INSERT. The previous save_incident_metadata() did a
+    blind `SET extra_metadata = :param`, which silently dropped prior
+    writes — the last writer won. Every record_* method below uses
+    this helper or a sibling with the same shape.
+
+    Args:
+        existing_json: the current extra_metadata value. May be a
+            JSON string, a dict (from SQLAlchemy's JSONB decoding),
+            None, or malformed text. All four are handled.
+        key: a single top-level key. No dotted paths — see
+            record_related_prs for the one legitimate nested case.
+        value: any JSON-serializable value.
+
+    Returns:
+        A JSON string ready for CAST(:m AS jsonb).
+    """
+    if not existing_json:
+        metadata = {}
+    else:
+        if isinstance(existing_json, dict):
+            metadata = existing_json
+        else:
+            try:
+                metadata = json.loads(existing_json)
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+    metadata[key] = value
+    return json.dumps(metadata)
+
+
 class IncidentService:
     def __init__(self):
         self.llm = LLMService()
         self.rag = RAGService()
         logger.info("✅ IncidentService initialized with RAG")
-    
+
     async def declare_incident(self, service_name: str, message: str, stack_trace: str = None, reported_by: str = None) -> dict:
         incident_id = f"INC-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
-        
+
         logger.info(f"🚨 Declaring incident: {incident_id} for service: {service_name}")
-        
+
         service = await self.get_service(service_name)
         if not service:
             return {
                 "error": f"Service '{service_name}' not found",
                 "available_services": await self.list_services()
             }
-        
+
         stack_analysis = None
         if stack_trace:
             stack_analysis = self._parse_stack_trace(stack_trace)
-        
+
         blast_radius = await self.calculate_blast_radius(
             service_name=service_name,
             dependencies=service.get("dependencies", [])
         )
-        
+
         rag_context = await self.rag.generate_context_prompt(message)
         rag_used = bool(rag_context)
         if rag_used:
             logger.info(f"📚 Found similar past incidents for context!")
         else:
             logger.info("📚 No similar past incidents found yet")
-        
+
         analysis = await self.llm.analyze_incident(
             service_name=service_name,
             message=message,
@@ -56,10 +95,13 @@ class IncidentService:
             blast_radius=blast_radius,
             rag_context=rag_context
         )
-        
-        extra_metadata_json = json.dumps({"rag_context_used": rag_used})
+
+        extra_metadata_json = json.dumps({
+            "rag_context_used": rag_used,
+            "reported_by": reported_by if reported_by else None,
+        })
         affected_services_json = json.dumps(blast_radius.get("affected", []))
-        
+
         incident_data = {
             "incident_id": incident_id,
             "service_name": service_name,
@@ -79,14 +121,23 @@ class IncidentService:
             "extra_metadata": extra_metadata_json,
             "affected_services": affected_services_json
         }
-        
-        github_context = {}
-        try:
-            if service.get("repo_name"):
+
+        # Persist the diagnosed incident BEFORE enrichment. This is the
+        # invariant that makes every record_* method below safe to call:
+        # the row exists, so a downstream failure leaves a durable
+        # record of what we knew at diagnosis time, not silence.
+        await self._persist_diagnosed_incident(incident_data)
+
+        # --- Enrichment blocks. Each writes to the row we just persisted. ---
+
+        if service.get("repo_name"):
+            try:
                 github = get_github_service()
-                
-                github_context["recent_prs"] = await github.get_recent_prs(service["repo_name"])
-                
+
+                github_context = {
+                    "recent_prs": await github.get_recent_prs(service["repo_name"])
+                }
+
                 if stack_analysis and stack_analysis.get("file_path"):
                     logger.info(f"🔍 Getting blame for: {stack_analysis['file_path']}:{stack_analysis.get('line_number', 'unknown')}")
                     blame_info = await github.get_blame_with_pr(
@@ -101,100 +152,67 @@ class IncidentService:
                             logger.info(f"🔗 PR #{blame_info.get('pr_number')}: {blame_info.get('pr_title')}")
                     else:
                         logger.warning("⚠️ No blame info found for this file/line")
-                
-                if github_context:
-                    incident_data["extra_metadata"] = json.dumps({
-                        "rag_context_used": rag_used,
-                        "reported_by": reported_by if reported_by else None,
-                        "github": github_context
-                    })
-        except Exception as e:
-            logger.error(f"GitHub integration error: {e}")
-        
+
+                await self.record_github_context(incident_id, github_context)
+            except Exception as e:
+                logger.error(f"GitHub integration error: {e}")
+
         if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
             try:
                 github = get_github_service()
-                
+
                 code_context = await github.get_file_content(
                     repo_name=service["repo_name"],
                     file_path=stack_analysis["file_path"],
                     line_number=stack_analysis.get("line_number", 1)
                 )
-                
+
                 if code_context:
                     logger.info(f"✅ Code context fetched: {code_context.get('file_path')}:{code_context.get('line_number')}")
-                    if incident_data.get("extra_metadata"):
-                        try:
-                            metadata = json.loads(incident_data["extra_metadata"])
-                        except:
-                            metadata = {}
-                    else:
-                        metadata = {}
-                    metadata["code_context"] = code_context
-                    incident_data["extra_metadata"] = json.dumps(metadata)
+                    await self.record_code_context(incident_id, code_context)
             except Exception as e:
                 logger.error(f"Code context error: {e}")
-        
+
         if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
             try:
                 github = get_github_service()
-                
+
                 related_prs = await github.get_related_prs(
                     repo_name=service["repo_name"],
                     file_path=stack_analysis["file_path"],
                     line_number=stack_analysis.get("line_number", 1),
                     limit=5
                 )
-                
+
                 if related_prs:
                     logger.info(f"🔗 Found {len(related_prs)} related PRs for {stack_analysis['file_path']}")
-                    if incident_data.get("extra_metadata"):
-                        try:
-                            metadata = json.loads(incident_data["extra_metadata"])
-                        except:
-                            metadata = {}
-                    else:
-                        metadata = {}
-                    
-                    if "github" not in metadata:
-                        metadata["github"] = {}
-                    metadata["github"]["related_prs"] = related_prs
-                    incident_data["extra_metadata"] = json.dumps(metadata)
+                    await self.record_related_prs(incident_id, related_prs)
             except Exception as e:
                 logger.error(f"Related PRs error: {e}")
-        
+
         if stack_analysis and stack_analysis.get("file_path"):
             try:
-                from src.services.autofix_service import AutoFixService
                 autofix = AutoFixService()
                 fix_result = await autofix.generate_fix({
                     "incident_id": incident_id,
                     "service_name": service_name,
+                    "repo_name": service.get("repo_name"),
                     "file_path": stack_analysis["file_path"],
                     "line_number": stack_analysis.get("line_number"),
                     "exception_type": stack_analysis.get("exception_type"),
                     "root_cause": analysis.get("root_cause")
                 }, require_permission=True)
-                
+
                 if fix_result and not fix_result.get("error"):
-                    if incident_data.get("extra_metadata"):
-                        try:
-                            existing_metadata = json.loads(incident_data["extra_metadata"])
-                        except:
-                            existing_metadata = {}
-                    else:
-                        existing_metadata = {}
-                    
-                    existing_metadata["auto_fix"] = fix_result
-                    incident_data["extra_metadata"] = json.dumps(existing_metadata)
+                    await self.record_auto_fix(incident_id, fix_result)
                     logger.info(f"✅ Auto-fix generated for {incident_id} (waiting for approval)")
                 else:
                     logger.warning(f"⚠️ Auto-fix failed: {fix_result.get('error')}")
             except Exception as e:
                 logger.error(f"Auto-fix error: {e}")
-        
-        await self.save_incident(incident_data)
-        
+
+        # --- Post-enrichment side effects ---
+
         oncall = OnCallService()
         on_call = None
         try:
@@ -203,25 +221,41 @@ class IncidentService:
                 logger.info(f"📋 On-call: {on_call.get('primary', {}).get('name')}")
         except Exception as e:
             logger.error(f"On-call error: {e}")
-        
+
         try:
             alert = AlertService()
             severity = analysis.get('severity', 'P1')
             escalation = await oncall.get_escalation_policy(service_name, severity)
-            await alert.send_alerts({**incident_data, "severity": severity, "title": analysis.get("title")}, on_call, escalation)
+            await alert.send_alerts(
+                {
+                    "incident_id": incident_id,
+                    "service_name": service_name,
+                    "severity": severity,
+                    "title": analysis.get("title"),
+                },
+                on_call,
+                escalation,
+            )
             logger.info(f"📢 Alerts sent for {incident_id}")
         except Exception as e:
             logger.error(f"Alert error: {e}")
-        
+
         try:
             k8s = KubernetesService()
             status = await k8s.get_deployment_status(service_name)
             logger.info(f"☸️ K8s status: {status}")
         except Exception as e:
             logger.error(f"K8s error: {e}")
-        
-        await self.rag.store_incident(incident_data)
-        
+
+        # RAG store is the enrichment step that closes #73. Previously
+        # unguarded, so a failure here returned a 500 to the caller
+        # even though the incident was already persisted and alerts
+        # had already fired. Wrapped now, matching every other block.
+        try:
+            await self.rag.store_incident(incident_data)
+        except Exception as e:
+            logger.error(f"RAG store error: {e}")
+
         try:
             await manager.broadcast({
                 "type": "new_incident",
@@ -234,7 +268,7 @@ class IncidentService:
             })
         except Exception as e:
             logger.error(f"WebSocket broadcast error: {e}")
-        
+
         return {
             "incident_id": incident_id,
             "service": service_name,
@@ -249,7 +283,156 @@ class IncidentService:
             "rag_context_used": rag_used,
             "timestamp": datetime.utcnow().isoformat()
         }
-    
+
+    # ------------------------------------------------------------------
+    # Persistence: INSERT once, then UPDATE per stage
+    # ------------------------------------------------------------------
+
+    async def _persist_diagnosed_incident(self, incident_data: dict):
+        """
+        One-shot INSERT of the incident row. Called exactly once per
+        declare_incident, immediately after diagnosis completes and
+        before any enrichment.
+
+        Named to make that explicit — this is not a general-purpose
+        saver. Enrichment writes go through the record_* methods below.
+        """
+        try:
+            async with get_db_session() as session:
+                await session.execute(
+                    text("""
+                        INSERT INTO incidents (
+                            incident_id, service_name, severity, status, title, description,
+                            stack_trace, exception_type, file_path, line_number,
+                            root_cause, suggested_fix, rollback_command, confidence_score,
+                            declared_at, extra_metadata, affected_services
+                        ) VALUES (
+                            :incident_id, :service_name, :severity, :status, :title, :description,
+                            :stack_trace, :exception_type, :file_path, :line_number,
+                            :root_cause, :suggested_fix, :rollback_command, :confidence_score,
+                            :declared_at, :extra_metadata, :affected_services
+                        )
+                    """),
+                    incident_data
+                )
+                await session.commit()
+                logger.info(f"✅ Incident {incident_data['incident_id']} persisted")
+        except Exception as e:
+            logger.error(f"Error persisting incident: {e}")
+
+    async def _load_extra_metadata(self, session, incident_id: str):
+        """
+        Read the current extra_metadata for an incident. Returns the
+        raw value (str, dict, or None) and whether the row exists.
+        """
+        result = await session.execute(
+            text("SELECT extra_metadata FROM incidents WHERE incident_id = :id"),
+            {"id": incident_id}
+        )
+        row = result.fetchone()
+        if not row:
+            return None, False
+        return row[0], True
+
+    async def record_github_context(self, incident_id: str, github_context: dict):
+        """Merge the GitHub context (recent_prs, blame) into extra_metadata.github."""
+        async with get_db_session() as session:
+            existing, found = await self._load_extra_metadata(session, incident_id)
+            if not found:
+                logger.warning(f"record_github_context: incident {incident_id} not found")
+                return
+
+            # Read-merge-write. Preserve any sibling keys under "github"
+            # that a previous record_* method may have written. This
+            # makes record_github_context and record_related_prs
+            # order-independent.
+            metadata = self._safe_json_load(existing)
+            github = metadata.get("github")
+            if not isinstance(github, dict):
+                github = {}
+            github.update(github_context)
+            metadata["github"] = github
+
+            await session.execute(
+                text("UPDATE incidents SET extra_metadata = CAST(:m AS jsonb) WHERE incident_id = :id"),
+                {"m": json.dumps(metadata), "id": incident_id}
+            )
+            await session.commit()
+
+    async def record_code_context(self, incident_id: str, code_context: dict):
+        """Merge the fetched code context into extra_metadata.code_context."""
+        async with get_db_session() as session:
+            existing, found = await self._load_extra_metadata(session, incident_id)
+            if not found:
+                logger.warning(f"record_code_context: incident {incident_id} not found")
+                return
+
+            merged = merge_incident_metadata(existing, "code_context", code_context)
+            await session.execute(
+                text("UPDATE incidents SET extra_metadata = CAST(:m AS jsonb) WHERE incident_id = :id"),
+                {"m": merged, "id": incident_id}
+            )
+            await session.commit()
+
+    async def record_related_prs(self, incident_id: str, related_prs: list):
+        """
+        Merge related PRs into extra_metadata.github.related_prs.
+
+        Nested one level under "github". Order-independent from
+        record_github_context — both defensively ensure the parent is
+        a dict before writing.
+        """
+        async with get_db_session() as session:
+            existing, found = await self._load_extra_metadata(session, incident_id)
+            if not found:
+                logger.warning(f"record_related_prs: incident {incident_id} not found")
+                return
+
+            metadata = self._safe_json_load(existing)
+            github = metadata.get("github")
+            if not isinstance(github, dict):
+                github = {}
+            github["related_prs"] = related_prs
+            metadata["github"] = github
+
+            await session.execute(
+                text("UPDATE incidents SET extra_metadata = CAST(:m AS jsonb) WHERE incident_id = :id"),
+                {"m": json.dumps(metadata), "id": incident_id}
+            )
+            await session.commit()
+
+    async def record_auto_fix(self, incident_id: str, fix_result: dict):
+        """Merge the auto-fix payload into extra_metadata.auto_fix."""
+        async with get_db_session() as session:
+            existing, found = await self._load_extra_metadata(session, incident_id)
+            if not found:
+                logger.warning(f"record_auto_fix: incident {incident_id} not found")
+                return
+
+            merged = merge_incident_metadata(existing, "auto_fix", fix_result)
+            await session.execute(
+                text("UPDATE incidents SET extra_metadata = CAST(:m AS jsonb) WHERE incident_id = :id"),
+                {"m": merged, "id": incident_id}
+            )
+            await session.commit()
+
+    @staticmethod
+    def _safe_json_load(existing):
+        """Return existing as a dict, or {} if it isn't one."""
+        if not existing:
+            return {}
+        if isinstance(existing, dict):
+            return existing
+        try:
+            loaded = json.loads(existing)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    # ------------------------------------------------------------------
+    # Read APIs (unchanged from before 12.1a)
+    # ------------------------------------------------------------------
+
     async def get_service(self, service_name: str) -> dict:
         try:
             async with get_db_session() as session:
@@ -264,7 +447,7 @@ class IncidentService:
         except Exception as e:
             logger.error(f"Error getting service: {e}")
             return self._mock_service(service_name)
-    
+
     async def list_services(self) -> list:
         try:
             async with get_db_session() as session:
@@ -296,31 +479,7 @@ class IncidentService:
         except Exception as e:
             logger.error(f"Error listing services: {e}")
             return self._mock_services_list()
-    
-    async def save_incident(self, incident_data: dict):
-        try:
-            async with get_db_session() as session:
-                await session.execute(
-                    text("""
-                        INSERT INTO incidents (
-                            incident_id, service_name, severity, status, title, description,
-                            stack_trace, exception_type, file_path, line_number,
-                            root_cause, suggested_fix, rollback_command, confidence_score,
-                            declared_at, extra_metadata, affected_services
-                        ) VALUES (
-                            :incident_id, :service_name, :severity, :status, :title, :description,
-                            :stack_trace, :exception_type, :file_path, :line_number,
-                            :root_cause, :suggested_fix, :rollback_command, :confidence_score,
-                            :declared_at, :extra_metadata, :affected_services
-                        )
-                    """),
-                    incident_data
-                )
-                await session.commit()
-                logger.info(f"✅ Incident {incident_data['incident_id']} saved")
-        except Exception as e:
-            logger.error(f"Error saving incident: {e}")
-    
+
     async def get_incident(self, incident_id: str) -> dict:
         try:
             async with get_db_session() as session:
@@ -346,7 +505,7 @@ class IncidentService:
         except Exception as e:
             logger.error(f"Error getting incident: {e}")
             return None
-    
+
     async def get_all_incidents(self, limit: int = 200) -> list:
         try:
             async with get_db_session() as session:
@@ -413,48 +572,48 @@ class IncidentService:
         except Exception as e:
             logger.error(f"Error getting incidents: {e}")
             return []
-    
+
     async def calculate_blast_radius(self, service_name: str, dependencies: list) -> dict:
         affected: set[str] = set()
         queue = [service_name] + list(dependencies or [])
-        
+
         # Bounded BFS — prevents infinite loops on circular deps.
         max_depth = 10
         seen: set[str] = set()
-        
+
         while queue and len(seen) < max_depth * 10:
             current = queue.pop(0)
             if not current or current in seen:
                 continue
             seen.add(current)
             affected.add(current)
-            
+
             service = await self.get_service(current)
             if service and service.get("dependencies"):
                 for dep in service["dependencies"]:
                     if dep and dep not in seen:
                         queue.append(dep)
-                        
+
         affected_list = sorted(affected)
-        
+
         severity = (
-        "CRITICAL" if len(affected_list) > 5
-        else "HIGH" if len(affected_list) > 2
-        else "MEDIUM"
+            "CRITICAL" if len(affected_list) > 5
+            else "HIGH" if len(affected_list) > 2
+            else "MEDIUM"
         )
-        
+
         return {
             "root": service_name,
             "affected": affected_list,
             "count": len(affected_list),
             "severity": severity
         }
-    
+
     async def rollback(self, incident_id: str) -> dict:
         incident = await self.get_incident(incident_id)
         if not incident:
             return {"error": "Incident not found"}
-        
+
         try:
             async with get_db_session() as session:
                 await session.execute(
@@ -464,7 +623,7 @@ class IncidentService:
                 await session.commit()
         except Exception as e:
             logger.error(f"Error updating incident: {e}")
-        
+
         return {
             "incident_id": incident_id,
             "status": "rollback_initiated",
@@ -472,7 +631,7 @@ class IncidentService:
             "estimated_time": "2 minutes",
             "mock": True
         }
-    
+
     async def seed_services(self) -> dict:
         try:
             async with get_db_session() as session:
@@ -510,7 +669,7 @@ class IncidentService:
         except Exception as e:
             logger.error(f"Error seeding services: {e}")
             return {"status": "error", "message": str(e)}
-    
+
     async def add_service(self, service: dict) -> dict:
         async with get_db_session() as session:
             deps = service.get("dependencies") or []
@@ -533,25 +692,24 @@ class IncidentService:
             )
             await session.commit()
             return {"status": "created", "name": service["name"]}
-    
+
     async def delete_service(self, name: str) -> dict:
         async with get_db_session() as session:
             await session.execute(text("DELETE FROM services WHERE name = :name"), {"name": name})
             await session.commit()
             return {"status": "deleted", "name": name}
-    
+
     def _parse_stack_trace(self, stack_trace: str) -> dict:
         """Parse stack trace - handles multiple formats including Java"""
         import re
-        
+
         result = {
             "exception_type": None,
             "file_path": None,
             "line_number": None,
             "full_trace": stack_trace[:500]
         }
-        
-        # Extract exception type
+
         exception_patterns = [
             r"([A-Za-z]+(?:Exception|Error)):",
             r"([A-Za-z]+(?:Exception|Error))\s+at",
@@ -562,25 +720,17 @@ class IncidentService:
             if exception_match:
                 result["exception_type"] = exception_match.group(1)
                 break
-        
-        # Try multiple patterns for file:line
+
         patterns = [
-            # Java format: at com.example.Class.method(File.java:123)
             r"at\s+[\w.]+\.(\w+)\(([\w./-]+\.\w+):(\d+)\)",
-            # Java format: at File.java:123
             r"at\s+([\w./-]+\.\w+):(\d+)",
-            # Python format: File "file.py", line 123
             r'File "([^"]+)", line (\d+)',
-            # Simple format: file.py:123
             r"([\w./-]+\.\w+):(\d+)",
-            # Java class format: ClassName.java:123
             r"([A-Z][a-zA-Z]+\.java):(\d+)",
-            # Service format: DBConnection.java:123
             r"([A-Za-z]+\.java):(\d+)",
-            # No extension: AuthService:123
             r"([A-Za-z]+Service):(\d+)",
         ]
-        
+
         for pattern in patterns:
             match = re.search(pattern, stack_trace)
             if match:
@@ -591,8 +741,7 @@ class IncidentService:
                     result["file_path"] = match.group(1)
                     result["line_number"] = int(match.group(2))
                 break
-        
-        # If still not found, try to extract any file:line pattern
+
         if not result["file_path"]:
             patterns = [
                 r'([A-Za-z]+\.java):(\d+)',
@@ -606,13 +755,12 @@ class IncidentService:
                     result["file_path"] = match.group(1)
                     result["line_number"] = int(match.group(2))
                     break
-        
-        # Clean up file path
+
         if result["file_path"] and " " in result["file_path"]:
             result["file_path"] = result["file_path"].strip()
-        
+
         return result
-    
+
     def _mock_service(self, service_name: str) -> dict:
         services = {
             "payment-api": {"name": "payment-api", "on_call": ["@marcus", "@prisha"], "dependencies": ["auth", "ledger", "fraud"]},
@@ -625,7 +773,7 @@ class IncidentService:
             "database": {"name": "database", "on_call": ["@rina", "@youssef"], "dependencies": []}
         }
         return services.get(service_name, {"name": service_name, "on_call": [], "dependencies": []})
-    
+
     def _mock_services_list(self) -> list:
         return [
             {"name": "payment-api",  "description": "Payment processing — cards, wallets, bank transfers", "on_call": ["@marcus", "@prisha"], "dependencies": ["auth", "ledger", "fraud"], "is_critical": True},
@@ -637,42 +785,21 @@ class IncidentService:
             {"name": "user",         "description": "User profile and KYC management",                      "on_call": ["@kenji"],            "dependencies": [],                           "is_critical": False},
             {"name": "database",     "description": "Database operations and migrations",                   "on_call": ["@rina", "@youssef"], "dependencies": [],                           "is_critical": True},
         ]
-    
-    async def save_incident_metadata(self, incident_id: str, extra_metadata: dict) -> dict:
-        try:
-            async with get_db_session() as session:
-                await session.execute(
-                    text("""
-                        UPDATE incidents 
-                        SET extra_metadata = CAST(:extra_metadata AS jsonb)
-                        WHERE incident_id = :incident_id
-                    """),
-                    {
-                        "extra_metadata": json.dumps(extra_metadata),
-                        "incident_id": incident_id
-                    }
-                )
-                await session.commit()
-                logger.info(f"✅ Updated metadata for {incident_id}")
-                return {"status": "updated", "incident_id": incident_id}
-        except Exception as e:
-            logger.error(f"Error updating incident metadata: {e}")
-            return {"error": str(e)}
-    
+
     async def update_incident(self, incident_id: str, update_data: dict) -> dict:
         try:
             async with get_db_session() as session:
                 from sqlalchemy import update
                 from src.models import Incident
-                
+
                 stmt = update(Incident).where(Incident.incident_id == incident_id)
-                
+
                 for key, value in update_data.items():
                     stmt = stmt.values({key: value})
-                
+
                 result = await session.execute(stmt.returning(Incident.incident_id))
                 await session.commit()
-                
+
                 row = result.fetchone()
                 if row:
                     logger.info(f"✅ Updated incident {incident_id}")
