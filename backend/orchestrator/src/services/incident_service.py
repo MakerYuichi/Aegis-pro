@@ -60,7 +60,105 @@ class IncidentService:
         self.rag = get_rag_service()
         logger.info("✅ IncidentService initialized with RAG (singleton)")
     
-    async def declare_incident(self, service_name: str, message: str, stack_trace: str = None, reported_by: str = None) -> dict:
+    async def declare_incident(
+        self,
+        service_name: str,
+        message: str,
+        stack_trace: str = None,
+        reported_by: str = None,
+    ) -> dict:
+        """
+        Coordinator for the incident pipeline.
+
+        Six named stages, in order:
+
+          1. Watcher      — perceive: service lookup, stack parse, blast radius
+          2. Investigator — reason:  RAG context, LLM analysis, GitHub context
+          3. Fixer        — act:     auto-fix diff, code context
+          4. Verifier     — verify:  (stub, lands in a follow-up)
+          5. Communicator — report:  on-call, alerts, K8s, WebSocket
+          6. Curator      — learn:   RAG store
+
+        The coordinator owns all writes. Each stage is a pure function
+        of its inputs — no DB access, no direct persistence — so each
+        stage can be tested in isolation.
+
+        Inputs to later stages include everything earlier stages
+        produced. Each stage returns only the keys it newly produces.
+        No stage returns a key some earlier stage already owns.
+        """
+        context = {
+            "service_name": service_name,
+            "message": message,
+            "stack_trace": stack_trace,
+            "reported_by": reported_by,
+        }
+
+        # Stage 1 — Watcher (Perceive)
+        context.update(await self._stage_watcher(context))
+        if context.get("error"):
+            return context
+
+        # Stage 2 — Investigator (Reason)
+        context.update(await self._stage_investigator(context))
+
+        # Persist the diagnosed incident before any enrichment. This is
+        # the invariant that makes every record_* call below safe: the
+        # row exists, so a downstream failure leaves a durable record of
+        # what we knew at diagnosis time, not silence.
+        await self._persist_diagnosed_incident(context["incident_data"])
+
+        # --- Writes owned by the coordinator, sourced from each stage ---
+
+        if context.get("github_context"):
+            await self.record_github_context(
+                context["incident_id"], context["github_context"]
+            )
+
+        if context.get("related_prs"):
+            await self.record_related_prs(
+                context["incident_id"], context["related_prs"]
+            )
+
+        # Stage 3 — Fixer (Act)
+        context.update(await self._stage_fixer(context))
+
+        if context.get("code_context"):
+            await self.record_code_context(
+                context["incident_id"], context["code_context"]
+            )
+
+        if context.get("auto_fix"):
+            await self.record_auto_fix(
+                context["incident_id"], context["auto_fix"]
+            )
+
+        # Stage 4 — Verifier (Verify). No-op until the sandbox lands.
+        context.update(await self._stage_verifier(context))
+
+        # Stage 5 — Communicator (Report). Side effects only.
+        await self._stage_communicator(context)
+
+        # Stage 6 — Curator (Learn). Side effects only.
+        await self._stage_curator(context)
+
+        return self._build_response(context)
+
+    # ------------------------------------------------------------------
+    # Stage 1 — Watcher (Perceive)
+    # ------------------------------------------------------------------
+
+    async def _stage_watcher(self, context: dict) -> dict:
+        """
+        Perceive. Look up the service, parse the stack trace, compute
+        blast radius, assign an incident ID.
+
+        Returns:
+            On success: {incident_id, service, stack_analysis, blast_radius}
+            On service-not-found: {error, available_services}
+        """
+        service_name = context["service_name"]
+        stack_trace = context.get("stack_trace")
         incident_id = f"INC-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
         logger.info(f"🚨 Declaring incident: {incident_id} for service: {service_name}")
@@ -69,7 +167,7 @@ class IncidentService:
         if not service:
             return {
                 "error": f"Service '{service_name}' not found",
-                "available_services": await self.list_services()
+                "available_services": await self.list_services(),
             }
 
         stack_analysis = None
@@ -78,13 +176,41 @@ class IncidentService:
 
         blast_radius = await self.calculate_blast_radius(
             service_name=service_name,
-            dependencies=service.get("dependencies", [])
+            dependencies=service.get("dependencies", []),
         )
+
+        return {
+            "incident_id": incident_id,
+            "service": service,
+            "stack_analysis": stack_analysis,
+            "blast_radius": blast_radius,
+        }
+
+    # ------------------------------------------------------------------
+    # Stage 2 — Investigator (Reason)
+    # ------------------------------------------------------------------
+
+    async def _stage_investigator(self, context: dict) -> dict:
+        """
+        Reason. Pull RAG context, run the LLM analysis, fetch GitHub
+        context (recent PRs, blame) and related PRs. Does not write
+        anything — the coordinator persists what this stage returns.
+
+        Returns:
+            {analysis, rag_used, incident_data, github_context, related_prs}
+        """
+        service_name = context["service_name"]
+        message = context["message"]
+        reported_by = context.get("reported_by")
+        service = context["service"]
+        stack_analysis = context.get("stack_analysis")
+        blast_radius = context["blast_radius"]
+        incident_id = context["incident_id"]
 
         rag_context = await self.rag.generate_context_prompt(message)
         rag_used = bool(rag_context)
         if rag_used:
-            logger.info(f"📚 Found similar past incidents for context!")
+            logger.info("📚 Found similar past incidents for context!")
         else:
             logger.info("📚 No similar past incidents found yet")
 
@@ -93,14 +219,8 @@ class IncidentService:
             message=message,
             stack_analysis=stack_analysis,
             blast_radius=blast_radius,
-            rag_context=rag_context
+            rag_context=rag_context,
         )
-
-        extra_metadata_json = json.dumps({
-            "rag_context_used": rag_used,
-            "reported_by": reported_by if reported_by else None,
-        })
-        affected_services_json = json.dumps(blast_radius.get("affected", []))
 
         incident_data = {
             "incident_id": incident_id,
@@ -109,7 +229,7 @@ class IncidentService:
             "status": "active",
             "title": analysis.get("title", f"{service_name} incident"),
             "description": message,
-            "stack_trace": stack_trace,
+            "stack_trace": context.get("stack_trace"),
             "exception_type": stack_analysis.get("exception_type") if stack_analysis else None,
             "file_path": stack_analysis.get("file_path") if stack_analysis else None,
             "line_number": stack_analysis.get("line_number") if stack_analysis else None,
@@ -118,17 +238,15 @@ class IncidentService:
             "rollback_command": analysis.get("rollback_command", ""),
             "confidence_score": analysis.get("confidence", 0.7),
             "declared_at": datetime.utcnow(),
-            "extra_metadata": extra_metadata_json,
-            "affected_services": affected_services_json
+            "extra_metadata": json.dumps({
+                "rag_context_used": rag_used,
+                "reported_by": reported_by if reported_by else None,
+            }),
+            "affected_services": json.dumps(blast_radius.get("affected", [])),
         }
 
-        # Persist the diagnosed incident BEFORE enrichment. This is the
-        # invariant that makes every record_* method below safe to call:
-        # the row exists, so a downstream failure leaves a durable
-        # record of what we knew at diagnosis time, not silence.
-        await self._persist_diagnosed_incident(incident_data)
-
-        # --- Enrichment blocks. Each writes to the row we just persisted. ---
+        github_context = None
+        related_prs = None
 
         if service.get("repo_name"):
             try:
@@ -139,92 +257,171 @@ class IncidentService:
                 }
 
                 if stack_analysis and stack_analysis.get("file_path"):
-                    logger.info(f"🔍 Getting blame for: {stack_analysis['file_path']}:{stack_analysis.get('line_number', 'unknown')}")
+                    logger.info(
+                        f"🔍 Getting blame for: {stack_analysis['file_path']}:"
+                        f"{stack_analysis.get('line_number', 'unknown')}"
+                    )
                     blame_info = await github.get_blame_with_pr(
                         service["repo_name"],
                         stack_analysis["file_path"],
-                        stack_analysis.get("line_number", 1)
+                        stack_analysis.get("line_number", 1),
                     )
                     if blame_info:
                         github_context["blame"] = blame_info
-                        logger.info(f"✅ Blame found: {blame_info.get('author')} - {blame_info.get('message')[:50]}")
-                        if blame_info.get('pr_number'):
-                            logger.info(f"🔗 PR #{blame_info.get('pr_number')}: {blame_info.get('pr_title')}")
+                        logger.info(
+                            f"✅ Blame found: {blame_info.get('author')} - "
+                            f"{blame_info.get('message')[:50]}"
+                        )
                     else:
                         logger.warning("⚠️ No blame info found for this file/line")
-
-                await self.record_github_context(incident_id, github_context)
             except Exception as e:
                 logger.error(f"GitHub integration error: {e}")
 
         if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
             try:
                 github = get_github_service()
-
-                code_context = await github.get_file_content(
-                    repo_name=service["repo_name"],
-                    file_path=stack_analysis["file_path"],
-                    line_number=stack_analysis.get("line_number", 1)
-                )
-
-                if code_context:
-                    logger.info(f"✅ Code context fetched: {code_context.get('file_path')}:{code_context.get('line_number')}")
-                    await self.record_code_context(incident_id, code_context)
-            except Exception as e:
-                logger.error(f"Code context error: {e}")
-
-        if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
-            try:
-                github = get_github_service()
-
                 related_prs = await github.get_related_prs(
                     repo_name=service["repo_name"],
                     file_path=stack_analysis["file_path"],
                     line_number=stack_analysis.get("line_number", 1),
-                    limit=5
+                    limit=5,
                 )
-
                 if related_prs:
-                    logger.info(f"🔗 Found {len(related_prs)} related PRs for {stack_analysis['file_path']}")
-                    await self.record_related_prs(incident_id, related_prs)
+                    logger.info(
+                        f"🔗 Found {len(related_prs)} related PRs for "
+                        f"{stack_analysis['file_path']}"
+                    )
+                else:
+                    related_prs = None
             except Exception as e:
                 logger.error(f"Related PRs error: {e}")
 
-        if stack_analysis and stack_analysis.get("file_path"):
+        return {
+            "analysis": analysis,
+            "rag_used": rag_used,
+            "incident_data": incident_data,
+            "github_context": github_context,
+            "related_prs": related_prs,
+        }
+
+    # ------------------------------------------------------------------
+    # Stage 3 — Fixer (Act)
+    # ------------------------------------------------------------------
+
+    async def _stage_fixer(self, context: dict) -> dict:
+        """
+        Act. Fetch code context (once) and generate the auto-fix diff.
+        Both writes are performed by the coordinator; this stage just
+        produces the data.
+
+        Returns:
+            {code_context, auto_fix} — either key may be absent.
+        """
+        service = context["service"]
+        service_name = context["service_name"]
+        stack_analysis = context.get("stack_analysis")
+        analysis = context["analysis"]
+        incident_id = context["incident_id"]
+
+        result = {}
+
+        if not (stack_analysis and stack_analysis.get("file_path")):
+            return result
+
+        # Fetch code context once. The Fixer needs it for its prompt;
+        # we also record it for the dashboard. Previously the pipeline
+        # fetched this twice — once here, once inside AutoFixService.
+        if service.get("repo_name"):
             try:
-                autofix = AutoFixService()
-                fix_result = await autofix.generate_fix({
+                github = get_github_service()
+                code_context = await github.get_file_content(
+                    repo_name=service["repo_name"],
+                    file_path=stack_analysis["file_path"],
+                    line_number=stack_analysis.get("line_number", 1),
+                )
+                if code_context:
+                    logger.info(
+                        f"✅ Code context fetched: {code_context.get('file_path')}:"
+                        f"{code_context.get('line_number')}"
+                    )
+                    result["code_context"] = code_context
+            except Exception as e:
+                logger.error(f"Code context error: {e}")
+
+        try:
+            autofix = AutoFixService()
+            fix_result = await autofix.generate_fix(
+                {
                     "incident_id": incident_id,
                     "service_name": service_name,
                     "repo_name": service.get("repo_name"),
                     "file_path": stack_analysis["file_path"],
                     "line_number": stack_analysis.get("line_number"),
                     "exception_type": stack_analysis.get("exception_type"),
-                    "root_cause": analysis.get("root_cause")
-                }, require_permission=True)
+                    "root_cause": analysis.get("root_cause"),
+                },
+                require_permission=True,
+            )
 
-                if fix_result and not fix_result.get("error"):
-                    await self.record_auto_fix(incident_id, fix_result)
-                    logger.info(f"✅ Auto-fix generated for {incident_id} (waiting for approval)")
-                else:
-                    logger.warning(f"⚠️ Auto-fix failed: {fix_result.get('error')}")
-            except Exception as e:
-                logger.error(f"Auto-fix error: {e}")
+            if fix_result and not fix_result.get("error"):
+                result["auto_fix"] = fix_result
+                logger.info(
+                    f"✅ Auto-fix generated for {incident_id} (waiting for approval)"
+                )
+            else:
+                logger.warning(f"⚠️ Auto-fix failed: {fix_result.get('error')}")
+        except Exception as e:
+            logger.error(f"Auto-fix error: {e}")
 
-        # --- Post-enrichment side effects ---
+        return result
+
+    # ------------------------------------------------------------------
+    # Stage 4 — Verifier (Verify)
+    # ------------------------------------------------------------------
+
+    async def _stage_verifier(self, context: dict) -> dict:
+        """
+        Verify. Currently a no-op stub. The real implementation (sandboxed
+        test execution, retry loop) lands in a follow-up issue.
+
+        Returns:
+            {verified: True, verify_reason: "not_implemented"} — no write,
+            no behavior change to the pipeline. When the real Verifier
+            lands, it adds record_verification to the coordinator.
+        """
+        return {
+            "verified": True,
+            "verify_reason": "not_implemented",
+        }
+
+    # ------------------------------------------------------------------
+    # Stage 5 — Communicator (Report)
+    # ------------------------------------------------------------------
+
+    async def _stage_communicator(self, context: dict) -> None:
+        """
+        Report. Page on-call, send alerts, check K8s, broadcast over
+        WebSocket. All side effects — returns nothing. Each block is
+        wrapped in its own try/except so a failure in one doesn't
+        affect the others.
+        """
+        service_name = context["service_name"]
+        service = context["service"]
+        analysis = context["analysis"]
+        incident_id = context["incident_id"]
 
         oncall = OnCallService()
         on_call = None
         try:
             on_call = await oncall.get_on_call(service_name)
-            if on_call and not on_call.get('error'):
+            if on_call and not on_call.get("error"):
                 logger.info(f"📋 On-call: {on_call.get('primary', {}).get('name')}")
         except Exception as e:
             logger.error(f"On-call error: {e}")
 
         try:
             alert = AlertService()
-            severity = analysis.get('severity', 'P1')
+            severity = analysis.get("severity", "P1")
             escalation = await oncall.get_escalation_policy(service_name, severity)
             await alert.send_alerts(
                 {
@@ -247,15 +444,6 @@ class IncidentService:
         except Exception as e:
             logger.error(f"K8s error: {e}")
 
-        # RAG store is the enrichment step that closes #73. Previously
-        # unguarded, so a failure here returned a 500 to the caller
-        # even though the incident was already persisted and alerts
-        # had already fired. Wrapped now, matching every other block.
-        try:
-            await self.rag.store_incident(incident_data)
-        except Exception as e:
-            logger.error(f"RAG store error: {e}")
-
         try:
             await manager.broadcast({
                 "type": "new_incident",
@@ -263,14 +451,52 @@ class IncidentService:
                     "incident_id": incident_id,
                     "service_name": service_name,
                     "severity": analysis.get("severity"),
-                    "title": analysis.get("title")
-                }
+                    "title": analysis.get("title"),
+                },
             })
         except Exception as e:
             logger.error(f"WebSocket broadcast error: {e}")
 
+    # ------------------------------------------------------------------
+    # Stage 6 — Curator (Learn)
+    # ------------------------------------------------------------------
+
+    async def _stage_curator(self, context: dict) -> None:
+        """
+        Learn. Store the incident embedding so future diagnoses can
+        retrieve it. Wrapped in try/except — a RAG failure must not
+        return a 500 to a caller whose incident is already persisted
+        and whose alerts have already fired. Closes #73.
+
+        When the fix_outcomes table lands, the Curator stage also
+        writes the approve/reject outcome here.
+        """
+        incident_data = context["incident_data"]
+
+        try:
+            await self.rag.store_incident(incident_data)
+        except Exception as e:
+            logger.error(f"RAG store error: {e}")
+
+    # ------------------------------------------------------------------
+    # Response builder
+    # ------------------------------------------------------------------
+
+    def _build_response(self, context: dict) -> dict:
+        """
+        Assemble the public response dict from the accumulated context.
+
+        Kept as a method rather than an inline literal so the shape of
+        the response is visible in one place and can be tested without
+        running the pipeline.
+        """
+        service_name = context["service_name"]
+        service = context["service"]
+        analysis = context["analysis"]
+        blast_radius = context["blast_radius"]
+
         return {
-            "incident_id": incident_id,
+            "incident_id": context["incident_id"],
             "service": service_name,
             "severity": analysis.get("severity"),
             "title": analysis.get("title"),
@@ -280,9 +506,10 @@ class IncidentService:
             "rollback_command": analysis.get("rollback_command"),
             "confidence": analysis.get("confidence"),
             "blast_radius": blast_radius,
-            "rag_context_used": rag_used,
-            "timestamp": datetime.utcnow().isoformat()
+            "rag_context_used": context.get("rag_used", False),
+            "timestamp": datetime.utcnow().isoformat(),
         }
+
 
     # ------------------------------------------------------------------
     # Persistence: INSERT once, then UPDATE per stage
