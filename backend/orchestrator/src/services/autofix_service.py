@@ -29,7 +29,11 @@ class AutoFixService:
             if not file_path or not line_number:
                 return {"error": "Missing file path or line number"}
 
-            repo_name = "fastapi" # TODO(#20)
+            repo_name = incident_data.get("repo_name")
+            if not repo_name:
+                return {
+                    "error": "Missing repo_name — cannot generate fix without a target repository"
+                }
             code_context = await self.github.get_file_content(
                 repo_name=repo_name,
                 file_path=file_path,
