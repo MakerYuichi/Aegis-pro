@@ -46,7 +46,7 @@ STACK_TRACE = (
 def service():
     """IncidentService with LLM and RAG stubbed out."""
     with patch("src.services.incident_service.LLMService") as llm_cls, \
-         patch("src.services.incident_service.RAGService") as rag_cls:
+         patch("src.services.incident_service.get_rag_service") as rag_cls:
         llm = MagicMock()
         llm.analyze_incident = AsyncMock(return_value=STUB_ANALYSIS)
         llm_cls.return_value = llm
