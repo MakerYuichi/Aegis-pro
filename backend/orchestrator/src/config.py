@@ -63,6 +63,26 @@ class Settings(BaseSettings):
     VERIFY_MAX_ATTEMPTS: int = 2
     VERIFY_DOCKER_IMAGE_PYTHON: str = "python:3.11-slim"
     VERIFY_DOCKER_IMAGE_NODE: str = "node:20-slim"
+    
+    # Verifier work directory.
+    # The verifier clones the target repo into VERIFIER_HOST_WORKDIR/<uuid>
+    # on the host, then asks the Docker daemon to bind-mount that path
+    # into the sandbox container. Because the daemon interprets paths
+    # against the HOST filesystem — not against the orchestrator's own
+    # filesystem — this value must be the host-side absolute path of the
+    # bind mount declared in docker-compose.yml.
+    #
+    # In docker-compose.yml the mount is:
+    #     ./verifier-workdir:/verifier-workdir
+    # so the host-side path is the absolute path of ./verifier-workdir
+    # on the machine running docker-compose.
+    #
+    # Default is a Linux path that works in the standard compose layout.
+    # Override in .env for Docker Desktop (Mac/Windows) or a custom layout.
+    VERIFIER_HOST_WORKDIR: str = "/var/lib/aegis/verifier-workdir"
+    VERIFIER_CONTAINER_WORKDIR: str = "/verifier-workdir"
+    VERIFIER_MEMORY_LIMIT: str = "1g"
+    VERIFIER_CPU_LIMIT: str = "1"
 
     # Kubernetes (optional)
     K8S_API_URL: Optional[str] = None
