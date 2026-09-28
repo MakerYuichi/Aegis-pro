@@ -37,20 +37,25 @@ services:
   # equivalent to root on the host — the container could start
   # privileged containers, mount arbitrary host paths, run as any user.
   #
-  # That tradeoff is bad in general; it's worse here because the
-  # verifier runs unreviewed, AI-generated code. A sandbox escape from
-  # the verifier's sibling container, combined with raw daemon access
-  # on the orchestrator, would mean full host compromise.
+  # This proxy exposes a narrower API surface than the raw socket:
+  # container create/start/exec/attach/logs and image pull are allowed;
+  # volumes, networks, build, secrets, swarm, and system endpoints are
+  # not. That's meaningful reduction.
   #
-  # This proxy exposes only the endpoints the verifier needs and
-  # blocks everything else. Cannot mount host paths, cannot create
-  # volumes, cannot run privileged containers.
+  # It is NOT a sandbox. Tecnativa filters by endpoint and HTTP method,
+  # not by request body — a POST /containers/create with
+  # "Privileged": true would still go through. The proxy is
+  # defense-in-depth on top of the verifier's own argv discipline
+  # (see _run_in_docker in src/agents/verifier.py, where every docker
+  # run argument is asserted to come from config or generated values,
+  # never from customer input).
   #
-  # NOT safe for multi-tenant production. The production answer is to
-  # run verification on the customer's own infrastructure via a
+  # Not safe for multi-tenant production. The correct answer there is
+  # to run verification on the customer's own infrastructure via a
   # phone-home runner reached over an API — not by giving the
   # orchestrator a Docker daemon socket. That path is designed but not
   # yet implemented. See issue #101.
+  
   docker-proxy:
     image: tecnativa/docker-socket-proxy:v0.4.2
     container_name: aegis-docker-proxy
@@ -75,6 +80,7 @@ services:
   orchestrator:
     build: ./backend/orchestrator
     container_name: aegis-orchestrator
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     ports:
       - "8000:8000"
     env_file:

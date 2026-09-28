@@ -69,3 +69,4 @@ tmp/
 *.tfstate
 *.tfstate.*
 .terraform/
+verifier-workdir/

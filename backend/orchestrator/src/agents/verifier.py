@@ -425,6 +425,23 @@ async def _run_in_docker(
     container_relative = host_workdir.name
     host_path = f"{settings.VERIFIER_HOST_WORKDIR.rstrip('/')}/{container_relative}"
     container_path = f"{container_workdir}/{container_relative}/repo"
+    
+    # Every argument in argv comes from a trusted source:
+    #   - "docker", "run", "--rm", "--network", "none", "--memory",
+    #     "--cpus", "-v", "-w", "sh", "-c"  — hardcoded
+    #   - memory_limit, cpu_limit            — settings
+    #   - host_path                          — settings + uuid4().hex[:12]
+    #   - container_path                     — settings + the same uuid
+    #   - image                              — one of two config values
+    #                                           (VERIFY_DOCKER_IMAGE_*)
+    #   - command                            — one of the hardcoded strings
+    #                                           in _detect_runner
+    #
+    # No user input (repo name, diff, stack trace) flows into argv. The
+    # diff is written to a file and mounted as data; the repo URL is
+    # used by `git clone` on the host, never by `docker run`. If you add
+    # a new argument here, it must come from config or a generated
+    # value — never from customer input.
     argv = [
         "docker", "run", "--rm",
         "--network", "none",
