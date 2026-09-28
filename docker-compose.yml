@@ -30,22 +30,64 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # Docker socket proxy.
+  #
+  # The verifier needs to start and stop throwaway containers. Giving
+  # the orchestrator direct access to /var/run/docker.sock would be
+  # equivalent to root on the host — the container could start
+  # privileged containers, mount arbitrary host paths, run as any user.
+  #
+  # That tradeoff is bad in general; it's worse here because the
+  # verifier runs unreviewed, AI-generated code. A sandbox escape from
+  # the verifier's sibling container, combined with raw daemon access
+  # on the orchestrator, would mean full host compromise.
+  #
+  # This proxy exposes only the endpoints the verifier needs and
+  # blocks everything else. Cannot mount host paths, cannot create
+  # volumes, cannot run privileged containers.
+  #
+  # NOT safe for multi-tenant production. The production answer is to
+  # run verification on the customer's own infrastructure via a
+  # phone-home runner reached over an API — not by giving the
+  # orchestrator a Docker daemon socket. That path is designed but not
+  # yet implemented. See issue #101.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    container_name: aegis-docker-proxy
+    environment:
+      # Endpoints the verifier needs.
+      CONTAINERS: "1"   # create, start, kill, remove, list
+      IMAGES: "1"       # pull base images
+      POST: "1"         # allow the mutating verbs above
+      EXEC: "1"         # exec into a container
+      ATTACH: "1"       # stream stdout/stderr from `docker run`
+      LOGS: "1"         # `docker logs` for post-hoc capture
+      # Explicitly blocked (defaults; listed for clarity).
+      VOLUMES: "0"      # cannot create arbitrary volumes
+      NETWORKS: "0"     # cannot attach to other networks
+      INFO: "0"         # cannot enumerate host-level Docker state
+      SYSTEM: "0"       # cannot call docker system *
+      SWARM: "0"        # not a swarm deployment
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
   orchestrator:
     build: ./backend/orchestrator
     container_name: aegis-orchestrator
     ports:
       - "8000:8000"
-    # Base env from the developer's local .env; overridable by the shell.
     env_file:
       - ./backend/orchestrator/.env
-    # Shell env wins over env_file. Set these before `docker-compose up`
-    # or pass --env-file demo.env to run in demo mode without touching .env.
     environment:
       DEMO_MODE: ${DEMO_MODE:-false}
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       LLM_FALLBACKS: ${LLM_FALLBACKS-gemini,openrouter}
       AUTO_FIX_MODE: ${AUTO_FIX_MODE:-read_only}
       ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      # Talk to the Docker daemon via the socket proxy — never the
+      # raw /var/run/docker.sock.
+      DOCKER_HOST: tcp://docker-proxy:2375
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,6 +97,12 @@ services:
       - ./backend/orchestrator:/app
       - /app/__pycache__
       - ./database:/database:ro
+      # Verifier workdir. Shared between the host and the container
+      # so the orchestrator can hand the daemon a path that resolves
+      # on the host. The daemon interprets -v paths against the host,
+      # not against this container — see the Docker-out-of-Docker
+      # note in src/agents/verifier.py.
+      - ./verifier-workdir:/verifier-workdir
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
 
