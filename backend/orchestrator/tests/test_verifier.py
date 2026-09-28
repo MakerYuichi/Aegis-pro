@@ -152,24 +152,3 @@ def test_get_verifier_runner_raises_even_when_disabled():
     with pytest.raises(ValueError):
         get_verifier(has_runner=True)
 
-
-# ---------------------------------------------------------------------------
-# HostedVerifier is a deliberate stub in this commit
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_hosted_verifier_not_implemented_yet():
-    """
-    Documents the commit-5 scope. When the real implementation lands,
-    this test is deleted or updated; until then it pins the behavior
-    so a caller that reaches HostedVerifier.verify before commit 5
-    gets a clear NotImplementedError rather than a silent no-op.
-    """
-    v = HostedVerifier()
-    with pytest.raises(NotImplementedError, match="HostedVerifier"):
-        await v.verify(
-            repo_name="owner/repo",
-            commit_sha="HEAD",
-            diff="--- a\n+++ b\n",
-            language="Python",
-        )
