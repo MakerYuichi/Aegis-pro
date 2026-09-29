@@ -321,12 +321,16 @@ class RAGService:
                 query, service_name, limit
             )
 
-            if len(results) < limit and repo_name:
-                seen_ids = {r["id"] for r in results}
-                fallback = await self._search_outcomes_by_repo(
-                    query, repo_name, limit, exclude_ids=seen_ids
+            # Fallback is for "same-service has nothing," not "same-service
+            # has less than we wanted." Mixing same-service and same-repo
+            # results in one set dilutes the strong signal — the caller
+            # can't tell which results came from which scope. Prefer
+            # same-service exclusively; fall back to same-repo only when
+            # same-service returned nothing.
+            if not results and repo_name:
+                results = await self._search_outcomes_by_repo(
+                    query, repo_name, limit, exclude_ids=set()
                 )
-                results.extend(fallback)
 
             return results[:limit]
         except Exception as e:
