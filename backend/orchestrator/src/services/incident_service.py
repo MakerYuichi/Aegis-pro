@@ -549,14 +549,25 @@ class IncidentService:
             logger.error(f"K8s error: {e}")
 
         try:
+            broadcast_data = {
+                "incident_id": incident_id,
+                "service_name": service_name,
+                "severity": analysis.get("severity"),
+                "title": analysis.get("title"),
+            }
+            # Include verification when present so the live dashboard
+            # can show "verified / failed / not run" next to the
+            # incident without a second fetch.
+            verification = context.get("verification")
+            if verification:
+                broadcast_data["verification"] = {
+                    "passed": verification.get("passed"),
+                    "reason": verification.get("reason"),
+                    "verifier": verification.get("verifier"),
+                }
             await manager.broadcast({
                 "type": "new_incident",
-                "data": {
-                    "incident_id": incident_id,
-                    "service_name": service_name,
-                    "severity": analysis.get("severity"),
-                    "title": analysis.get("title"),
-                },
+                "data": broadcast_data,
             })
         except Exception as e:
             logger.error(f"WebSocket broadcast error: {e}")
@@ -599,7 +610,7 @@ class IncidentService:
         analysis = context["analysis"]
         blast_radius = context["blast_radius"]
 
-        return {
+        response = {
             "incident_id": context["incident_id"],
             "service": service_name,
             "severity": analysis.get("severity"),
@@ -613,6 +624,26 @@ class IncidentService:
             "rag_context_used": context.get("rag_used", False),
             "timestamp": datetime.utcnow().isoformat(),
         }
+        
+        auto_fix = context.get("auto_fix") or {}
+        if auto_fix.get("fix"):
+            response["auto_fix"] = {
+                "diff": auto_fix["fix"],
+                "repo_name": auto_fix.get("repo_name"),
+                "requires_approval": auto_fix.get("requires_approval", True),
+                "mode": (auto_fix.get("pr") or {}).get("mode", "unknown"),
+            }
+
+        verification = context.get("verification")
+        if verification:
+            response["verification"] = {
+                "passed": verification.get("passed"),
+                "reason": verification.get("reason"),
+                "verifier": verification.get("verifier"),
+                "duration_ms": verification.get("duration_ms", 0),
+            }
+
+        return response
 
 
     # ------------------------------------------------------------------
