@@ -96,6 +96,78 @@ class AutoFixService:
         return True
     
     
+    @staticmethod
+    def _fix_hunk_counts(diff: str) -> str:
+        """
+        Recompute each hunk's old/new line counts from the body and
+        rewrite the header.
+
+        LLMs frequently emit diffs with the correct line numbers but
+        wrong counts. git apply rejects these with 'corrupt patch at
+        line N' — but the diff content is usually fine; only the count
+        is off.
+
+        This walks the diff, and for each hunk header:
+          - counts body lines starting with ' ', '-' (not '---'), '+'
+            (not '+++'), or '\\' (the "no newline" marker)
+          - old_count = context + removes
+          - new_count = context + adds
+          - rewrites the header with the correct counts
+
+        Returns the diff with corrected headers.
+        """
+        lines = diff.split("\n")
+        out: list[str] = []
+        i = 0
+
+        header_re = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+        while i < len(lines):
+            line = lines[i]
+            m = header_re.match(line)
+            if not m:
+                out.append(line)
+                i += 1
+                continue
+
+            old_start = int(m.group(1))
+            new_start = int(m.group(2))
+            out.append(f"@@ -{old_start},?,+{new_start},? @@")  # placeholder
+            i += 1
+
+            old_count = 0
+            new_count = 0
+            body_start = i
+            while i < len(lines):
+                body = lines[i]
+                if body.startswith("@@") or body.startswith("diff --git"):
+                    break
+                if body.startswith(" "):
+                    old_count += 1
+                    new_count += 1
+                elif body.startswith("-") and not body.startswith("---"):
+                    old_count += 1
+                elif body.startswith("+") and not body.startswith("+++"):
+                    new_count += 1
+                elif body.startswith("\\"):
+                    pass  # "No newline at end of file" marker
+                elif body == "":
+                    # Trailing blank line; treat as the end of the hunk.
+                    break
+                else:
+                    # Unrecognized body line; stop counting.
+                    break
+                i += 1
+
+            out[-1] = f"@@ -{old_start},{old_count} +{new_start},{new_count} @@"
+            # Copy the rest of the body
+            while body_start < i:
+                out.append(lines[body_start])
+                body_start += 1
+
+        return "\n".join(out)
+    
+    
     async def generate_fix(
         self,
         incident_data: dict,
@@ -185,6 +257,7 @@ Full format example:
             # LLMs routinely wrap diffs in Markdown or prepend prose.
             # git apply needs a bare diff. Extract what we need.
             fix_result = self._extract_diff(raw_response)
+            fix_result = self._fix_hunk_counts(fix_result)
             if not self._diff_looks_valid(fix_result):
                 logger.warning(
                     f"Auto-fix produced a structurally invalid diff for "
