@@ -311,9 +311,25 @@ class AutoFixService:
             fix = auto_fix.get("fix")
             file_path = incident.get("file_path") or auto_fix.get("file_path") or "unknown"
             line_number = incident.get("line_number") or auto_fix.get("line_number") or 0
+            
+            repo_name = auto_fix.get("repo_name")
+            if not repo_name:
+                logger.error(
+                    f"approve_fix: refusing to create PR for incident "
+                    f"{incident_id} — no repo_name in auto_fix payload. "
+                    f"generate_fix writes this at fix-generation time; "
+                    f"its absence means the snapshot is missing."
+                )
+                return {
+                    "error": (
+                        "Cannot create PR: the fix has no repo_name "
+                        "snapshot. Regenerate the fix so generate_fix "
+                        "records a target repository."
+                    )
+                }
 
             pr_info = await self.create_pr(
-                repo_name="fastapi",
+                repo_name=repo_name,
                 file_path=file_path,
                 line_number=line_number,
                 fix=fix,

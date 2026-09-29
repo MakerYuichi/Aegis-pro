@@ -288,3 +288,100 @@ async def test_reject_fix_writes_outcome(autofix_with_incident, db_session):
     assert row is not None
     assert row[0] == "rejected"
     assert row[1] == "wrong approach"
+
+# ---------------------------------------------------------------------------
+# repo_name targeting in approve_fix
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_approve_fix_uses_snapshotted_repo_name(autofix_with_incident):
+    """
+    auto_fix.repo_name is what generate_fix wrote. It's what
+    create_pr receives — no hardcoded 'fastapi'.
+    """
+    svc, build = autofix_with_incident
+    iid = await build(incident_id="INC-REPO-1")
+
+    captured = {}
+
+    async def fake_create_pr(**kwargs):
+        captured.update(kwargs)
+        return {"mode": "read_only", "status": "skipped", "fix_preview": ""}
+
+    with patch("src.services.incident_service.IncidentService") as IncSvc, \
+         patch.object(svc, "_update_auto_fix", new=AsyncMock()), \
+         patch.object(svc, "_record_outcome", new=AsyncMock()), \
+         patch.object(svc, "create_pr", side_effect=fake_create_pr):
+        IncSvc.return_value.get_incident = AsyncMock(return_value={
+            "incident_id": iid,
+            "service_name": "payment-api",
+            "file_path": "Charge.java",
+            "line_number": 88,
+            "extra_metadata": json.dumps({
+                "auto_fix": {
+                    "fix": "diff",
+                    "repo_name": "payment-service",
+                    "status": "fix_generated",
+                    "requires_approval": True,
+                },
+            }),
+        })
+
+        await svc.approve_fix(iid)
+
+    assert captured["repo_name"] == "payment-service"
+
+
+@pytest.mark.asyncio
+async def test_approve_fix_refuses_without_repo_name(autofix_with_incident):
+    """
+    No repo_name snapshot → hard error, no create_pr call, no PR
+    targeted at 'fastapi'. The failure is explicit, not silent.
+    """
+    svc, build = autofix_with_incident
+    iid = await build(incident_id="INC-REPO-2")
+
+    create_pr_calls = []
+
+    async def fake_create_pr(**kwargs):
+        create_pr_calls.append(kwargs)
+        return {"mode": "read_only", "status": "skipped", "fix_preview": ""}
+
+    with patch("src.services.incident_service.IncidentService") as IncSvc, \
+         patch.object(svc, "_update_auto_fix", new=AsyncMock()), \
+         patch.object(svc, "_record_outcome", new=AsyncMock()), \
+         patch.object(svc, "create_pr", side_effect=fake_create_pr):
+        IncSvc.return_value.get_incident = AsyncMock(return_value={
+            "incident_id": iid,
+            "service_name": "payment-api",
+            "file_path": "Charge.java",
+            "line_number": 88,
+            "extra_metadata": json.dumps({
+                "auto_fix": {
+                    "fix": "diff",
+                    # No repo_name — simulating an older snapshot.
+                    "status": "fix_generated",
+                    "requires_approval": True,
+                },
+            }),
+        })
+
+        result = await svc.approve_fix(iid)
+
+    assert result.get("error")
+    assert "repo_name" in result["error"].lower()
+    assert create_pr_calls == [], "create_pr must not be called without a repo_name"
+
+
+@pytest.mark.asyncio
+async def test_approve_fix_still_rejects_missing_incident(autofix_with_incident):
+    """
+    Sanity: the existing 'incident not found' path is unchanged.
+    """
+    svc, _ = autofix_with_incident
+
+    with patch("src.services.incident_service.IncidentService") as IncSvc:
+        IncSvc.return_value.get_incident = AsyncMock(return_value=None)
+        result = await svc.approve_fix("INC-NOPE")
+
+    assert result.get("error") == "Incident not found"
