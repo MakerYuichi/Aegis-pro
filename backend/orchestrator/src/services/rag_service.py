@@ -336,6 +336,50 @@ class RAGService:
         except Exception as e:
             logger.error(f"Error searching outcomes: {e}")
             return []
+        
+    def format_outcomes_for_prompt(self, outcomes: list) -> str:
+        """
+        Render retrieved outcomes as a few-shot block for the LLM prompt.
+
+        Same shape as generate_context_prompt's incident block — plain
+        text with a header. The heading names the two categories
+        (approved/rejected) so the model can weight them correctly: a
+        rejected fix is a "don't do this" signal, not a "do this one."
+        """
+        if not outcomes:
+            return ""
+
+        lines = ["\n=== FEW-SHOT EXAMPLES (past fixes on this service) ===\n"]
+        for i, o in enumerate(outcomes, 1):
+            decision = o.get("human_decision") or "unknown"
+            verified = o.get("verification_passed")
+            if decision == "approved" and verified is True:
+                label = "[APPROVED, tests passed]"
+            elif decision == "approved" and verified is False:
+                label = "[APPROVED by human, tests failed]"
+            elif decision == "rejected":
+                label = "[REJECTED by human — avoid this pattern]"
+            else:
+                label = f"[{decision.upper()}]"
+
+            lines.append(f"\n{i}. {label}")
+            if o.get("root_cause"):
+                lines.append(f"   Root cause: {o['root_cause'][:300]}")
+            if o.get("suggested_fix"):
+                lines.append(f"   Proposed fix: {o['suggested_fix'][:300]}")
+            if o.get("fix_diff"):
+                # Truncate hard — the diff is the longest field and we
+                # don't want it crowding out the actual incident.
+                lines.append(f"   Diff (truncated): {o['fix_diff'][:500]}")
+            if decision == "rejected" and o.get("human_reason"):
+                lines.append(f"   Rejection reason: {o['human_reason'][:200]}")
+
+        lines.append(
+            "\nUse these as reference, not as the answer — the current "
+            "incident has its own context above.\n"
+        )
+        return "\n".join(lines)
+    
 
     async def _search_outcomes_by_service(
         self, query: str, service_name: str, limit: int

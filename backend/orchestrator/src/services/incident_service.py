@@ -218,13 +218,40 @@ class IncidentService:
             logger.info("📚 Found similar past incidents for context!")
         else:
             logger.info("📚 No similar past incidents found yet")
-
+            
+        # Curator few-shot: retrieve past fix outcomes for the same
+        # service (falling back to same repo) and inject them as
+        # examples. Gated by CURATOR_FEW_SHOT until the loop has been
+        # proven in production.
+        fix_outcomes_context = ""
+        if settings.CURATOR_FEW_SHOT:
+            try:
+                outcomes = await self.rag.search_similar_outcomes(
+                    query=message,
+                    service_name=service_name,
+                    repo_name=service.get("repo_name"),
+                    limit=settings.CURATOR_MAX_OUTCOMES,
+                )
+                if outcomes:
+                    fix_outcomes_context = self.rag.format_outcomes_for_prompt(
+                        outcomes
+                    )
+                    logger.info(
+                        f"🎯 Curator: injecting {len(outcomes)} past "
+                        f"outcomes as few-shot examples"
+                    )
+            except Exception as e:
+                # Log and continue — a retrieval failure must not break
+                # the incident pipeline.
+                logger.error(f"Curator few-shot retrieval failed: {e}")
+        
         analysis = await self.llm.analyze_incident(
             service_name=service_name,
             message=message,
             stack_analysis=stack_analysis,
             blast_radius=blast_radius,
             rag_context=rag_context,
+            fix_outcomes_context=fix_outcomes_context,
         )
 
         incident_data = {

@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     VERIFIER_CONTAINER_WORKDIR: str = "/verifier-workdir"
     VERIFIER_MEMORY_LIMIT: str = "1g"
     VERIFIER_CPU_LIMIT: str = "1"
+    
+    CURATOR_FEW_SHOT: bool = False
+    CURATOR_MAX_OUTCOMES: int = 3
 
     # Kubernetes (optional)
     K8S_API_URL: Optional[str] = None

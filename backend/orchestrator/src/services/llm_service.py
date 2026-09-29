@@ -22,15 +22,17 @@ class LLMService:
         message: str,
         stack_analysis: dict,
         blast_radius: dict,
-        rag_context: str = ""
+        rag_context: str = "",
+        fix_outcomes_context: str = "",
     ) -> dict:
         """Analyze incident using the configured provider chain."""
         prompt = self._build_prompt(
-            service_name, message, stack_analysis, blast_radius, rag_context
+            service_name, message, stack_analysis, blast_radius, rag_context, fix_outcomes_context
         )
         system = (
-            "You are an expert SRE. Use the provided context (similar past incidents) "
-            "to respond with ONLY valid JSON:\n"
+            "You are an expert SRE. Use the provided context — similar past "
+            "incidents and any few-shot examples from prior fixes — to respond "
+            "with ONLY valid JSON:\n"
             "{\n"
             '    "severity": "P0" or "P1" or "P2",\n'
             '    "title": "Short title",\n'
@@ -72,21 +74,40 @@ class LLMService:
         except json.JSONDecodeError:
             return None
     
-    def _build_prompt(self, service_name, message, stack_analysis, blast_radius, rag_context):
-        """Build prompt for LLM with RAG context"""
+    def _build_prompt(
+        self,
+        service_name,
+        message,
+        stack_analysis,
+        blast_radius,
+        rag_context,
+        fix_outcomes_context: str = "",
+    ):
+        """
+        Build prompt for LLM with RAG context and (optionally) few-shot
+        examples from past fix outcomes.
+
+        fix_outcomes_context is pre-formatted by the caller — it's a
+        rendered string, not a list, so this method stays free of the
+        presentation logic for the outcome rows. Same pattern as
+        rag_context.
+        """
         prompt = f"Service: {service_name}\nMessage: {message}\n"
-        
+
         if stack_analysis:
             prompt += f"Stack: {stack_analysis.get('exception_type', 'Unknown')} at {stack_analysis.get('file_path', 'unknown')}:{stack_analysis.get('line_number', 'unknown')}\n"
-        
+
         if blast_radius:
             prompt += f"Affected Services: {', '.join(blast_radius.get('affected', []))}\nCount: {blast_radius.get('count', 0)}\n"
-        
+
         if rag_context:
             prompt += f"\n{rag_context}\n"
-        
+
+        if fix_outcomes_context:
+            prompt += f"\n{fix_outcomes_context}\n"
+
         prompt += '\nRespond with JSON: {"severity": "P0|P1|P2", "title": "...", "root_cause": "...", "suggested_fix": "...", "rollback_command": "...", "confidence": 0.0-1.0}'
-        
+
         return prompt
     
     def _intelligent_mock(self, service_name, message, stack_analysis, blast_radius):
