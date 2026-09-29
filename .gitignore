@@ -64,6 +64,7 @@ backup.sql
 
 # Local scratch
 tmp/
+hf-cache/
 
 # Terraform
 *.tfstate

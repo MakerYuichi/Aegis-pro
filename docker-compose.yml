@@ -55,7 +55,7 @@ services:
   # phone-home runner reached over an API — not by giving the
   # orchestrator a Docker daemon socket. That path is designed but not
   # yet implemented. See issue #101.
-  
+
   docker-proxy:
     image: tecnativa/docker-socket-proxy:v0.4.2
     container_name: aegis-docker-proxy
@@ -91,6 +91,11 @@ services:
       LLM_FALLBACKS: ${LLM_FALLBACKS-gemini,openrouter}
       AUTO_FIX_MODE: ${AUTO_FIX_MODE:-read_only}
       ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      # Hugging Face cache. The orchestrator runs as a non-root user
+      # (see `user:` above), so the library's default cache location
+      # (/.cache) isn't writable. Point it at the named volume.
+      HOME: /home/aegis
+      HF_HOME: /home/aegis/.cache/huggingface
       # Talk to the Docker daemon via the socket proxy — never the
       # raw /var/run/docker.sock.
       DOCKER_HOST: tcp://docker-proxy:2375
@@ -109,6 +114,7 @@ services:
       # not against this container — see the Docker-out-of-Docker
       # note in src/agents/verifier.py.
       - ./verifier-workdir:/verifier-workdir
+      - ./hf-cache:/home/aegis/.cache
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
 
