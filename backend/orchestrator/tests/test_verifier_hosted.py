@@ -379,9 +379,19 @@ async def test_verify_attempt_repair_prompt_includes_context_and_output(monkeypa
     _attempt_repair must feed BOTH the original context (root cause,
     stack) and the failure output into the prompt — option B shape.
     """
+    valid_diff = (
+        "--- a/x.py\n"
+        "+++ b/x.py\n"
+        "@@ -42,3 +42,4 @@\n"
+        " context\n"
+        "-old\n"
+        "+new\n"
+        "+added\n"
+    )
+
     fake_llm = MagicMock()
     fake_llm.chain = MagicMock()
-    fake_llm.complete_raw = AsyncMock(return_value="--- a\n+++ b\n")
+    fake_llm.complete_raw = AsyncMock(return_value=valid_diff)
 
     with patch("src.services.llm_service.LLMService", return_value=fake_llm):
         result = await vmod._attempt_repair(
@@ -396,9 +406,147 @@ async def test_verify_attempt_repair_prompt_includes_context_and_output(monkeypa
             previous_diff="--- old\n+++ old\n",
         )
 
-    assert result == "--- a\n+++ b\n"
+    assert result == valid_diff.rstrip()
     prompt = fake_llm.complete_raw.await_args.kwargs["prompt"]
     assert "pool exhausted" in prompt
     assert "SQLException" in prompt
     assert "assertion error" in prompt
     assert "--- old" in prompt
+
+@pytest.mark.asyncio
+async def test_verify_retries_when_diff_does_not_apply(monkeypatch, tmp_path):
+    """
+    First apply fails with a corrupt-patch error. The retry loop
+    calls _attempt_repair, the second apply succeeds, and the test
+    run passes. The result should be tests_passed with two attempts.
+    """
+    monkeypatch.setattr(vmod.settings, "VERIFIER_CONTAINER_WORKDIR", str(tmp_path))
+    monkeypatch.setattr(vmod.settings, "VERIFIER_HOST_WORKDIR", "/host/work")
+    monkeypatch.setattr(vmod.settings, "VERIFY_MAX_ATTEMPTS", 2)
+
+    apply_calls = {"n": 0}
+    async def fake_exec(*argv, **kwargs):
+        if argv[0] == "git" and "clone" in argv:
+            repo_dir = Path(argv[-1])
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
+            (repo_dir / "app.py").write_text("x = 1\n")
+            return _fake_proc(returncode=0)
+        if argv[0] == "git" and "apply" in argv:
+            apply_calls["n"] += 1
+            if apply_calls["n"] == 1:
+                return _fake_proc(returncode=1, stdout=b"error: corrupt patch at line 37\n")
+            return _fake_proc(returncode=0)
+        if argv[0] == "git" and "checkout" in argv:
+            return _fake_proc(returncode=0)
+        if argv[0] == "docker":
+            return _fake_proc(returncode=0, stdout=b"3 passed\n")
+        return _fake_proc(returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    with patch("src.agents.verifier._attempt_repair",
+               new=AsyncMock(return_value="--- a2\n+++ b2\n@@ -1 +1 @@\n-a\n+b\n")):
+        v = HostedVerifier()
+        result = await v.verify(
+            repo_name="owner/retry-apply",
+            commit_sha="HEAD",
+            diff="--- bad\n+++ bad\n@@\n-x\n+y\n",
+            language="Python",
+        )
+
+    assert result.passed is True
+    assert result.reason == "tests_passed"
+    assert len(result.attempts) == 2
+    assert "git apply failed" in result.attempts[0]["output"]
+
+
+@pytest.mark.asyncio
+async def test_verify_diff_does_not_apply_after_exhausted_retries(monkeypatch, tmp_path):
+    """
+    Every apply attempt fails. Result is diff_does_not_apply with
+    all attempts recorded.
+    """
+    monkeypatch.setattr(vmod.settings, "VERIFIER_CONTAINER_WORKDIR", str(tmp_path))
+    monkeypatch.setattr(vmod.settings, "VERIFIER_HOST_WORKDIR", "/host/work")
+    monkeypatch.setattr(vmod.settings, "VERIFY_MAX_ATTEMPTS", 2)
+
+    async def fake_exec(*argv, **kwargs):
+        if argv[0] == "git" and "clone" in argv:
+            repo_dir = Path(argv[-1])
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
+            (repo_dir / "app.py").write_text("x = 1\n")
+            return _fake_proc(returncode=0)
+        if argv[0] == "git" and "apply" in argv:
+            return _fake_proc(returncode=1, stdout=b"error: corrupt patch\n")
+        if argv[0] == "git" and "checkout" in argv:
+            return _fake_proc(returncode=0)
+        return _fake_proc(returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    with patch("src.agents.verifier._attempt_repair",
+               new=AsyncMock(return_value="--- a2\n+++ b2\n@@ -1 +1 @@\n-a\n+b\n")):
+        v = HostedVerifier()
+        result = await v.verify(
+            repo_name="owner/all-bad",
+            commit_sha="HEAD",
+            diff="--- bad\n+++ bad\n",
+            language="Python",
+        )
+
+    assert result.passed is False
+    assert result.reason == "diff_does_not_apply"
+    assert len(result.attempts) == 2
+
+@pytest.mark.asyncio
+async def test_attempt_repair_extracts_and_validates(monkeypatch):
+    """
+    _attempt_repair now runs the same extraction as generate_fix:
+    a Markdown-wrapped diff comes out bare, and a genuinely bad
+    response returns None instead of a string that git apply would
+    reject as garbage.
+    """
+    from src.agents import verifier as vmod
+
+    # Wrapped output — extraction should strip the fence.
+    fake_llm = MagicMock()
+    fake_llm.chain = MagicMock()
+    fake_llm.complete_raw = AsyncMock(return_value=(
+        "Sure, here you go:\n\n"
+        "```diff\n"
+        "--- a/x.py\n+++ b/x.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+        "```\n"
+    ))
+
+    with patch("src.services.llm_service.LLMService", return_value=fake_llm):
+        result = await vmod._attempt_repair(
+            original_context={},
+            failed_output="test failed",
+            previous_diff="--- a\n+++ b\n",
+        )
+
+    assert result is not None
+    assert result.startswith("--- a/x.py")
+    assert "```" not in result
+
+
+@pytest.mark.asyncio
+async def test_attempt_repair_returns_none_on_garbage(monkeypatch):
+    """A response with no diff at all returns None."""
+    from src.agents import verifier as vmod
+
+    fake_llm = MagicMock()
+    fake_llm.chain = MagicMock()
+    fake_llm.complete_raw = AsyncMock(return_value="I cannot fix this.")
+
+    with patch("src.services.llm_service.LLMService", return_value=fake_llm):
+        result = await vmod._attempt_repair(
+            original_context={},
+            failed_output="test failed",
+            previous_diff="--- a\n+++ b\n",
+        )
+
+    assert result is None

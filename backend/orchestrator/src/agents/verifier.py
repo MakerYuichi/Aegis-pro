@@ -194,16 +194,6 @@ class HostedVerifier(Verifier):
                     verifier="hosted",
                 )
 
-            apply_ok, apply_err = await self._apply_diff(workdir, diff)
-            if not apply_ok:
-                return VerificationResult(
-                    passed=False,
-                    reason="diff_does_not_apply",
-                    output=apply_err,
-                    duration_ms=self._ms_since(start),
-                    verifier="hosted",
-                )
-
             command, reason_prefix = _detect_runner(workdir / "repo", language)
             if command is None:
                 return VerificationResult(
@@ -216,8 +206,34 @@ class HostedVerifier(Verifier):
 
             attempts: list[dict] = []
             max_attempts = max(1, settings.VERIFY_MAX_ATTEMPTS)
+            current_diff = diff
 
             for attempt_num in range(1, max_attempts + 1):
+                # Try to apply the current diff. If it doesn't apply,
+                # treat that as a failure for this attempt and let the
+                # retry loop feed the apply error back to the LLM.
+                apply_ok, apply_err = await self._apply_diff(
+                    workdir, current_diff, reset=True
+                )
+                if not apply_ok:
+                    attempts.append({
+                        "attempt": attempt_num,
+                        "passed": False,
+                        "output": f"git apply failed: {apply_err}",
+                    })
+                    if attempt_num < max_attempts:
+                        repaired = await _attempt_repair(
+                            original_context=context or {},
+                            failed_output=f"git apply failed: {apply_err}",
+                            previous_diff=current_diff,
+                        )
+                        if not repaired:
+                            break
+                        current_diff = repaired
+                        continue
+                    else:
+                        break
+
                 exit_code, output = await _run_in_docker(
                     image=_image_for_language(language),
                     host_workdir=workdir,
@@ -249,21 +265,25 @@ class HostedVerifier(Verifier):
                     repaired = await _attempt_repair(
                         original_context=context or {},
                         failed_output=output,
-                        previous_diff=diff,
+                        previous_diff=current_diff,
                     )
                     if not repaired:
                         break
-                    ok, _err = await self._apply_diff(
-                        workdir, repaired, reset=True
-                    )
-                    if not ok:
-                        break
-                    diff = repaired
+                    current_diff = repaired
 
+            # If we got here, all attempts failed. The last attempt's
+            # output tells the reader what happened — either a test
+            # failure or an apply failure.
+            last_output = attempts[-1]["output"] if attempts else ""
+            last_reason = (
+                "diff_does_not_apply"
+                if attempts and "git apply failed" in attempts[-1]["output"]
+                else f"{reason_prefix}_failed"
+            )
             return VerificationResult(
                 passed=False,
-                reason=f"{reason_prefix}_failed",
-                output=attempts[-1]["output"] if attempts else "",
+                reason=last_reason,
+                output=last_output,
                 duration_ms=self._ms_since(start),
                 attempts=attempts,
                 verifier="hosted",
@@ -513,11 +533,26 @@ async def _attempt_repair(
 
     content = await llm.complete_raw(
         prompt=prompt,
-        system="You are an expert software engineer. Return ONLY a unified diff.",
+        system=(
+            "You are an expert software engineer. Return ONLY a unified "
+            "diff in git-apply-compatible format. No prose, no Markdown "
+            "fences, no explanation."
+        ),
         temperature=0.2,
         max_tokens=1500,
     )
-    return content
+    if not content:
+        return None
+
+    # Apply the same extraction that generate_fix applies to the
+    # initial diff. LLMs wrap their output the same way on retries
+    # as on first attempts.
+    from src.services.autofix_service import AutoFixService
+    extracted = AutoFixService._extract_diff(content)
+    extracted = AutoFixService._trim_trailing_noise(extracted)
+    if not AutoFixService._diff_looks_valid(extracted):
+        return None
+    return extracted
 
 def get_verifier(*, has_runner: bool = False) -> Verifier:
     """
