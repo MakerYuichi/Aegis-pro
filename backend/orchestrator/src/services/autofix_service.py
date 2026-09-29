@@ -67,6 +67,34 @@ class AutoFixService:
         # "diff_does_not_apply", which is honest.
         return text
     
+    @staticmethod
+    def _diff_looks_valid(diff: str) -> bool:
+        """
+        Cheap structural check on a diff before it goes to the verifier
+        or a PR. Rejects the common failure modes LLMs produce:
+
+          - No hunk header at all (bare @@ without numbers)
+          - No --- / +++ file markers
+          - Truncated output
+
+        Does not validate that the diff applies to a specific repo —
+        that's the verifier's job. This just catches structurally
+        invalid patches early.
+        """
+        if not diff or len(diff) < 20:
+            return False
+        lines = diff.split("\n")
+        has_file_marker = any(l.startswith("--- ") for l in lines)
+        if not has_file_marker:
+            return False
+        # Every hunk header must match "@@ -N,N +N,N @@" (counts are optional)
+        hunk_re = re.compile(r"^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@")
+        for line in lines:
+            if line.startswith("@@"):
+                if not hunk_re.match(line):
+                    return False
+        return True
+    
     
     async def generate_fix(
         self,
@@ -101,29 +129,44 @@ class AutoFixService:
 
             prompt = f"""You are an expert software engineer. Fix this issue.
 
-            Error: {error_type}
-            Root Cause: {root_cause}
-            File: {file_path}
-            Line: {line_number}
-            
-            Current Code:
-            {code_context['code_snippet']}
-            
-            Return ONLY a unified diff, in the exact format git apply expects.
-            No prose before or after. No Markdown code fences. No explanation.
-            No headings. The output must begin with the first line of the diff
-            (typically "--- a/path/to/file") and end with the last line of the
-            diff's last hunk.
-            
-            Format example:
-            --- a/path/to/file.py
-            +++ b/path/to/file.py
-            @@ -42,6 +42,7 @@
-            context line
-            -removed line
-            +added line
-             context line
-            """
+Error: {error_type}
+Root Cause: {root_cause}
+File: {file_path}
+Line: {line_number}
+
+Current Code:
+{code_context['code_snippet']}
+
+Return ONLY a unified diff, in the exact format git apply expects.
+No prose before or after. No Markdown code fences. No explanation.
+No headings.
+
+CRITICAL: Every hunk must have a full header with line numbers,
+in the form:
+
+    @@ -old_start,old_count +new_start,new_count @@
+
+For example, a hunk starting at line 150 with 5 old lines and
+6 new lines uses:
+
+    @@ -150,5 +150,6 @@
+
+The @@ marker without line numbers is invalid and git apply will
+reject the entire patch.
+
+Full format example:
+
+--- a/path/to/file.py
++++ b/path/to/file.py
+@@ -42,6 +42,7 @@
+ context line
+ context line
+-removed line
++added line
+ context line
+ context line
+ context line
+"""
 
             raw_response = await self.llm.complete_raw(
                 prompt=prompt,
@@ -142,6 +185,19 @@ class AutoFixService:
             # LLMs routinely wrap diffs in Markdown or prepend prose.
             # git apply needs a bare diff. Extract what we need.
             fix_result = self._extract_diff(raw_response)
+            if not self._diff_looks_valid(fix_result):
+                logger.warning(
+                    f"Auto-fix produced a structurally invalid diff for "
+                    f"{incident_id}; discarding. First 200 chars: "
+                    f"{fix_result[:200]!r}"
+                )
+                return {
+                    "error": (
+                        "LLM produced a structurally invalid diff "
+                        "(missing or malformed hunk header). "
+                        "Discarding rather than handing to the verifier."
+                    )
+                }
 
             pr_info = await self.create_pr(
                 repo_name=repo_name,

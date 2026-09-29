@@ -460,3 +460,56 @@ def test_extract_diff_handles_empty_string():
     from src.services.autofix_service import AutoFixService
     assert AutoFixService._extract_diff("") == ""
     assert AutoFixService._extract_diff(None) is None
+
+
+# ---------------------------------------------------------------------------
+# _diff_looks_valid — structural pre-check before the verifier
+# ---------------------------------------------------------------------------
+
+def test_diff_valid_full_hunk_header():
+    from src.services.autofix_service import AutoFixService
+
+    diff = (
+        "--- a/x.py\n+++ b/x.py\n"
+        "@@ -42,6 +42,7 @@\n"
+        " context\n"
+        "-old\n"
+        "+new\n"
+        " context\n"
+    )
+    assert AutoFixService._diff_looks_valid(diff) is True
+
+
+def test_diff_valid_hunk_header_without_counts():
+    from src.services.autofix_service import AutoFixService
+
+    diff = "--- a/x.py\n+++ b/x.py\n@@ -42 +42 @@\n-old\n+new\n"
+    assert AutoFixService._diff_looks_valid(diff) is True
+
+
+def test_diff_invalid_bare_hunk_marker():
+    """The failure mode from the end-to-end run."""
+    from src.services.autofix_service import AutoFixService
+
+    diff = (
+        "--- a/x.py\n+++ b/x.py\n"
+        "@@\n"
+        "-old\n"
+        "+new\n"
+    )
+    assert AutoFixService._diff_looks_valid(diff) is False
+
+
+def test_diff_invalid_no_file_markers():
+    from src.services.autofix_service import AutoFixService
+
+    diff = "@@ -1,1 +1,1 @@\n-old\n+new\n"
+    assert AutoFixService._diff_looks_valid(diff) is False
+
+
+def test_diff_invalid_empty_or_truncated():
+    from src.services.autofix_service import AutoFixService
+
+    assert AutoFixService._diff_looks_valid("") is False
+    assert AutoFixService._diff_looks_valid("--- a/x.py\n") is False
+    assert AutoFixService._diff_looks_valid("short") is False
