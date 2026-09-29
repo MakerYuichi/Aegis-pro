@@ -320,9 +320,11 @@ class HostedVerifier(Verifier):
         diff_file = workdir / "fix.diff"
         diff_file.write_text(diff)
         proc = await asyncio.create_subprocess_exec(
-            "git", "-C", str(repo_dir), "apply", str(diff_file),
+            "git", "-C", str(repo_dir), "apply", "--recount",
+            "--whitespace=nowarn", str(diff_file),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
+
         out, _ = await proc.communicate()
         if proc.returncode != 0:
             return False, out.decode("utf-8", errors="replace")[:4000]

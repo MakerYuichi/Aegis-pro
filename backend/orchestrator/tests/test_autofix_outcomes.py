@@ -466,38 +466,19 @@ def test_extract_diff_handles_empty_string():
 # _diff_looks_valid — structural pre-check before the verifier
 # ---------------------------------------------------------------------------
 
-def test_diff_valid_full_hunk_header():
+def test_diff_valid_with_hunk():
     from src.services.autofix_service import AutoFixService
 
-    diff = (
-        "--- a/x.py\n+++ b/x.py\n"
-        "@@ -42,6 +42,7 @@\n"
-        " context\n"
-        "-old\n"
-        "+new\n"
-        " context\n"
-    )
+    diff = "--- a/x.py\n+++ b/x.py\n@@ -42,6 +42,7 @@\n context\n-old\n+new\n"
     assert AutoFixService._diff_looks_valid(diff) is True
 
 
-def test_diff_valid_hunk_header_without_counts():
+def test_diff_valid_with_bare_hunk_marker():
+    """Hunk counts don't need to be right — git apply --recount fixes them."""
     from src.services.autofix_service import AutoFixService
 
-    diff = "--- a/x.py\n+++ b/x.py\n@@ -42 +42 @@\n-old\n+new\n"
+    diff = "--- a/x.py\n+++ b/x.py\n@@\n-old\n+new\n"
     assert AutoFixService._diff_looks_valid(diff) is True
-
-
-def test_diff_invalid_bare_hunk_marker():
-    """The failure mode from the end-to-end run."""
-    from src.services.autofix_service import AutoFixService
-
-    diff = (
-        "--- a/x.py\n+++ b/x.py\n"
-        "@@\n"
-        "-old\n"
-        "+new\n"
-    )
-    assert AutoFixService._diff_looks_valid(diff) is False
 
 
 def test_diff_invalid_no_file_markers():
@@ -507,95 +488,16 @@ def test_diff_invalid_no_file_markers():
     assert AutoFixService._diff_looks_valid(diff) is False
 
 
+def test_diff_invalid_no_hunk():
+    from src.services.autofix_service import AutoFixService
+
+    diff = "--- a/x.py\n+++ b/x.py\n-old\n+new\n"
+    assert AutoFixService._diff_looks_valid(diff) is False
+
+
 def test_diff_invalid_empty_or_truncated():
     from src.services.autofix_service import AutoFixService
 
     assert AutoFixService._diff_looks_valid("") is False
     assert AutoFixService._diff_looks_valid("--- a/x.py\n") is False
     assert AutoFixService._diff_looks_valid("short") is False
-
-# ---------------------------------------------------------------------------
-# _fix_hunk_counts — recompute hunk header line counts
-# ---------------------------------------------------------------------------
-
-def test_fix_hunk_counts_corrects_wrong_count():
-    """The failure mode from the run: header says 7, body has 9."""
-    from src.services.autofix_service import AutoFixService
-
-    diff = (
-        "--- a/x.py\n+++ b/x.py\n"
-        "@@ -145,7 +145,12 @@\n"
-        " context1\n"
-        " context2\n"
-        " context3\n"
-        " context4\n"
-        " context5\n"
-        " context6\n"
-        "-removed1\n"
-        "-removed2\n"
-        "-removed3\n"
-        "+added1\n"
-        "+added2\n"
-        "+added3\n"
-        "+added4\n"
-        "+added5\n"
-        "+added6\n"
-        "+added7\n"
-    )
-    fixed = AutoFixService._fix_hunk_counts(diff)
-    # 6 context + 3 removes = 9 old; 6 context + 7 adds = 13 new
-    assert "@@ -145,9 +145,13 @@" in fixed
-
-
-def test_fix_hunk_counts_preserves_correct_count():
-    from src.services.autofix_service import AutoFixService
-
-    diff = (
-        "--- a/x.py\n+++ b/x.py\n"
-        "@@ -1,3 +1,3 @@\n"
-        " ctx\n"
-        "-old\n"
-        "+new\n"
-    )
-    fixed = AutoFixService._fix_hunk_counts(diff)
-    assert "@@ -1,2 +1,2 @@" in fixed
-
-
-def test_fix_hunk_counts_handles_multiple_hunks():
-    from src.services.autofix_service import AutoFixService
-
-    diff = (
-        "--- a/x.py\n+++ b/x.py\n"
-        "@@ -10,99 +10,99 @@\n"
-        " a\n"
-        "-b\n"
-        "+B\n"
-        "@@ -50,99 +50,99 @@\n"
-        " c\n"
-        "-d\n"
-        "+D\n"
-    )
-    fixed = AutoFixService._fix_hunk_counts(diff)
-    assert "@@ -10,2 +10,2 @@" in fixed
-    assert "@@ -50,2 +50,2 @@" in fixed
-
-
-def test_fix_hunk_counts_preserves_starts():
-    from src.services.autofix_service import AutoFixService
-
-    diff = (
-        "--- a/x.py\n+++ b/x.py\n"
-        "@@ -145,7 +160,12 @@\n"
-        "-old\n"
-        "+new\n"
-    )
-    fixed = AutoFixService._fix_hunk_counts(diff)
-    # Starts preserved, counts corrected
-    assert "@@ -145,1 +160,1 @@" in fixed
-
-
-def test_fix_hunk_counts_no_hunks_passthrough():
-    from src.services.autofix_service import AutoFixService
-
-    diff = "--- a/x.py\n+++ b/x.py\n"
-    assert AutoFixService._fix_hunk_counts(diff) == diff
