@@ -222,6 +222,19 @@ def build_incident_blocks(result: dict) -> list:
             "elements": [{"type": "mrkdwn", "text": "🧠 AI used similar past incidents for analysis"}]
         })
         
+    auto_fix = result.get('auto_fix')
+    if auto_fix and auto_fix.get('diff'):
+        diff = auto_fix['diff']
+        truncated = diff[:600] + ("…" if len(diff) > 600 else "")
+        repo_hint = f" (`{auto_fix['repo_name']}`)" if auto_fix.get('repo_name') else ""
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*🩹 Proposed Fix{repo_hint}:*\n```{truncated}```"
+            }
+        })
+        
     verification = result.get('verification')
     if verification:
         passed = verification.get('passed')
@@ -336,6 +349,20 @@ def build_detail_blocks(incident: dict) -> list:
             extra = json.loads(extra)
         except Exception:
             extra = {}
+            
+    auto_fix = extra.get('auto_fix') if isinstance(extra, dict) else None
+    auto_fix = auto_fix or {}
+    if auto_fix.get('fix'):
+        diff = auto_fix['fix']
+        truncated = diff[:1000] + ("…" if len(diff) > 1000 else "")
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*🩹 Proposed Fix:*\n```{truncated}```"
+            }
+        })
+    
     verification = extra.get('verification') if isinstance(extra, dict) else None
     if verification:
         passed = verification.get('passed')

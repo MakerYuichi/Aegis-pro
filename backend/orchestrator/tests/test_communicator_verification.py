@@ -207,3 +207,90 @@ def test_build_incident_blocks_omits_verification_when_absent():
     })
 
     assert "Verification" not in str(blocks)
+
+# ---------------------------------------------------------------------------
+# Slack block builder — proposed diff
+# ---------------------------------------------------------------------------
+
+def test_build_incident_blocks_shows_proposed_diff():
+    from src.api.slack import build_incident_blocks
+
+    blocks = build_incident_blocks({
+        "incident_id": "INC-1",
+        "service": "payment-api",
+        "severity": "P1",
+        "confidence": 0.85,
+        "on_call": ["@marcus"],
+        "root_cause": "r",
+        "suggested_fix": "f",
+        "rollback_command": "k",
+        "auto_fix": {
+            "diff": "-return x.y();\n+if (x != null) return x.y();",
+            "repo_name": "payment-service",
+        },
+    })
+
+    rendered = str(blocks)
+    assert "Proposed Fix" in rendered
+    assert "if (x != null)" in rendered
+    assert "payment-service" in rendered
+
+
+def test_build_incident_blocks_truncates_long_diff():
+    from src.api.slack import build_incident_blocks
+
+    long_diff = "-" + "x" * 2000 + "\n+" + "y" * 2000
+    blocks = build_incident_blocks({
+        "incident_id": "INC-1",
+        "service": "payment-api",
+        "severity": "P1",
+        "confidence": 0.85,
+        "on_call": ["@marcus"],
+        "root_cause": "r",
+        "suggested_fix": "f",
+        "rollback_command": "k",
+        "auto_fix": {"diff": long_diff},
+    })
+
+    rendered = str(blocks)
+    assert "x" * 601 not in rendered
+    assert "…" in rendered
+
+
+def test_build_incident_blocks_omits_diff_when_absent():
+    from src.api.slack import build_incident_blocks
+
+    blocks = build_incident_blocks({
+        "incident_id": "INC-1",
+        "service": "payment-api",
+        "severity": "P1",
+        "confidence": 0.85,
+        "on_call": ["@marcus"],
+        "root_cause": "r",
+        "suggested_fix": "f",
+        "rollback_command": "k",
+    })
+
+    assert "Proposed Fix" not in str(blocks)
+
+
+def test_build_detail_blocks_shows_proposed_diff_from_metadata():
+    from src.api.slack import build_detail_blocks
+
+    blocks = build_detail_blocks({
+        "incident_id": "INC-1",
+        "service_name": "payment-api",
+        "severity": "P1",
+        "status": "active",
+        "confidence_score": 0.85,
+        "title": "t",
+        "root_cause": "r",
+        "suggested_fix": "f",
+        "extra_metadata": {
+            "auto_fix": {"fix": "-old\n+new"},
+        },
+    })
+
+    rendered = str(blocks)
+    assert "Proposed Fix" in rendered
+    assert "+new" in rendered
