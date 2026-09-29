@@ -85,6 +85,7 @@ class AutoFixService:
                 "pr": pr_info,
                 "code_context": code_context,
                 "requires_approval": require_permission,
+                "repo_name": repo_name,
             }
 
         except Exception as e:
@@ -149,7 +150,55 @@ class AutoFixService:
             except Exception:
                 return {}
         return extra_metadata
+    
+    async def _record_outcome(
+        self,
+        incident: dict,
+        auto_fix: dict,
+        human_decision: str,
+        human_reason: str | None = None,
+    ) -> None:
+        """
+        Write a fix_outcomes row for a human approve/reject.
 
+        Failure mode: log and continue. A failure here must not turn
+        a successful human approve/reject into a 500 for the caller.
+        Same shape as #73's fix — the human action succeeded; the
+        audit record is best-effort.
+
+        The verification block (if present) is read from
+        extra_metadata.verification, written by the Verifier stage.
+        """
+        try:
+            from src.services.rag_service import get_rag_service
+
+            incident_id = incident.get("incident_id") or incident.get("id")
+            if not incident_id:
+                logger.warning("_record_outcome: incident has no incident_id, skipping")
+                return
+
+            extra_metadata = self._parse_metadata(incident.get("extra_metadata", {}))
+            verification = extra_metadata.get("verification") or {}
+
+            outcome = {
+                "incident_id": incident_id,
+                "service_name": incident.get("service_name") or auto_fix.get("service_name"),
+                "repo_name": auto_fix.get("repo_name"),
+                "fix_diff": auto_fix.get("fix"),
+                "verification_passed": verification.get("passed"),
+                "verification_reason": verification.get("reason"),
+                "human_decision": human_decision,
+                "human_reason": human_reason,
+                "root_cause": incident.get("root_cause"),
+                "suggested_fix": incident.get("suggested_fix"),
+                "stack_context": incident.get("stack_trace"),
+            }
+
+            rag = get_rag_service()
+            await rag.store_outcome(outcome)
+        except Exception as e:
+            logger.error(f"Failed to record {human_decision} outcome: {e}")
+    
     def _is_pending(self, auto_fix: dict) -> bool:
         if not auto_fix or auto_fix.get("error"):
             return False
@@ -283,6 +332,15 @@ class AutoFixService:
             }
             extra_metadata["auto_fix"] = auto_fix
             await self._update_auto_fix(incident_id, extra_metadata, "fix_approved")
+
+            # Best-effort: write the fix_outcomes row for the Curator.
+            # Failure here doesn't affect the approval itself.
+            await self._record_outcome(
+                incident=incident,
+                auto_fix=auto_fix,
+                human_decision="approved",
+                human_reason=None,
+            )
             
             mode = (settings.AUTO_FIX_MODE or "read_only").strip().lower()
             if mode == "read_only":
@@ -329,6 +387,14 @@ class AutoFixService:
             extra_metadata["auto_fix"] = auto_fix
             await self._update_auto_fix(
                 incident_id, extra_metadata, incident.get("status") or "active"
+            )
+
+            # Best-effort: write the fix_outcomes row for the Curator.
+            await self._record_outcome(
+                incident=incident,
+                auto_fix=auto_fix,
+                human_decision="rejected",
+                human_reason=reason,
             )
 
             return {
