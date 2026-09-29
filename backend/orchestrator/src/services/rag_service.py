@@ -118,6 +118,107 @@ class RAGService:
         else:
             logger.info(f"📝 Incident {incident_data.get('incident_id', 'unknown')} stored")
     
+            
+    async def store_outcome(self, outcome_data: dict):
+        """
+        Store a fix outcome (human approve/reject on an auto-generated
+        fix) with an embedding so future incidents can retrieve it as
+        a few-shot example.
+
+        Embedding text is built from root_cause + suggested_fix +
+        stack_context — the same shape used for incidents.embedding —
+        so a live incident's vector and a stored outcome's vector are
+        comparable. Same encoder (all-MiniLM-L6-v2, 384 dims).
+
+        Expected keys in outcome_data:
+            incident_id, service_name, repo_name (opt), fix_diff (opt),
+            verification_passed (opt), verification_reason (opt),
+            human_decision, human_reason (opt),
+            root_cause (opt), suggested_fix (opt), stack_context (opt)
+
+        Failure mode: log and continue. A failure to store an outcome
+        must not turn a successful human approve/reject into an error
+        for the caller. Same shape as #73's fix.
+        """
+        incident_id = outcome_data.get("incident_id")
+        if not incident_id:
+            logger.warning("store_outcome: missing incident_id, skipping")
+            return
+
+        embedding_str = None
+        if self.use_embeddings and self.model:
+            try:
+                text_to_embed = self._outcome_embedding_text(outcome_data)
+                loop = asyncio.get_event_loop()
+                embedding = await loop.run_in_executor(
+                    self.executor,
+                    self.model.encode,
+                    text_to_embed,
+                )
+                embedding_list = embedding.tolist()
+                embedding_str = '[' + ','.join(str(x) for x in embedding_list) + ']'
+            except Exception as e:
+                logger.error(f"Error computing outcome embedding: {e}")
+                embedding_str = None
+
+        try:
+            async with get_db_session() as session:
+                await session.execute(
+                    text("""
+                        INSERT INTO fix_outcomes (
+                            incident_id, service_name, repo_name,
+                            fix_diff, verification_passed, verification_reason,
+                            human_decision, human_reason,
+                            root_cause, suggested_fix, stack_context,
+                            embedding
+                        ) VALUES (
+                            :incident_id, :service_name, :repo_name,
+                            :fix_diff, :verification_passed, :verification_reason,
+                            :human_decision, :human_reason,
+                            :root_cause, :suggested_fix, :stack_context,
+                            :embedding
+                        )
+                    """),
+                    {
+                        "incident_id": incident_id,
+                        "service_name": outcome_data.get("service_name") or "unknown",
+                        "repo_name": outcome_data.get("repo_name"),
+                        "fix_diff": outcome_data.get("fix_diff"),
+                        "verification_passed": outcome_data.get("verification_passed"),
+                        "verification_reason": outcome_data.get("verification_reason"),
+                        "human_decision": outcome_data["human_decision"],
+                        "human_reason": outcome_data.get("human_reason"),
+                        "root_cause": outcome_data.get("root_cause"),
+                        "suggested_fix": outcome_data.get("suggested_fix"),
+                        "stack_context": outcome_data.get("stack_context"),
+                        "embedding": embedding_str,
+                    },
+                )
+                await session.commit()
+                logger.info(
+                    f"✅ Stored {outcome_data['human_decision']} outcome "
+                    f"for incident {incident_id}"
+                )
+        except Exception as e:
+            logger.error(f"Error storing outcome: {e}")
+
+    @staticmethod
+    def _outcome_embedding_text(outcome_data: dict) -> str:
+        """
+        Build the text the outcome embedding is computed from.
+
+        Same shape as the incident embedding input (title + description
+        + stack_trace) — here, root_cause + suggested_fix +
+        stack_context. The two pipelines encode semantically similar
+        text, so cosine similarity between a live incident and a past
+        outcome is meaningful.
+        """
+        return " ".join(filter(None, [
+            outcome_data.get("root_cause") or "",
+            outcome_data.get("suggested_fix") or "",
+            outcome_data.get("stack_context") or "",
+        ]))
+    
     async def search_similar(self, query: str, limit: int = 3) -> list:
         """Search for similar past incidents"""
         try:
@@ -184,6 +285,142 @@ class RAGService:
         except Exception as e:
             logger.error(f"Error searching: {e}")
             return await self._text_search(query, limit)
+        
+    
+    async def search_similar_outcomes(
+        self,
+        query: str,
+        service_name: str,
+        repo_name: str | None = None,
+        limit: int = 3,
+    ) -> list:
+        """
+        Retrieve past fix outcomes similar to a live incident, for use
+        as few-shot examples.
+
+        Scoping:
+            1. Same service, ordered by vector similarity
+            2. If fewer than `limit` results, fall back to same repo
+            3. No global scope — cross-service retrieval would leak
+               one customer's patterns into another's prompt in a
+               multi-tenant deployment
+
+        Only returns rows where human_decision is set (approved or
+        rejected). Outcomes with a null decision are incomplete cases,
+        not clean signals.
+
+        Failure mode: log and continue with whatever's retrievable.
+        Returns [] if nothing matches or if embeddings aren't available
+        and the text search also finds nothing.
+        """
+        if not query or not service_name:
+            return []
+
+        try:
+            results = await self._search_outcomes_by_service(
+                query, service_name, limit
+            )
+
+            if len(results) < limit and repo_name:
+                seen_ids = {r["id"] for r in results}
+                fallback = await self._search_outcomes_by_repo(
+                    query, repo_name, limit, exclude_ids=seen_ids
+                )
+                results.extend(fallback)
+
+            return results[:limit]
+        except Exception as e:
+            logger.error(f"Error searching outcomes: {e}")
+            return []
+
+    async def _search_outcomes_by_service(
+        self, query: str, service_name: str, limit: int
+    ) -> list:
+        return await self._search_outcomes(
+            query, "service_name = :scope", {"scope": service_name}, limit
+        )
+
+    async def _search_outcomes_by_repo(
+        self, query: str, repo_name: str, limit: int, exclude_ids: set
+    ) -> list:
+        results = await self._search_outcomes(
+            query, "repo_name = :scope", {"scope": repo_name}, limit
+        )
+        return [r for r in results if r["id"] not in exclude_ids]
+
+    async def _search_outcomes(
+        self, query: str, scope_clause: str, scope_params: dict, limit: int
+    ) -> list:
+        """
+        Shared retrieval path. If embeddings are available, does vector
+        similarity within the scope; otherwise falls back to newest-
+        first within the scope. Both paths filter human_decision IS NOT
+        NULL.
+        """
+        embedding_str = None
+        if self.use_embeddings and self.model:
+            try:
+                loop = asyncio.get_event_loop()
+                query_embedding = await loop.run_in_executor(
+                    self.executor, self.model.encode, query
+                )
+                embedding_list = query_embedding.tolist()
+                embedding_str = '[' + ','.join(str(x) for x in embedding_list) + ']'
+            except Exception as e:
+                logger.error(f"Outcome embedding failed, falling back to recency: {e}")
+                embedding_str = None
+
+        params = dict(scope_params)
+        params["limit"] = limit
+
+        if embedding_str:
+            params["embedding"] = embedding_str
+            sql = f"""
+                SELECT id, incident_id, service_name, repo_name,
+                       root_cause, suggested_fix, fix_diff,
+                       verification_passed, human_decision, human_reason,
+                       1 - (embedding <=> :embedding) AS similarity
+                FROM fix_outcomes
+                WHERE {scope_clause}
+                  AND human_decision IS NOT NULL
+                  AND embedding IS NOT NULL
+                ORDER BY embedding <=> :embedding
+                LIMIT :limit
+            """
+        else:
+            sql = f"""
+                SELECT id, incident_id, service_name, repo_name,
+                       root_cause, suggested_fix, fix_diff,
+                       verification_passed, human_decision, human_reason,
+                       0.5 AS similarity
+                FROM fix_outcomes
+                WHERE {scope_clause}
+                  AND human_decision IS NOT NULL
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """
+
+        async with get_db_session() as session:
+            result = await session.execute(text(sql), params)
+            rows = result.fetchall()
+
+        return [
+            {
+                "id": row[0],
+                "incident_id": row[1],
+                "service_name": row[2],
+                "repo_name": row[3],
+                "root_cause": row[4],
+                "suggested_fix": row[5],
+                "fix_diff": row[6],
+                "verification_passed": row[7],
+                "human_decision": row[8],
+                "human_reason": row[9],
+                "similarity": float(row[10]) if row[10] is not None else 0.0,
+            }
+            for row in rows
+        ]
+    
     
     async def _text_search(self, query: str, limit: int = 3) -> list:
         """Fallback text-based search"""
