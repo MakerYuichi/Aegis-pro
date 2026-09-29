@@ -385,3 +385,78 @@ async def test_approve_fix_still_rejects_missing_incident(autofix_with_incident)
         result = await svc.approve_fix("INC-NOPE")
 
     assert result.get("error") == "Incident not found"
+
+# ---------------------------------------------------------------------------
+# _extract_diff — turning LLM output into a git-apply-compatible diff
+# ---------------------------------------------------------------------------
+
+def test_extract_diff_passthrough_bare_diff():
+    """A raw unified diff comes back unchanged (trailing whitespace stripped)."""
+    from src.services.autofix_service import AutoFixService
+
+    raw = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
+    assert AutoFixService._extract_diff(raw) == raw.rstrip()
+
+
+def test_extract_diff_from_markdown_fence():
+    """```diff ... ``` block is unwrapped."""
+    from src.services.autofix_service import AutoFixService
+
+    raw = (
+        "Here's the fix:\n\n"
+        "```diff\n"
+        "--- a/x.py\n"
+        "+++ b/x.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+        "```\n\n"
+        "This change adds a null check.\n"
+    )
+    extracted = AutoFixService._extract_diff(raw)
+    assert extracted.startswith("--- a/x.py")
+    assert extracted.endswith("+new")
+    assert "Here's the fix" not in extracted
+    assert "```" not in extracted
+    assert "This change adds" not in extracted
+
+
+def test_extract_diff_from_bare_fence():
+    """``` ... ``` without a language tag works the same way."""
+    from src.services.autofix_service import AutoFixService
+
+    raw = "```\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n```\n"
+    extracted = AutoFixService._extract_diff(raw)
+    assert extracted.startswith("--- a/x.py")
+    assert "```" not in extracted
+
+
+def test_extract_diff_from_prose_wrapped():
+    """Prose before the diff without a fence — take from the first --- line."""
+    from src.services.autofix_service import AutoFixService
+
+    raw = (
+        "I'd suggest this change.\n\n"
+        "--- a/x.py\n"
+        "+++ b/x.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    extracted = AutoFixService._extract_diff(raw)
+    assert extracted.startswith("--- a/x.py")
+    assert "I'd suggest" not in extracted
+
+
+def test_extract_diff_no_diff_returns_raw():
+    """No diff present — return as-is so the verifier rejects it."""
+    from src.services.autofix_service import AutoFixService
+
+    raw = "I cannot fix this issue without more context."
+    assert AutoFixService._extract_diff(raw) == raw
+
+
+def test_extract_diff_handles_empty_string():
+    from src.services.autofix_service import AutoFixService
+    assert AutoFixService._extract_diff("") == ""
+    assert AutoFixService._extract_diff(None) is None

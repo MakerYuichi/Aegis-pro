@@ -5,14 +5,69 @@ from src.services.llm_service import LLMService
 from src.config import settings
 from loguru import logger
 import json
-
+import re
 
 class AutoFixService:
     def __init__(self):
         self.github = get_github_service()
         self.llm = LLMService()
         logger.info("✅ AutoFixService initialized")
+        
+    @staticmethod
+    def _extract_diff(raw: str) -> str:
+        """
+        Extract a unified diff from the LLM's raw response.
 
+        Real LLMs often wrap the diff in Markdown code fences or
+        prepend prose like "Here's the fix:". git apply requires a
+        bare unified diff. This extracts what we need from the common
+        shapes:
+
+          1. Raw diff (starts with ---) — returned as-is
+          2. Markdown fenced block: ```diff ... ``` or ``` ... ```
+          3. Prose before/after the diff — take everything from the
+             first line starting with --- to the end of the last hunk
+          4. No diff found — return the raw string; the verifier will
+             reject it, which is the honest outcome
+        """
+        if not raw:
+            return raw
+
+        text = raw.strip()
+
+        # Case 1: already a bare diff.
+        if text.startswith("---") or text.startswith("diff --git"):
+            return text
+
+        # Case 2: fenced Markdown block.
+        fence_pattern = re.compile(
+            r"```(?:diff|patch)?\s*\n(.*?)\n```",
+            re.DOTALL,
+        )
+        matches = fence_pattern.findall(text)
+        if matches:
+            # Take the first fenced block that looks like a diff.
+            for candidate in matches:
+                candidate = candidate.strip()
+                if candidate.startswith("---") or candidate.startswith("diff --git"):
+                    return candidate
+            # No diff-shaped fence — fall through to case 3.
+
+        # Case 3: find the first line starting with "---" and take
+        # everything from there. The diff extends to the end of the
+        # string; trailing prose would have been caught by case 2's
+        # fence check.
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            if line.startswith("--- ") or line.startswith("diff --git"):
+                return "\n".join(lines[i:]).rstrip()
+
+        # Case 4: no diff found. Return as-is; the verifier's git
+        # apply will reject it and the reason will be
+        # "diff_does_not_apply", which is honest.
+        return text
+    
+    
     async def generate_fix(
         self,
         incident_data: dict,
@@ -44,31 +99,49 @@ class AutoFixService:
             if not code_context:
                 return {"error": "Failed to fetch code from GitHub"}
 
-            prompt = f"""
-            You are an expert software engineer. Fix this issue:
+            prompt = f"""You are an expert software engineer. Fix this issue.
 
             Error: {error_type}
             Root Cause: {root_cause}
             File: {file_path}
             Line: {line_number}
-
+            
             Current Code:
             {code_context['code_snippet']}
-
-            Please provide:
-            1. The fixed code (show the exact changes in diff format)
-            2. A short explanation of the fix
+            
+            Return ONLY a unified diff, in the exact format git apply expects.
+            No prose before or after. No Markdown code fences. No explanation.
+            No headings. The output must begin with the first line of the diff
+            (typically "--- a/path/to/file") and end with the last line of the
+            diff's last hunk.
+            
+            Format example:
+            --- a/path/to/file.py
+            +++ b/path/to/file.py
+            @@ -42,6 +42,7 @@
+            context line
+            -removed line
+            +added line
+             context line
             """
 
-            fix_result = await self.llm.complete_raw(
+            raw_response = await self.llm.complete_raw(
                 prompt=prompt,
-                system="You are an expert software engineer. Provide code fixes in diff format.",
+                system=(
+                    "You are an expert software engineer. Return ONLY a "
+                    "unified diff in git-apply-compatible format. No "
+                    "prose, no Markdown fences, no explanation."
+                ),
                 temperature=0.2,
-                max_tokens=1000,
+                max_tokens=1500,
             )
 
-            if not fix_result:
+            if not raw_response:
                 return {"error": "All LLM providers failed to generate a fix"}
+
+            # LLMs routinely wrap diffs in Markdown or prepend prose.
+            # git apply needs a bare diff. Extract what we need.
+            fix_result = self._extract_diff(raw_response)
 
             pr_info = await self.create_pr(
                 repo_name=repo_name,
