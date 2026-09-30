@@ -31,6 +31,17 @@ TEST_EMAIL = "buyer@example.com"
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _enable_demo_mode(monkeypatch):
+    """
+    The me_endpoints tests exercise demo-session linking, which is
+    gated behind DEMO_MODE. Force it on so these tests don't depend
+    on ambient .env config.
+    """
+    monkeypatch.setattr("src.demo.session_service.settings.DEMO_MODE", True)
+    yield
+
+
 @pytest_asyncio.fixture
 async def auth_as_buyer():
     """

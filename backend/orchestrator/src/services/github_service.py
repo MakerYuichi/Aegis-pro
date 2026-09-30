@@ -447,16 +447,25 @@ Provide specific, detailed reasons for each PR. Mention the file name, line numb
             end = min(len(lines), line_number + context_lines)
 
             code_snippet = []
+            raw_snippet = []
             for i in range(start, end):
                 line_num = i + 1
                 marker = ">>> " if i == line_number - 1 else "    "
                 code_snippet.append(f"{line_num:4d} {marker}{lines[i]}")
+                # Unannotated version for LLM prompts. The Fixer has
+                # to reproduce removed lines byte-for-byte, and the
+                # 4-space marker prefix in code_snippet is visually
+                # indistinguishable from real indentation — the model
+                # was folding it into the code it emitted. See the
+                # matching change in generate_fix's prompt.
+                raw_snippet.append(lines[i])
 
             return {
                 "file_path": file_path,
                 "line_number": line_number,
                 "total_lines": len(lines),
                 "code_snippet": "\n".join(code_snippet),
+                "raw_snippet": "\n".join(raw_snippet),
                 "full_file": "\n".join(lines) if len(lines) < 100 else None
             }
 

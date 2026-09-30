@@ -10,6 +10,22 @@ class LLMResponse:
     provider: str
     model: str
     raw: Optional[dict] = None
+    content: str
+    provider: str
+    model: str
+    raw: Optional[dict] = None
+    # Provider-reported reason the generation stopped. Normalized
+    # across providers to a small set: "stop" (natural end),
+    # "length" (token limit hit), "content_filter", "tool_calls",
+    # or None when the provider doesn't report it.
+    #
+    # This field exists because "the diff looked truncated" is an
+    # inference from the shape of the output; finish_reason is the
+    # provider telling you directly. See the fix-pipeline debugging
+    # for why that distinction matters — six rounds of "corrupt
+    # patch" errors looked identical whether the cause was a
+    # malformed diff or a truncated one.
+    finish_reason: Optional[str] = None
 
 
 class LLMProviderError(Exception):

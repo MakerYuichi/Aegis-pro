@@ -52,6 +52,40 @@ class Settings(BaseSettings):
     
     # Demo mode — enables public demo endpoints and mock services
     DEMO_MODE: bool = False
+    
+    # Verifier — sandboxed test execution before reporting a fix.
+    # Off by default until the hosted Docker implementation is proven
+    # in production. When false, the pipeline runs as if verification
+    # succeeded, with reason="disabled" recorded so downstream
+    # consumers can tell the difference.
+    VERIFY_BEFORE_REPORT: bool = False
+    VERIFY_TIMEOUT_SECONDS: int = 120
+    VERIFY_MAX_ATTEMPTS: int = 2
+    VERIFY_DOCKER_IMAGE_PYTHON: str = "python:3.11-slim"
+    VERIFY_DOCKER_IMAGE_NODE: str = "node:20-slim"
+    
+    # Verifier work directory.
+    # The verifier clones the target repo into VERIFIER_HOST_WORKDIR/<uuid>
+    # on the host, then asks the Docker daemon to bind-mount that path
+    # into the sandbox container. Because the daemon interprets paths
+    # against the HOST filesystem — not against the orchestrator's own
+    # filesystem — this value must be the host-side absolute path of the
+    # bind mount declared in docker-compose.yml.
+    #
+    # In docker-compose.yml the mount is:
+    #     ./verifier-workdir:/verifier-workdir
+    # so the host-side path is the absolute path of ./verifier-workdir
+    # on the machine running docker-compose.
+    #
+    # Default is a Linux path that works in the standard compose layout.
+    # Override in .env for Docker Desktop (Mac/Windows) or a custom layout.
+    VERIFIER_HOST_WORKDIR: str = "/var/lib/aegis/verifier-workdir"
+    VERIFIER_CONTAINER_WORKDIR: str = "/verifier-workdir"
+    VERIFIER_MEMORY_LIMIT: str = "1g"
+    VERIFIER_CPU_LIMIT: str = "1"
+    
+    CURATOR_FEW_SHOT: bool = False
+    CURATOR_MAX_OUTCOMES: int = 3
 
     # Kubernetes (optional)
     K8S_API_URL: Optional[str] = None

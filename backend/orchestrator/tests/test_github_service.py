@@ -306,6 +306,85 @@ async def test_get_file_content_returns_code_snippet(service):
 
 
 @pytest.mark.asyncio
+async def test_get_file_content_includes_raw_snippet(service):
+    """
+    Situation: File exists on GitHub.
+    Expected: The result contains both the annotated code_snippet and
+    an unannotated raw_snippet.
+    Function: src.services.github_service.GitHubService.get_file_content
+    """
+    mock_repo = MagicMock()
+    mock_content = MagicMock()
+    mock_content.decoded_content.decode.return_value = (
+        "line1\nline2\nline3\nline4\nline5"
+    )
+    mock_repo.get_contents.return_value = mock_content
+
+    service._get_repo = AsyncMock(return_value=mock_repo)
+
+    result = await service.get_file_content(
+        "test-repo", "test.py", 3, context_lines=2
+    )
+
+    assert "code_snippet" in result
+    assert "raw_snippet" in result
+
+    # raw_snippet contains the code lines without line numbers or
+    # markers.
+    for line in result["raw_snippet"].split("\n"):
+        assert not line[:4].strip().isdigit(), (
+            f"raw_snippet line has a numeric prefix: {line!r}"
+        )
+        assert ">>>" not in line, (
+            f"raw_snippet line has a marker: {line!r}"
+        )
+
+    # Each raw line is the tail of the corresponding annotated line.
+    raw_lines = result["raw_snippet"].split("\n")
+    annotated_lines = result["code_snippet"].split("\n")
+    assert len(raw_lines) == len(annotated_lines)
+    for raw, annotated in zip(raw_lines, annotated_lines):
+        assert annotated.endswith(raw)
+
+
+@pytest.mark.asyncio
+async def test_get_file_content_raw_snippet_matches_source(service):
+    """
+    Situation: File exists on GitHub with known content.
+    Expected: raw_snippet is byte-for-byte identical to the source
+    lines in the requested window.
+    Function: src.services.github_service.GitHubService.get_file_content
+    """
+    source_lines = [
+        "def foo():",
+        "    x = 1",
+        "    if x:",
+        "        return x",
+        "    return None",
+    ]
+    mock_repo = MagicMock()
+    mock_content = MagicMock()
+    mock_content.decoded_content.decode.return_value = "\n".join(source_lines)
+    mock_repo.get_contents.return_value = mock_content
+
+    service._get_repo = AsyncMock(return_value=mock_repo)
+
+    result = await service.get_file_content(
+        "test-repo", "test.py", 3, context_lines=2
+    )
+
+    # Line 3 ± 2 = lines 1..5. The window is the whole file.
+    expected = "\n".join(source_lines)
+    assert result["raw_snippet"] == expected
+
+    # And the annotated version preserves the code after the prefix.
+    for raw, annotated in zip(
+        result["raw_snippet"].split("\n"),
+        result["code_snippet"].split("\n"),
+    ):
+        assert annotated.endswith(raw)
+
+@pytest.mark.asyncio
 async def test_get_file_content_line_at_start(service):
     """
     Situation: Line number is at start of file.

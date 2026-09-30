@@ -5,6 +5,16 @@ import re
 
 from src.llm.base import LLMProviderError
 from src.llm.factory import get_provider_chain
+from dataclasses import dataclass
+
+
+@dataclass
+class RawCompletion:
+    """Result of an LLM call with metadata intact."""
+    content: str | None
+    finish_reason: str | None
+    provider: str | None
+    model: str | None
 
 
 class LLMService:
@@ -22,15 +32,17 @@ class LLMService:
         message: str,
         stack_analysis: dict,
         blast_radius: dict,
-        rag_context: str = ""
+        rag_context: str = "",
+        fix_outcomes_context: str = "",
     ) -> dict:
         """Analyze incident using the configured provider chain."""
         prompt = self._build_prompt(
-            service_name, message, stack_analysis, blast_radius, rag_context
+            service_name, message, stack_analysis, blast_radius, rag_context, fix_outcomes_context
         )
         system = (
-            "You are an expert SRE. Use the provided context (similar past incidents) "
-            "to respond with ONLY valid JSON:\n"
+            "You are an expert SRE. Use the provided context — similar past "
+            "incidents and any few-shot examples from prior fixes — to respond "
+            "with ONLY valid JSON:\n"
             "{\n"
             '    "severity": "P0" or "P1" or "P2",\n'
             '    "title": "Short title",\n'
@@ -72,21 +84,40 @@ class LLMService:
         except json.JSONDecodeError:
             return None
     
-    def _build_prompt(self, service_name, message, stack_analysis, blast_radius, rag_context):
-        """Build prompt for LLM with RAG context"""
+    def _build_prompt(
+        self,
+        service_name,
+        message,
+        stack_analysis,
+        blast_radius,
+        rag_context,
+        fix_outcomes_context: str = "",
+    ):
+        """
+        Build prompt for LLM with RAG context and (optionally) few-shot
+        examples from past fix outcomes.
+
+        fix_outcomes_context is pre-formatted by the caller — it's a
+        rendered string, not a list, so this method stays free of the
+        presentation logic for the outcome rows. Same pattern as
+        rag_context.
+        """
         prompt = f"Service: {service_name}\nMessage: {message}\n"
-        
+
         if stack_analysis:
             prompt += f"Stack: {stack_analysis.get('exception_type', 'Unknown')} at {stack_analysis.get('file_path', 'unknown')}:{stack_analysis.get('line_number', 'unknown')}\n"
-        
+
         if blast_radius:
             prompt += f"Affected Services: {', '.join(blast_radius.get('affected', []))}\nCount: {blast_radius.get('count', 0)}\n"
-        
+
         if rag_context:
             prompt += f"\n{rag_context}\n"
-        
+
+        if fix_outcomes_context:
+            prompt += f"\n{fix_outcomes_context}\n"
+
         prompt += '\nRespond with JSON: {"severity": "P0|P1|P2", "title": "...", "root_cause": "...", "suggested_fix": "...", "rollback_command": "...", "confidence": 0.0-1.0}'
-        
+
         return prompt
     
     def _intelligent_mock(self, service_name, message, stack_analysis, blast_radius):
@@ -123,27 +154,28 @@ class LLMService:
             "confidence": confidence
         }
         
-    async def complete_raw(
+    async def complete_raw_detailed(
         self,
         prompt: str,
         system: str | None = None,
         temperature: float = 0.2,
         max_tokens: int = 1000,
         response_format: str = "text",
-    ) -> str | None:
+    ) -> "RawCompletion":
         """
-        Call the chain with a raw prompt. Returns the raw text, or None.
+        Like complete_raw, but returns the full response metadata
+        alongside the content. Use this when the caller needs to know
+        whether a response was cut off by the token limit
+        (finish_reason == "length") or stopped naturally
+        (finish_reason == "stop").
 
-        response_format:
-            "text"        — free-form
-            "json_object" — caller expects a JSON object
-            "json_array"  — caller expects a JSON array. Because OpenAI-compatible
-                            JSON mode only emits top-level objects, we wrap the
-                            prompt on the way in and unwrap the response on the
-                            way out so callers get the array they asked for.
+        Complete_raw remains the simpler entry point for callers that
+        only care about the text. Both share the same underlying chain
+        call.
         """
         if not self.chain:
-            return None
+            return RawCompletion(content=None, finish_reason=None,
+                                 provider=None, model=None)
 
         effective_format = response_format
         wrap_array = False
@@ -164,14 +196,44 @@ class LLMService:
             response_format=effective_format,
         )
         if not resp:
-            return None
+            return RawCompletion(content=None, finish_reason=None,
+                                 provider=None, model=None)
 
         content = resp.content
-
         if wrap_array:
             content = self._unwrap_items_array(content)
 
-        return content
+        return RawCompletion(
+            content=content,
+            finish_reason=resp.finish_reason,
+            provider=resp.provider,
+            model=resp.model,
+        )
+
+    async def complete_raw(
+        self,
+        prompt: str,
+        system: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 1000,
+        response_format: str = "text",
+    ) -> str | None:
+        """
+        Call the chain with a raw prompt. Returns the raw text, or None.
+
+        For callers that need to distinguish "the model stopped
+        naturally" from "the model was cut off by the token limit",
+        use complete_raw_detailed instead — this method discards
+        the finish_reason.
+        """
+        detailed = await self.complete_raw_detailed(
+            prompt=prompt,
+            system=system,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+        )
+        return detailed.content
 
     @staticmethod
     def _unwrap_items_array(content: str) -> str:

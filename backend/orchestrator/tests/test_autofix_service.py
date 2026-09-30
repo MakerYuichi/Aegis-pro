@@ -210,55 +210,61 @@ async def test_approve_fix_no_auto_fix_returns_error(service):
 
 
 @pytest.mark.asyncio
-async def test_approve_fix_pr_draft_marks_approved(service, make_incident, db_session, monkeypatch):
+async def test_approve_fix_without_repo_name_refuses(service):
     """
-    Real DB: pending fix in pr_draft mode. approve_fix writes back
-    status=fix_approved and auto_fix.approved=True.
+    auto_fix has no repo_name. approve_fix must refuse rather than
+    silently target 'fastapi'. The error surfaces to the caller (the
+    route layer turns it into a 400) so the frontend can display it.
     """
-    from src.services import autofix_service as mod
-    monkeypatch.setattr(mod.settings, "AUTO_FIX_MODE", "pr_draft")
+    incident = {
+        "incident_id": "INC-1",
+        "file_path": "x.py",
+        "line_number": 42,
+        "extra_metadata": {
+            "auto_fix": {"fix": "the-diff", "status": "fix_generated"},
+        },
+    }
 
-    await make_incident({
-        "incident_id": "INC-APPROVE-DRAFT",
-        "file_path": "src/x.py",
-        "line_number": 10,
-        "extra_metadata": json.dumps({
-            "auto_fix": {"fix": "the-diff", "status": "fix_generated"}
-        }),
-    })
+    create_pr_calls = []
 
-    result = await service.approve_fix("INC-APPROVE-DRAFT")
-    assert result["status"] == "approved"
-    assert result["auto_fix"]["status"] == "approved"
-    assert result["auto_fix"]["approved"] is True
-    assert result["auto_fix"]["requires_approval"] is False
+    async def fake_create_pr(**kwargs):
+        create_pr_calls.append(kwargs)
+        return {"mode": "pr_draft", "status": "pr_draft"}
 
-    # Verify DB state
-    row = (await db_session.execute(
-        text("SELECT status, extra_metadata FROM incidents WHERE incident_id = :iid"),
-        {"iid": "INC-APPROVE-DRAFT"},
-    )).fetchone()
-    assert row[0] == "fix_approved"
-    meta = row[1] if isinstance(row[1], dict) else json.loads(row[1])
-    assert meta["auto_fix"]["approved"] is True
+    with patch("src.services.incident_service.IncidentService") as IncSvc, \
+         patch.object(service, "create_pr", side_effect=fake_create_pr), \
+         patch.object(service, "_update_auto_fix", new=AsyncMock()), \
+         patch.object(service, "_record_outcome", new=AsyncMock()):
+        IncSvc.return_value.get_incident = AsyncMock(return_value=incident)
+        result = await service.approve_fix("INC-1")
+
+    assert "error" in result
+    assert "repo_name" in result["error"].lower()
+    assert create_pr_calls == []
 
 
 @pytest.mark.asyncio
-async def test_approve_fix_read_only_message_notes_disabled(service, make_incident, db_session, monkeypatch):
-    """Real DB: pending fix in read_only mode; message notes PR disabled."""
-    from src.services import autofix_service as mod
-    monkeypatch.setattr(mod.settings, "AUTO_FIX_MODE", "read_only")
+async def test_approve_fix_without_repo_name_refuses_in_read_only_mode(service):
+    """
+    Same refusal in read_only mode. The mode doesn't matter — the
+    fix can't be approved without a target repo regardless of what
+    AUTO_FIX_MODE allows.
+    """
+    incident = {
+        "incident_id": "INC-2",
+        "extra_metadata": {
+            "auto_fix": {"fix": "x", "status": "fix_generated"},
+        },
+    }
 
-    await make_incident({
-        "incident_id": "INC-APPROVE-RO",
-        "extra_metadata": json.dumps({
-            "auto_fix": {"fix": "x", "status": "fix_generated"}
-        }),
-    })
+    with patch("src.services.incident_service.IncidentService") as IncSvc, \
+         patch.object(service, "_update_auto_fix", new=AsyncMock()), \
+         patch.object(service, "_record_outcome", new=AsyncMock()):
+        IncSvc.return_value.get_incident = AsyncMock(return_value=incident)
+        result = await service.approve_fix("INC-2")
 
-    result = await service.approve_fix("INC-APPROVE-RO")
-    assert result["status"] == "approved"
-    assert "read_only" in result["message"]
+    assert "error" in result
+    assert "repo_name" in result["error"].lower()
 
 
 @pytest.mark.asyncio
@@ -271,25 +277,28 @@ async def test_approve_fix_exception_returns_error_dict(service):
 
 
 @pytest.mark.asyncio
-async def test_approve_fix_missing_file_path_fallback(service, make_incident, db_session, monkeypatch):
+async def test_approve_fix_without_repo_name_refuses_missing_file_path(service):
     """
-    Real DB: incident.file_path is None; auto_fix.file_path is set.
-    approve_fix falls back to the auto_fix value.
+    Even with a valid file_path fallback, no repo_name means refuse.
+    The file_path fallback logic is irrelevant when we can't identify
+    the target repository.
     """
-    from src.services import autofix_service as mod
-    monkeypatch.setattr(mod.settings, "AUTO_FIX_MODE", "read_only")
+    incident = {
+        "incident_id": "INC-3",
+        # no file_path on the incident
+        "extra_metadata": {
+            "auto_fix": {"fix": "x", "status": "fix_generated"},
+        },
+    }
 
-    await make_incident({
-        "incident_id": "INC-APPROVE-FALLBACK",
-        "file_path": None,
-        "line_number": None,
-        "extra_metadata": json.dumps({
-            "auto_fix": {"fix": "diff", "file_path": "src/y.py", "line_number": 99}
-        }),
-    })
+    with patch("src.services.incident_service.IncidentService") as IncSvc, \
+         patch.object(service, "_update_auto_fix", new=AsyncMock()), \
+         patch.object(service, "_record_outcome", new=AsyncMock()):
+        IncSvc.return_value.get_incident = AsyncMock(return_value=incident)
+        result = await service.approve_fix("INC-3")
 
-    result = await service.approve_fix("INC-APPROVE-FALLBACK")
-    assert result["status"] == "approved"
+    assert "error" in result
+    assert "repo_name" in result["error"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -362,3 +371,40 @@ async def test_reject_fix_exception_returns_error(service):
         IncSvc.return_value.get_incident = AsyncMock(side_effect=RuntimeError("db down"))
         result = await service.reject_fix("INC-1")
     assert "error" in result
+
+@pytest.mark.asyncio
+async def test_approve_fix_with_repo_name_proceeds(service):
+    """
+    Happy path: repo_name is present, approve_fix proceeds and calls
+    create_pr with it. This is the test the three refusals above
+    replace.
+    """
+    incident = {
+        "incident_id": "INC-4",
+        "file_path": "x.py",
+        "line_number": 42,
+        "extra_metadata": {
+            "auto_fix": {
+                "fix": "the-diff",
+                "status": "fix_generated",
+                "repo_name": "payment-service",
+            },
+        },
+    }
+
+    captured = {}
+
+    async def fake_create_pr(**kwargs):
+        captured.update(kwargs)
+        return {"mode": "read_only", "status": "skipped",
+                "fix_preview": "the-diff", "message": "read_only"}
+
+    with patch("src.services.incident_service.IncidentService") as IncSvc, \
+         patch.object(service, "create_pr", side_effect=fake_create_pr), \
+         patch.object(service, "_update_auto_fix", new=AsyncMock()), \
+         patch.object(service, "_record_outcome", new=AsyncMock()):
+        IncSvc.return_value.get_incident = AsyncMock(return_value=incident)
+        result = await service.approve_fix("INC-4")
+
+    assert result.get("status") == "approved"
+    assert captured["repo_name"] == "payment-service"

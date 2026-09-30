@@ -129,14 +129,17 @@ async def test_get_service_falls_back_to_mock_on_db_error(service, db_error):
 
 @pytest.mark.asyncio
 async def test_list_services_returns_rows(service, seeded_services):
-    """Real DB: returns all 8 seeded services."""
+    """Real DB: the 8 seeded services are present in the listing."""
     result = await service.list_services()
-    assert len(result) == 8
+    # Check the 8 known services are present. Other services may
+    # exist in the shared DB (e.g. from a manual test run), so
+    # assert inclusion rather than an exact count.
     names = {s["name"] for s in result}
-    assert names == {
+    expected = {
         "payment-api", "auth", "ledger", "refund",
         "fraud", "notification", "user", "database",
     }
+    assert expected.issubset(names)
     auth = next(s for s in result if s["name"] == "auth")
     assert auth["is_critical"] is True
 
