@@ -370,6 +370,7 @@ class IncidentService:
                     repo_name=service["repo_name"],
                     file_path=stack_analysis["file_path"],
                     line_number=stack_analysis.get("line_number", 1),
+                    context_lines=30,
                 )
                 if code_context:
                     logger.info(
@@ -446,6 +447,19 @@ class IncidentService:
 
         try:
             verifier = get_verifier(has_runner=False)
+            # commit_sha defaults to HEAD because nothing upstream
+            # sets it today. Both get_file_content (via GitHub's
+            # default-branch contents API) and _clone (via git clone
+            # of the default branch) resolve to the same ref, so HEAD
+            # is correct for now. When commit pinning lands, this
+            # should be set by the Watcher from the stack trace's
+            # context or by the blame lookup.
+            logger.info(
+                f"Verifier: target={context.get('stack_analysis', {}).get('file_path')}:"
+                f"{context.get('stack_analysis', {}).get('line_number')}, "
+                f"diff bytes={len(diff)}"
+            )
+                        
             result = await verifier.verify(
                 repo_name=service.get("repo_name") or context["service_name"],
                 commit_sha=context.get("commit_sha", "HEAD"),
@@ -636,12 +650,7 @@ class IncidentService:
 
         verification = context.get("verification")
         if verification:
-            response["verification"] = {
-                "passed": verification.get("passed"),
-                "reason": verification.get("reason"),
-                "verifier": verification.get("verifier"),
-                "duration_ms": verification.get("duration_ms", 0),
-            }
+            response["verification"] = dict(verification)
 
         return response
 

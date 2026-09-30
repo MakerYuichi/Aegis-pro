@@ -294,3 +294,51 @@ def test_build_detail_blocks_shows_proposed_diff_from_metadata():
     rendered = str(blocks)
     assert "Proposed Fix" in rendered
     assert "+new" in rendered
+
+
+def test_build_response_preserves_all_verification_fields():
+    """
+    Regression guard: _build_response used to enumerate a fixed set
+    of verification keys, silently dropping any field not in that
+    set. `attempts` was the field that exposed it — the pipeline
+    reported an empty attempts list even when the verifier had
+    recorded attempts.
+
+    Any field the stage returns must survive _build_response.
+    """
+    from unittest.mock import patch
+    from src.services.incident_service import IncidentService
+
+    with patch("src.services.incident_service.LLMService"), \
+         patch("src.services.incident_service.get_rag_service"):
+        svc = IncidentService()
+
+    context = {
+        "incident_id": "INC-TEST-1",
+        "service_name": "payment-api",
+        "service": {"name": "payment-api", "on_call": []},
+        "analysis": {"severity": "P1", "title": "t", "root_cause": "r",
+                     "suggested_fix": "f", "rollback_command": "k",
+                     "confidence": 0.8},
+        "blast_radius": {"affected": ["payment-api"], "count": 1,
+                         "severity": "MEDIUM"},
+        "verification": {
+            "passed": False,
+            "reason": "diff_does_not_apply",
+            "verifier": "hosted",
+            "duration_ms": 1234,
+            "attempts": [
+                {"attempt": 1, "passed": False, "output": "git apply failed"},
+                {"attempt": 2, "passed": False, "output": "git apply failed"},
+            ],
+        },
+    }
+
+    response = svc._build_response(context)
+
+    assert response["verification"]["attempts"] == context["verification"]["attempts"]
+    assert response["verification"]["duration_ms"] == 1234
+    assert response["verification"]["passed"] is False
+    assert response["verification"]["reason"] == "diff_does_not_apply"
+    assert response["verification"]["verifier"] == "hosted"
+    
