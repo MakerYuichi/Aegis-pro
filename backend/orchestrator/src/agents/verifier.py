@@ -32,9 +32,11 @@ run as if the verifier returned "disabled" and no verification
 happens. That's an honest degradation, not a silent failure.
 """
 from abc import ABC, abstractmethod
+from typing import Literal, Optional
 from dataclasses import dataclass, field
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -45,6 +47,37 @@ from pathlib import Path
 from loguru import logger
 
 from src.config import settings
+
+@dataclass
+class RealignmentReport:
+    """
+    Summary of what _realign_diff did to a diff.
+
+    Fields:
+        hunks_total:     number of hunks in the diff
+        hunks_realigned: hunks whose header was rewritten to match
+                         a location found in the file
+        hunks_unchanged: hunks left alone (already correct, or
+                         unaffected by realignment)
+        hunks_flagged:   hunks that couldn't be realigned for a
+                         reason worth surfacing to a human. Each
+                         entry: {"index": int, "reason": str} where
+                         reason is one of:
+                           "ambiguous_match"  — the hunk's context
+                                                matches more than
+                                                one location
+                           "unanchorable"     — the hunk has no
+                                                context or removed
+                                                lines to search
+                                                against, and the
+                                                file header signals
+                                                an existing file
+                                                (i.e. not /dev/null)
+    """
+    hunks_total: int = 0
+    hunks_realigned: int = 0
+    hunks_unchanged: int = 0
+    hunks_flagged: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -79,6 +112,7 @@ class VerificationResult:
     duration_ms: int = 0
     attempts: list[dict] = field(default_factory=list)
     verifier: str = ""
+    realignment: RealignmentReport = field(default_factory=RealignmentReport)
 
 
 class Verifier(ABC):
@@ -207,6 +241,38 @@ class HostedVerifier(Verifier):
                     verifier="hosted",
                 )
 
+            # Realign the diff against the cloned file. The LLM's
+            # hunk headers are frequently off by several lines;
+            # git apply --recount fixes counts but not starting
+            # numbers, so an off-by-N header makes git apply fail
+            # even when the content is unambiguous. The realignment
+            # is best-effort: if it can't find a match, the diff
+            # passes through unchanged and git apply decides.
+            realignment = RealignmentReport()
+            target_path = (context or {}).get(
+                "stack_analysis", {}
+            ).get("file_path")
+            file_lines: list[str] = []
+            if target_path:
+                try:
+                    full = workdir / "repo" / target_path
+                    file_lines = full.read_text(
+                        encoding="utf-8", errors="replace"
+                    ).splitlines()
+                except Exception as e:
+                    logger.warning(
+                        f"Could not read {target_path} for "
+                        f"realignment: {e}"
+                    )
+
+            if file_lines:
+                diff, realignment = _realign_diff(diff, file_lines)
+                logger.info(
+                    f"Realignment: {realignment.hunks_realigned}/"
+                    f"{realignment.hunks_total} hunks realigned, "
+                    f"{len(realignment.hunks_flagged)} flagged"
+                )
+
             attempts: list[dict] = []
             max_attempts = max(1, settings.VERIFY_MAX_ATTEMPTS)
             current_diff = diff
@@ -274,6 +340,7 @@ class HostedVerifier(Verifier):
                         duration_ms=self._ms_since(start),
                         attempts=attempts,
                         verifier="hosted",
+                        realignment=realignment,
                     )
 
                 if attempt_num < max_attempts:
@@ -302,6 +369,7 @@ class HostedVerifier(Verifier):
                 duration_ms=self._ms_since(start),
                 attempts=attempts,
                 verifier="hosted",
+                realignment=realignment,
             )
 
         finally:
@@ -354,6 +422,7 @@ class HostedVerifier(Verifier):
             )
         diff_file = workdir / "fix.diff"
         text = diff if diff.endswith("\n") else diff + "\n"
+        text = _normalize_diff_paths(text)
         diff_file.write_text(text)
         proc = await asyncio.create_subprocess_exec(
             "git", "-C", str(repo_dir), "apply", "--recount",
@@ -397,6 +466,293 @@ def _detect_runner(repo_dir: Path, language: str) -> tuple[str | None, str]:
     if lang.startswith("node"):
         return _detect_node_runner(repo_dir)
     return _detect_python_runner(repo_dir)
+
+_RealignReason = Literal["ambiguous_match", "unanchorable"]
+
+
+def _realign_diff(diff: str, file_lines: list[str]) -> tuple[str, RealignmentReport]:
+    """
+    Rewrite each hunk's starting line number by searching the target
+    file for that hunk's context and removed lines.
+
+    The LLM frequently produces a diff whose hunk header declares a
+    starting line that doesn't match where the hunk's content
+    actually appears. git apply --recount fixes counts but not
+    starting numbers, so an off-by-10 header causes git apply to
+    fail with "patch does not apply" even when the content is
+    unambiguous.
+
+    This function is pure: it takes the diff text and the target
+    file's lines, and returns a corrected diff plus a report of
+    what it did. It never touches the filesystem.
+
+    Algorithm, per hunk:
+      1. Build the hunk's search signature from its context (' ')
+         and removed ('-') lines. Added ('+') lines are the fix's
+         new content and don't exist in the file.
+      2. Try three tolerance tiers in order:
+           tier 1: exact match
+           tier 2: right-strip each line, exact match
+           tier 3: strip both sides, compare non-whitespace content
+      3. At the first tier that produces matches:
+           - exactly one match  -> realign the hunk using the
+             file's actual bytes at the matched location
+           - zero matches       -> try the next tier
+           - more than one      -> stop, flag the hunk as
+             "ambiguous_match", leave it unchanged
+      4. If no tier produces a match, leave the hunk unchanged.
+
+    Hunks are processed independently. One hunk failing to realign
+    does not affect the others.
+
+    A hunk with no context and no removed lines (a pure insertion)
+    can't be anchored. If the diff's file header is --- /dev/null,
+    that's a new file and realignment isn't meaningful; the hunk is
+    left alone silently. If the file header is --- a/path, that's
+    a pure insertion into an existing file — a suspicious shape
+    that likely means a degenerate header — and the hunk is left
+    alone and flagged as "unanchorable".
+
+    "\\ No newline at end of file" markers are skipped when
+    building signatures, and their presence in the output is
+    derived from file_lines rather than carried over from the
+    input diff. The LLM's assertions about newline state are not
+    trusted.
+    """
+    report = RealignmentReport()
+    
+    lines = diff.split("\n")
+    if not lines:
+        return diff, report
+    
+    is_new_file = any(
+        line.startswith("--- /dev/null") for line in lines
+    )
+    
+    if not file_lines and not is_new_file:
+        return diff, report
+
+    # Split the diff into three regions: preamble (--- / +++ lines
+    # and anything before the first @@), hunks, and trailing noise.
+    # We only touch hunks.
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.startswith("@@"):
+            out.append(line)
+            i += 1
+            continue
+
+        # Found a hunk header. Collect its body.
+        header_match = re.match(
+            r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$",
+            line,
+        )
+        if not header_match:
+            # Malformed header; leave as-is, count it, move on.
+            out.append(line)
+            i += 1
+            continue
+
+        old_start = int(header_match.group(1))
+        new_start = int(header_match.group(3))
+        tail = header_match.group(5) or ""
+
+        body_start = i + 1
+        body_end = body_start
+        while body_end < len(lines):
+            candidate = lines[body_end]
+            if candidate.startswith("@@") or candidate.startswith("diff --git"):
+                break
+            body_end += 1
+        body = lines[body_start:body_end]
+        i = body_end
+
+        report.hunks_total += 1
+
+        # Build the search signature from context + removed lines.
+        signature: list[str] = []
+        body_meta: list[tuple[str, str]] = []  # (kind, content)
+        for raw in body:
+            if raw.startswith("\\"):
+                # No newline marker; skip during matching. Its
+                # presence in the output is derived later.
+                continue
+            if raw.startswith(" "):
+                signature.append(raw[1:])
+                body_meta.append(("context", raw[1:]))
+            elif raw.startswith("-") and not raw.startswith("---"):
+                signature.append(raw[1:])
+                body_meta.append(("removed", raw[1:]))
+            elif raw.startswith("+") and not raw.startswith("+++"):
+                body_meta.append(("added", raw[1:]))
+            else:
+                # Unknown line shape. Treat as opaque; keep it in
+                # the output but don't try to match on it.
+                body_meta.append(("opaque", raw))
+
+        if not signature:
+            # No context or removed lines to search with. Leave the
+            # hunk alone. Flag it only if this isn't a new file —
+            # a pure insertion into an existing file is
+            # unanchorable and suspicious.
+            if not is_new_file:
+                report.hunks_flagged.append({
+                    "index": report.hunks_total - 1,
+                    "reason": "unanchorable",
+                })
+            out.append(_rebuild_hunk_header(old_start, new_start, body))
+            out.extend(body)
+            report.hunks_unchanged += 1
+            continue
+
+        # Search the file at each tolerance tier.
+        match, tier = _find_unique_match(signature, file_lines)
+        if match is None and tier is None:
+            # No matches at any tier.
+            report.hunks_flagged.append({
+                "index": report.hunks_total - 1,
+                "reason": "context_not_found",
+            })
+            out.append(_rebuild_hunk_header(old_start, new_start, body))
+            out.extend(body)
+            report.hunks_unchanged += 1
+            continue
+
+        if match is None:
+            # tier is "ambiguous"
+            report.hunks_flagged.append({
+                "index": report.hunks_total - 1,
+                "reason": "ambiguous_match",
+            })
+            out.append(_rebuild_hunk_header(old_start, new_start, body))
+            out.extend(body)
+            report.hunks_unchanged += 1
+            continue
+
+        # Found a unique match at line index `match`.
+        realigned_start = match + 1  # 1-indexed for the header
+        new_body = _rebuild_hunk_body(body_meta, file_lines, match)
+        out.append(_rebuild_hunk_header(
+            realigned_start, realigned_start, new_body,
+        ))
+        out.extend(new_body)
+
+        if realigned_start != old_start:
+            report.hunks_realigned += 1
+        else:
+            report.hunks_unchanged += 1
+
+    return "\n".join(out), report
+
+
+def _find_unique_match(
+    signature: list[str],
+    file_lines: list[str],
+) -> tuple[Optional[int], Optional[str]]:
+    """
+    Return (index, tier) for the unique location where signature
+    matches, or (None, "ambiguous") if multiple, or (None, None) if
+    none.
+
+    Tier 1 (returned as tier="exact"): exact per-line match.
+    Tier 2 (tier="rstrip"): right-strip each line before comparing.
+    Tier 3 (tier="strip"): strip both sides before comparing.
+
+    A tier is only tried if all stricter tiers produced zero
+    matches. If a tier produces multiple matches, we stop and
+    report ambiguity — looser tiers would only match more.
+    """
+    def _matches_at(normalize):
+        sig = [normalize(s) for s in signature]
+        hits = []
+        n = len(file_lines)
+        m = len(sig)
+        if m == 0 or m > n:
+            return hits
+        for start in range(n - m + 1):
+            window = [normalize(file_lines[start + k]) for k in range(m)]
+            if window == sig:
+                hits.append(start)
+        return hits
+
+    tiers = [
+        ("exact", lambda s: s),
+        ("rstrip", lambda s: s.rstrip()),
+        ("strip", lambda s: s.strip()),
+    ]
+    for tier_name, normalize in tiers:
+        hits = _matches_at(normalize)
+        if len(hits) == 1:
+            return hits[0], tier_name
+        if len(hits) > 1:
+            return None, "ambiguous"
+        # Zero hits; try next tier.
+    return None, None
+
+
+def _rebuild_hunk_header(
+    old_start: int,
+    new_start: int,
+    body: list[str],
+) -> str:
+    """
+    Recompute a hunk header from its body.
+
+    Counts are derived from the body: context counts toward both
+    old and new, removed toward old, added toward new.
+    """
+    old_count = 0
+    new_count = 0
+    for line in body:
+        if line.startswith("\\"):
+            continue
+        if line.startswith(" "):
+            old_count += 1
+            new_count += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            old_count += 1
+        elif line.startswith("+") and not line.startswith("+++"):
+            new_count += 1
+    return f"@@ -{old_start},{old_count} +{new_start},{new_count} @@"
+
+
+def _rebuild_hunk_body(
+    body_meta: list[tuple[str, str]],
+    file_lines: list[str],
+    start_index: int,
+) -> list[str]:
+    """
+    Reconstruct the hunk body from file_lines and the LLM's added
+    lines.
+
+    Context and removed lines come from the file at the matched
+    location — not from the LLM's diff, which may have the wrong
+    indentation or trailing whitespace.
+
+    Added lines come from the LLM, because the file doesn't contain
+    them yet.
+
+    The "\\ No newline at end of file" marker is derived from
+    file_lines, not carried over from the LLM's diff: it appears
+    only if the last line referenced by the hunk is the file's
+    last line and the file has no trailing newline.
+    """
+    out: list[str] = []
+    cursor = start_index
+    for kind, _content in body_meta:
+        if kind == "context":
+            out.append(" " + file_lines[cursor])
+            cursor += 1
+        elif kind == "removed":
+            out.append("-" + file_lines[cursor])
+            cursor += 1
+        elif kind == "added":
+            out.append("+" + _content)
+        else:
+            out.append(_content)
+    return out
 
 
 def _detect_python_runner(repo_dir: Path) -> tuple[str | None, str]:
@@ -629,3 +985,31 @@ def get_verifier(*, has_runner: bool = False) -> Verifier:
 
     return HostedVerifier()
 
+def _normalize_diff_paths(diff: str) -> str:
+    """
+    Ensure the diff's --- and +++ file headers use the a/ and b/
+    prefixes that git apply -p1 expects.
+
+    LLMs frequently emit `--- path/to/file` and `+++ path/to/file`
+    without the a/ and b/ prefixes. git apply -p1 strips the first
+    path component by default, so without the prefixes it strips a
+    real directory and looks for the file at the wrong path.
+
+    This normalizes both forms to use a/ and b/.
+    """
+    lines = diff.split("\n")
+    out = []
+    for line in lines:
+        if line.startswith("--- ") and not line.startswith("--- /dev/null"):
+            rest = line[4:]
+            if not rest.startswith("a/"):
+                rest = "a/" + rest
+            out.append("--- " + rest)
+        elif line.startswith("+++ ") and not line.startswith("+++ /dev/null"):
+            rest = line[4:]
+            if not rest.startswith("b/"):
+                rest = "b/" + rest
+            out.append("+++ " + rest)
+        else:
+            out.append(line)
+    return "\n".join(out)
