@@ -482,6 +482,12 @@ class IncidentService:
             "duration_ms": result.duration_ms,
             "attempts": result.attempts,
             "verifier": result.verifier,
+            "realignment": {
+                "hunks_total": result.realignment.hunks_total,
+                "hunks_realigned": result.realignment.hunks_realigned,
+                "hunks_unchanged": result.realignment.hunks_unchanged,
+                "hunks_flagged": result.realignment.hunks_flagged,
+            },
         }}
 
     def _infer_language(self, stack_analysis: dict, repo_name: str) -> str:
