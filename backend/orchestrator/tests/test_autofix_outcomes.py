@@ -473,14 +473,6 @@ def test_diff_valid_with_hunk():
     assert AutoFixService._diff_looks_valid(diff) is True
 
 
-def test_diff_valid_with_bare_hunk_marker():
-    """Hunk counts don't need to be right — git apply --recount fixes them."""
-    from src.services.autofix_service import AutoFixService
-
-    diff = "--- a/x.py\n+++ b/x.py\n@@\n-old\n+new\n"
-    assert AutoFixService._diff_looks_valid(diff) is True
-
-
 def test_diff_invalid_no_file_markers():
     from src.services.autofix_service import AutoFixService
 
@@ -501,3 +493,49 @@ def test_diff_invalid_empty_or_truncated():
     assert AutoFixService._diff_looks_valid("") is False
     assert AutoFixService._diff_looks_valid("--- a/x.py\n") is False
     assert AutoFixService._diff_looks_valid("short") is False
+
+def test_trim_trailing_noise_strips_backticks():
+    from src.services.autofix_service import AutoFixService
+
+    diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n```\n"
+    trimmed = AutoFixService._trim_trailing_noise(diff)
+    assert not trimmed.endswith("```")
+    assert trimmed.endswith("+new")
+
+
+def test_trim_trailing_noise_preserves_valid_diff():
+    from src.services.autofix_service import AutoFixService
+
+    diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new"
+    assert AutoFixService._trim_trailing_noise(diff) == diff
+
+def test_diff_invalid_bare_hunk_without_numbers():
+    """
+    A bare @@ with no coordinates is invalid. git apply --recount
+    can fix counts but cannot infer starting line numbers.
+    """
+    from src.services.autofix_service import AutoFixService
+
+    diff = (
+        "--- a/x.py\n"
+        "+++ b/x.py\n"
+        "@@\n"
+        "-old\n"
+        "+new\n"
+    )
+    assert AutoFixService._diff_looks_valid(diff) is False
+
+
+def test_diff_valid_with_numbered_hunks():
+    """A proper @@ -N,M +N,M @@ header passes."""
+    from src.services.autofix_service import AutoFixService
+
+    diff = (
+        "--- a/x.py\n"
+        "+++ b/x.py\n"
+        "@@ -42,3 +42,3 @@\n"
+        " context\n"
+        "-old\n"
+        "+new\n"
+    )
+    assert AutoFixService._diff_looks_valid(diff) is True

@@ -306,6 +306,94 @@ async def test_get_file_content_returns_code_snippet(service):
 
 
 @pytest.mark.asyncio
+async def test_get_file_content_includes_raw_snippet(monkeypatch):
+    """
+    raw_snippet is the unannotated version of code_snippet. The fix
+    prompt uses it because the marker prefix in code_snippet was
+    being confused with the code's own indentation.
+    """
+    from src.services.github_service import GitHubService
+
+    mock_repo = MagicMock()
+    mock_content = MagicMock()
+    mock_content.decoded_content.decode.return_value = (
+        "line1\nline2\nline3\nline4\nline5"
+    )
+    mock_repo.get_contents.return_value = mock_content
+
+    svc = GitHubService()
+    monkeypatch.setattr(svc, "_get_repo", AsyncMock(return_value=mock_repo))
+
+    result = await svc.get_file_content(
+        repo_name="owner/repo",
+        file_path="x.py",
+        line_number=3,
+        context_lines=2,
+    )
+
+    assert "raw_snippet" in result
+    assert "code_snippet" in result
+
+    # raw_snippet has no line-number prefix and no >>> marker
+    for line in result["raw_snippet"].split("\n"):
+        assert not line[:4].strip().isdigit(), (
+            f"raw_snippet line has a numeric prefix: {line!r}"
+        )
+        assert ">>>" not in line, (
+            f"raw_snippet line has a marker: {line!r}"
+        )
+
+    # Each raw line is the tail of the corresponding annotated line.
+    raw_lines = result["raw_snippet"].split("\n")
+    annotated_lines = result["code_snippet"].split("\n")
+    assert len(raw_lines) == len(annotated_lines)
+    for raw, annotated in zip(raw_lines, annotated_lines):
+        assert annotated.endswith(raw)
+
+
+@pytest.mark.asyncio
+async def test_get_file_content_raw_snippet_matches_source(monkeypatch):
+    """
+    raw_snippet must be byte-for-byte identical to the source lines
+    in the requested window. This is the whole point of the field —
+    the fix prompt uses it verbatim.
+    """
+    from src.services.github_service import GitHubService
+
+    source_lines = [
+        "def foo():",
+        "    x = 1",
+        "    if x:",
+        "        return x",
+        "    return None",
+    ]
+    mock_repo = MagicMock()
+    mock_content = MagicMock()
+    mock_content.decoded_content.decode.return_value = "\n".join(source_lines)
+    mock_repo.get_contents.return_value = mock_content
+
+    svc = GitHubService()
+    monkeypatch.setattr(svc, "_get_repo", AsyncMock(return_value=mock_repo))
+
+    result = await svc.get_file_content(
+        repo_name="owner/repo",
+        file_path="x.py",
+        line_number=3,
+        context_lines=2,
+    )
+
+    # line 3 ± 2 = lines 1..5. The window is the whole file.
+    expected = "\n".join(source_lines)
+    assert result["raw_snippet"] == expected
+
+    # And the annotated version must preserve the code after the prefix.
+    for raw, annotated in zip(
+        result["raw_snippet"].split("\n"),
+        result["code_snippet"].split("\n"),
+    ):
+        assert annotated.endswith(raw)
+
+@pytest.mark.asyncio
 async def test_get_file_content_line_at_start(service):
     """
     Situation: Line number is at start of file.
