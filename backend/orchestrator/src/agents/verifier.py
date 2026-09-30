@@ -520,20 +520,17 @@ def _realign_diff(diff: str, file_lines: list[str]) -> tuple[str, RealignmentRep
     trusted.
     """
     report = RealignmentReport()
-
-    if not lines:
-        return diff, report
+    
     lines = diff.split("\n")
     if not lines:
         return diff, report
-
-    # Identify the diff's --- / +++ file header, so we can tell
-    # a /dev/null insertion from an existing-file insertion.
-    is_new_file = False
-    for line in lines:
-        if line.startswith("--- "):
-            is_new_file = line.startswith("--- /dev/null")
-            break
+    
+    is_new_file = any(
+        line.startswith("--- /dev/null") for line in lines
+    )
+    
+    if not file_lines and not is_new_file:
+        return diff, report
 
     # Split the diff into three regions: preamble (--- / +++ lines
     # and anything before the first @@), hunks, and trailing noise.
