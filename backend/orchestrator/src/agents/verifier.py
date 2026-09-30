@@ -612,6 +612,10 @@ def _realign_diff(diff: str, file_lines: list[str]) -> tuple[str, RealignmentRep
         match, tier = _find_unique_match(signature, file_lines)
         if match is None and tier is None:
             # No matches at any tier.
+            report.hunks_flagged.append({
+                "index": report.hunks_total - 1,
+                "reason": "context_not_found",
+            })
             out.append(_rebuild_hunk_header(old_start, new_start, body))
             out.extend(body)
             report.hunks_unchanged += 1
