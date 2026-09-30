@@ -521,6 +521,8 @@ def _realign_diff(diff: str, file_lines: list[str]) -> tuple[str, RealignmentRep
     """
     report = RealignmentReport()
 
+    if not lines:
+        return diff, report
     lines = diff.split("\n")
     if not lines:
         return diff, report
