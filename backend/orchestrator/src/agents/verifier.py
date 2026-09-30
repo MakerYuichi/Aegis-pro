@@ -181,11 +181,13 @@ class HostedVerifier(Verifier):
         context: dict | None = None,
     ) -> VerificationResult:
         start = time.monotonic()
+        logger.error(f"[TRACE] verify start repo={repo_name} diff_len={len(diff)}")
 
         workdir = self._new_workdir()
         try:
             clone_ok, clone_err = await self._clone(repo_name, commit_sha, workdir)
             if not clone_ok:
+                logger.error(f"[TRACE] return: clone_failed")
                 return VerificationResult(
                     passed=False,
                     reason="clone_failed",
@@ -196,6 +198,7 @@ class HostedVerifier(Verifier):
 
             command, reason_prefix = _detect_runner(workdir / "repo", language)
             if command is None:
+                logger.error(f"[TRACE] return: no_verification_surface")
                 return VerificationResult(
                     passed=False,
                     reason="no_verification_surface",
@@ -216,11 +219,22 @@ class HostedVerifier(Verifier):
                     workdir, current_diff, reset=True
                 )
                 if not apply_ok:
+                    # Include a preview of the diff and the commit so
+                    # the failure is diagnosable from the incident
+                    # record alone. Without the commit, a future
+                    # version-mismatch failure would require the same
+                    # manual archaeology this run just went through.
+                    diff_preview = current_diff[:400] if current_diff else "<empty>"
                     attempts.append({
                         "attempt": attempt_num,
                         "passed": False,
-                        "output": f"git apply failed: {apply_err}",
+                        "output": (
+                            f"git apply failed at commit {commit_sha}: {apply_err}\n"
+                            f"--- diff (first 400 chars) ---\n"
+                            f"{diff_preview}"
+                        ),
                     })
+
                     if attempt_num < max_attempts:
                         repaired = await _attempt_repair(
                             original_context=context or {},
@@ -252,6 +266,7 @@ class HostedVerifier(Verifier):
                 })
 
                 if passed:
+                    logger.error(f"[TRACE] return: tests_passed attempts={len(attempts)}")
                     return VerificationResult(
                         passed=True,
                         reason=f"{reason_prefix}_passed",
@@ -338,7 +353,8 @@ class HostedVerifier(Verifier):
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             )
         diff_file = workdir / "fix.diff"
-        diff_file.write_text(diff)
+        text = diff if diff.endswith("\n") else diff + "\n"
+        diff_file.write_text(text)
         proc = await asyncio.create_subprocess_exec(
             "git", "-C", str(repo_dir), "apply", "--recount",
             "--whitespace=nowarn", str(diff_file),
@@ -516,22 +532,47 @@ async def _attempt_repair(
     analysis = original_context.get("analysis") or {}
     stack = original_context.get("stack_analysis") or {}
 
+    # Distinguish between "the diff applied but tests failed" and
+    # "the diff didn't apply at all". The repair strategy is different:
+    # in the first case the LLM needs to reconsider the fix; in the
+    # second, it needs to make the diff actually apply.
+    if "git apply failed" in failed_output or "corrupt patch" in failed_output:
+        situation = (
+            "A previous diff was generated but git apply rejected it "
+            "before any tests could run. The diff did not apply."
+        )
+        instruction = (
+            "Produce a NEW diff that will apply cleanly. Pay close "
+            "attention to the exact lines in the current code — the "
+            "hunk context must match byte-for-byte. Return ONLY a "
+            "unified diff in git-apply-compatible format. No "
+            "explanation, no prose, no Markdown fences."
+        )
+    else:
+        situation = (
+            "A previous fix was applied and the tests failed."
+        )
+        instruction = (
+            "Reconsider the diagnosis. If the root cause was wrong, "
+            "correct it. Otherwise revise the diff. Return ONLY the "
+            "corrected unified diff in git-apply-compatible format. "
+            "No explanation, no prose, no Markdown fences."
+        )
+
     prompt = (
-        "A previous fix was applied but the tests failed.\n\n"
+        f"{situation}\n\n"
         f"Original stack: {stack.get('exception_type', 'Unknown')} at "
         f"{stack.get('file_path', 'unknown')}:{stack.get('line_number', 'unknown')}\n"
         f"Original root cause: {analysis.get('root_cause', 'unknown')}\n"
         f"Original suggested fix: {analysis.get('suggested_fix', 'unknown')}\n\n"
         "Previous diff:\n"
         f"{previous_diff}\n\n"
-        "Test failure output:\n"
+        "Failure output:\n"
         f"{failed_output}\n\n"
-        "Reconsider the diagnosis. If the root cause was wrong, correct it. "
-        "Otherwise revise the diff. Return ONLY the corrected unified diff "
-        "in git-apply-compatible format. No explanation, no prose."
+        f"{instruction}"
     )
 
-    content = await llm.complete_raw(
+    resp = await llm.complete_raw_detailed(
         prompt=prompt,
         system=(
             "You are an expert software engineer. Return ONLY a unified "
@@ -541,14 +582,19 @@ async def _attempt_repair(
         temperature=0.2,
         max_tokens=1500,
     )
-    if not content:
+    if not resp.content:
         return None
 
-    # Apply the same extraction that generate_fix applies to the
-    # initial diff. LLMs wrap their output the same way on retries
-    # as on first attempts.
+    logger.info(
+        f"Repair response: {len(resp.content)} chars, "
+        f"finish_reason={resp.finish_reason!r}"
+    )
+    if resp.finish_reason in ("length", "MAX_TOKENS", "max_tokens"):
+        logger.warning("Repair response was truncated by token limit.")
+        return None
+
     from src.services.autofix_service import AutoFixService
-    extracted = AutoFixService._extract_diff(content)
+    extracted = AutoFixService._extract_diff(resp.content)
     extracted = AutoFixService._trim_trailing_noise(extracted)
     if not AutoFixService._diff_looks_valid(extracted):
         return None
