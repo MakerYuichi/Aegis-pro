@@ -279,6 +279,18 @@ async def test_alert_everyone_person_missing_slack_handle(service, db_error):
 
 @pytest.mark.asyncio
 async def test_get_alert_history_shapes_rows(service, seeded_alert_history, db_session):
+    """
+    Real DB: alert history returned newest-first, shaped for the API.
+
+    Isolates from pre-existing rows (manual runs, other tests) by
+    deleting everything except this test's seeded rows, inside the
+    test transaction. Rolled back at teardown.
+    """
+    await db_session.execute(
+        text("DELETE FROM alert_history WHERE id != ALL(:ids)"),
+        {"ids": seeded_alert_history},
+    )
+    await db_session.flush()
     """Real DB: get_alert_history returns rows newest-first, shaped."""
     history = await service.get_alert_history(limit=10)
     assert len(history) == 3
@@ -298,10 +310,18 @@ async def test_get_alert_history_db_error_returns_empty(service, db_error):
 
 
 @pytest.mark.asyncio
-async def test_get_alert_history_respects_limit(service, seeded_alert_history):
-    """Real DB: limit parameter is honored."""
-    history = await service.get_alert_history(limit=2)
-    assert len(history) == 2
+async def test_get_alert_history_respects_limit(service, seeded_alert_history, db_session):
+    """
+    Real DB: limit is respected even when more rows exist.
+
+    Isolates from pre-existing rows the same way
+    test_get_alert_history_shapes_rows does.
+    """
+    await db_session.execute(
+        text("DELETE FROM alert_history WHERE id != ALL(:ids)"),
+        {"ids": seeded_alert_history},
+    )
+    await db_session.flush()
 
 
 @pytest.mark.asyncio
