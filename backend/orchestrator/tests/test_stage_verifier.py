@@ -122,14 +122,17 @@ async def test_stage_verifier_infer_language_defaults_to_python():
 
 
 @pytest.mark.asyncio
-async def test_stage_verifier_noop_when_flag_disabled():
+async def test_stage_verifier_noop_when_flag_disabled(monkeypatch):
     """
-    VERIFY_BEFORE_REPORT=false is the default. The real get_verifier()
-    returns NoOpVerifier, whose result reason is "disabled". This test
-    exercises the real path (not a mock) so the wiring is confirmed.
+    VERIFY_BEFORE_REPORT=false returns NoOpVerifier, whose result
+    reason is "disabled". This test exercises the real path (not a
+    mock) so the wiring is confirmed. The flag is forced explicitly
+    so the test doesn't depend on ambient .env config.
     """
+    monkeypatch.setattr(
+        "src.agents.verifier.settings.VERIFY_BEFORE_REPORT", False
+    )
     svc = _svc()
-    # Default settings: VERIFY_BEFORE_REPORT=false
     result = await svc._stage_verifier(_context())
     assert result["verification"]["passed"] is True
     assert result["verification"]["reason"] == "disabled"

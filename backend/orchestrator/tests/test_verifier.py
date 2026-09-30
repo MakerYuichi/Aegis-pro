@@ -114,10 +114,11 @@ async def test_noop_verifier_ignores_context():
 # get_verifier factory
 # ---------------------------------------------------------------------------
 
-def test_get_verifier_disabled_by_default():
-    """Default settings have VERIFY_BEFORE_REPORT=False."""
-    from src.config import settings
-    assert settings.VERIFY_BEFORE_REPORT is False
+def test_get_verifier_disabled_by_default(monkeypatch):
+    """With VERIFY_BEFORE_REPORT=false, get_verifier returns NoOpVerifier."""
+    monkeypatch.setattr(
+        "src.agents.verifier.settings.VERIFY_BEFORE_REPORT", False
+    )
     v = get_verifier()
     assert isinstance(v, NoOpVerifier)
 
@@ -125,6 +126,9 @@ def test_get_verifier_disabled_by_default():
 def test_get_verifier_hosted_when_enabled(monkeypatch):
     monkeypatch.setattr(
         "src.agents.verifier.settings.VERIFY_BEFORE_REPORT", True
+    )
+    monkeypatch.setattr(
+        "src.agents.verifier.settings.DEMO_MODE", False
     )
     v = get_verifier()
     assert isinstance(v, HostedVerifier)
@@ -140,15 +144,16 @@ def test_get_verifier_runner_raises(monkeypatch):
         get_verifier(has_runner=True)
 
 
-def test_get_verifier_runner_raises_even_when_disabled():
+def test_get_verifier_runner_raises_even_when_disabled(monkeypatch):
     """
     has_runner=True is checked before the feature flag. A caller who
     explicitly asks for a runner gets a hard error regardless of
     VERIFY_BEFORE_REPORT, because the runner is a separate concept
     from "should we verify at all."
     """
-    from src.config import settings
-    assert settings.VERIFY_BEFORE_REPORT is False
+    monkeypatch.setattr(
+        "src.agents.verifier.settings.VERIFY_BEFORE_REPORT", False
+    )
     with pytest.raises(ValueError):
         get_verifier(has_runner=True)
 
