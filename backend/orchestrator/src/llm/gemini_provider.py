@@ -55,6 +55,7 @@ class GeminiProvider(LLMProvider):
                 full_prompt,
             )
             content = getattr(resp, "text", "") or ""
+            finish_reason = _normalize_gemini_finish_reason(resp)
         except Exception as e:
             logger.error(f"Gemini call failed: {e}")
             raise LLMProviderError(f"Gemini provider error: {e}") from e
@@ -63,4 +64,39 @@ class GeminiProvider(LLMProvider):
             content=content,
             provider=self.name,
             model=self._model_name,
+            finish_reason=finish_reason,
         )
+
+def _normalize_gemini_finish_reason(resp) -> Optional[str]:
+    """
+    Map Gemini's finish_reason enum to the same vocabulary the
+    OpenAI-compatible providers use.
+
+    Gemini returns a protos.Candidate.FinishReason enum whose names
+    are STOP, MAX_TOKENS, SAFETY, RECITATION, OTHER. The caller
+    (LLMService.complete_raw and its consumers) should be able to
+    check finish_reason == "length" uniformly across providers,
+    so we translate here.
+
+    Returns None if the response has no candidates or the enum
+    isn't readable — some SDK shapes are inconsistent.
+    """
+    try:
+        candidates = getattr(resp, "candidates", None) or []
+        if not candidates:
+            return None
+        raw_reason = getattr(candidates[0], "finish_reason", None)
+        if raw_reason is None:
+            return None
+        # Enum values have a .name attribute; sometimes it's already
+        # a string on some SDK versions.
+        name = getattr(raw_reason, "name", None) or str(raw_reason)
+        return {
+            "STOP": "stop",
+            "MAX_TOKENS": "length",
+            "SAFETY": "content_filter",
+            "RECITATION": "content_filter",
+            "OTHER": "stop",
+        }.get(name, name.lower())
+    except Exception:
+        return None

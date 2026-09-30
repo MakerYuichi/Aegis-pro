@@ -68,6 +68,33 @@ class AutoFixService:
         return text
     
     @staticmethod
+    def _trim_trailing_noise(diff: str) -> str:
+        """
+        Strip trailing lines that can't be part of a unified diff.
+
+        The extraction from case 2 and case 3 can leave trailing
+        backticks, prose, or blank lines if the LLM's output doesn't
+        match the expected fence shape exactly. A diff's last line is
+        always a context line (' '), an addition ('+'), a removal
+        ('-'), or a '\\' no-newline marker. Anything else is noise.
+
+        The returned string never has a trailing newline. Tests that
+        compare against this function's output should use .rstrip()
+        on their expected value.
+        """
+        lines = diff.split("\n")
+        while lines:
+            last = lines[-1]
+            if last == "":
+                lines.pop()
+                continue
+            if last.startswith(" ") or last.startswith("+") or \
+               last.startswith("-") or last.startswith("\\"):
+                break
+            lines.pop()
+        return "\n".join(lines)
+    
+    @staticmethod
     def _diff_looks_valid(diff: str) -> bool:
         """
         Cheap structural check on a diff before it goes to the verifier
@@ -75,19 +102,32 @@ class AutoFixService:
 
           - No --- / +++ file markers
           - No hunk header at all
+          - Bare @@ without line numbers (git apply cannot infer starts)
           - Truncated output
 
         Does not check hunk counts — the verifier invokes git apply
         with --recount, which trusts the body over the header counts.
+        Starting line numbers, however, cannot be inferred and must
+        be present.
         """
         if not diff or len(diff) < 20:
             return False
         lines = diff.split("\n")
         if not any(l.startswith("--- ") for l in lines):
             return False
-        if not any(l.startswith("@@") for l in lines):
-            return False
-        return True
+
+        has_hunk = False
+        for line in lines:
+            if not line.startswith("@@"):
+                continue
+            has_hunk = True
+            # Require "@@ -N..." or "@@ -N,M ..." — a bare "@@" is
+            # rejected because git apply --recount cannot infer the
+            # starting line number.
+            if not re.match(r"^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@", line):
+                return False
+
+        return has_hunk
     
     
     async def generate_fix(
@@ -126,14 +166,43 @@ class AutoFixService:
 Error: {error_type}
 Root Cause: {root_cause}
 File: {file_path}
-Line: {line_number}
+Target line: {line_number}
+The diff must modify ONLY this line, or a small range containing it.
+Do not modify other lines.
 
 Current Code:
-{code_context['code_snippet']}
+{code_context.get('raw_snippet') or code_context['code_snippet']}
 
 Return ONLY a unified diff, in the exact format git apply expects.
 No prose before or after. No Markdown code fences. No explanation.
 No headings.
+
+CRITICAL — how the removed lines must look:
+
+The '-' lines in your diff must match lines that appear in the
+"Current Code" block above, byte-for-byte. That includes the exact
+number of leading spaces. Do not re-indent, do not re-type from
+memory. Copy the exact characters from the code above, then prefix
+the copied line with a single '-'.
+
+The context lines (prefixed with a single space) follow the same
+rule: copy them exactly from the code above.
+
+If a '-' or ' ' line does not match the file byte-for-byte, git
+apply will reject the entire patch. This is the single most common
+reason an LLM-generated diff fails.
+
+Every hunk MUST have a full header with line numbers, in the
+exact form:
+
+    @@ -old_start,old_count +new_start,new_count @@
+
+A bare @@ with no numbers is invalid and git apply will reject the
+entire patch. Estimate the starting line number from the "Line: N"
+field above (the first context line of the hunk is usually one or
+two lines before the target). The counts may be slightly off —
+git apply --recount will correct them — but the starting numbers
+must be present and roughly right.
 
 CRITICAL: Every hunk must have a full header with line numbers,
 in the form:
@@ -162,23 +231,43 @@ Full format example:
  context line
 """
 
-            raw_response = await self.llm.complete_raw(
+            raw_response = await self.llm.complete_raw_detailed(
                 prompt=prompt,
-                system=(
-                    "You are an expert software engineer. Return ONLY a "
-                    "unified diff in git-apply-compatible format. No "
-                    "prose, no Markdown fences, no explanation."
-                ),
+                system=(...),
                 temperature=0.2,
                 max_tokens=1500,
             )
 
-            if not raw_response:
+            if not raw_response.content:
                 return {"error": "All LLM providers failed to generate a fix"}
 
+            logger.info(
+                f"Fix response: {len(raw_response.content)} chars, "
+                f"finish_reason={raw_response.finish_reason!r}, "
+                f"provider={raw_response.provider!r}, "
+                f"model={raw_response.model!r}"
+            )
+            if raw_response.finish_reason in ("length", "MAX_TOKENS", "max_tokens"):
+                logger.warning(
+                    f"Fix response was truncated by token limit. "
+                    f"Diff will likely be incomplete."
+                )
+                return {
+                    "error": (
+                        "LLM response was cut off by the token limit "
+                        "before the diff finished. Increase max_tokens "
+                        "or shorten the prompt."
+                    )
+                }
+
             # LLMs routinely wrap diffs in Markdown or prepend prose.
-            # git apply needs a bare diff. Extract what we need.
-            fix_result = self._extract_diff(raw_response)
+            # git apply needs a bare diff. Extract what we need, then
+            # trim trailing noise (stray backticks, prose after the
+            # diff). Hunk counts are left as-is — the verifier passes
+            # --recount to git apply, which trusts the body over the
+            # header counts.
+            fix_result = self._extract_diff(raw_response.content)
+            fix_result = self._trim_trailing_noise(fix_result)
             if not self._diff_looks_valid(fix_result):
                 logger.warning(
                     f"Auto-fix produced a structurally invalid diff for "

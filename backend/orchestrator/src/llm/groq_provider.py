@@ -72,11 +72,18 @@ class GroqProvider(LLMProvider):
 
                 resp = await self._client_instance().chat.completions.create(**kwargs)
                 content = resp.choices[0].message.content or ""
+                # Read finish_reason off the same choice we read
+                # content from. Groq uses OpenAI's shape: a plain
+                # string ("stop" | "length" | "content_filter" |
+                # "tool_calls"). None is fine — some SDK versions
+                # don't populate it.
+                finish_reason = getattr(resp.choices[0], "finish_reason", None)
                 return LLMResponse(
                     content=content,
                     provider=self.name,
                     model=model,
                     raw=resp.model_dump() if hasattr(resp, "model_dump") else None,
+                    finish_reason=finish_reason,
                 )
             except Exception as e:
                 logger.warning(f"❌ Groq model {model} failed: {e}")

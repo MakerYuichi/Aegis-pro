@@ -5,6 +5,16 @@ import re
 
 from src.llm.base import LLMProviderError
 from src.llm.factory import get_provider_chain
+from dataclasses import dataclass
+
+
+@dataclass
+class RawCompletion:
+    """Result of an LLM call with metadata intact."""
+    content: str | None
+    finish_reason: str | None
+    provider: str | None
+    model: str | None
 
 
 class LLMService:
@@ -144,27 +154,28 @@ class LLMService:
             "confidence": confidence
         }
         
-    async def complete_raw(
+    async def complete_raw_detailed(
         self,
         prompt: str,
         system: str | None = None,
         temperature: float = 0.2,
         max_tokens: int = 1000,
         response_format: str = "text",
-    ) -> str | None:
+    ) -> "RawCompletion":
         """
-        Call the chain with a raw prompt. Returns the raw text, or None.
+        Like complete_raw, but returns the full response metadata
+        alongside the content. Use this when the caller needs to know
+        whether a response was cut off by the token limit
+        (finish_reason == "length") or stopped naturally
+        (finish_reason == "stop").
 
-        response_format:
-            "text"        — free-form
-            "json_object" — caller expects a JSON object
-            "json_array"  — caller expects a JSON array. Because OpenAI-compatible
-                            JSON mode only emits top-level objects, we wrap the
-                            prompt on the way in and unwrap the response on the
-                            way out so callers get the array they asked for.
+        Complete_raw remains the simpler entry point for callers that
+        only care about the text. Both share the same underlying chain
+        call.
         """
         if not self.chain:
-            return None
+            return RawCompletion(content=None, finish_reason=None,
+                                 provider=None, model=None)
 
         effective_format = response_format
         wrap_array = False
@@ -185,14 +196,44 @@ class LLMService:
             response_format=effective_format,
         )
         if not resp:
-            return None
+            return RawCompletion(content=None, finish_reason=None,
+                                 provider=None, model=None)
 
         content = resp.content
-
         if wrap_array:
             content = self._unwrap_items_array(content)
 
-        return content
+        return RawCompletion(
+            content=content,
+            finish_reason=resp.finish_reason,
+            provider=resp.provider,
+            model=resp.model,
+        )
+
+    async def complete_raw(
+        self,
+        prompt: str,
+        system: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 1000,
+        response_format: str = "text",
+    ) -> str | None:
+        """
+        Call the chain with a raw prompt. Returns the raw text, or None.
+
+        For callers that need to distinguish "the model stopped
+        naturally" from "the model was cut off by the token limit",
+        use complete_raw_detailed instead — this method discards
+        the finish_reason.
+        """
+        detailed = await self.complete_raw_detailed(
+            prompt=prompt,
+            system=system,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+        )
+        return detailed.content
 
     @staticmethod
     def _unwrap_items_array(content: str) -> str:

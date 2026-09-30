@@ -389,9 +389,18 @@ async def test_verify_attempt_repair_prompt_includes_context_and_output(monkeypa
         "+added\n"
     )
 
+    from src.services.llm_service import RawCompletion
+
     fake_llm = MagicMock()
     fake_llm.chain = MagicMock()
-    fake_llm.complete_raw = AsyncMock(return_value=valid_diff)
+    fake_llm.complete_raw_detailed = AsyncMock(
+        return_value=RawCompletion(
+            content=valid_diff,
+            finish_reason="stop",
+            provider="mock",
+            model="mock-model",
+        )
+    )
 
     with patch("src.services.llm_service.LLMService", return_value=fake_llm):
         result = await vmod._attempt_repair(
@@ -407,7 +416,7 @@ async def test_verify_attempt_repair_prompt_includes_context_and_output(monkeypa
         )
 
     assert result == valid_diff.rstrip()
-    prompt = fake_llm.complete_raw.await_args.kwargs["prompt"]
+    prompt = fake_llm.complete_raw_detailed.await_args.kwargs["prompt"]
     assert "pool exhausted" in prompt
     assert "SQLException" in prompt
     assert "assertion error" in prompt
@@ -511,15 +520,24 @@ async def test_attempt_repair_extracts_and_validates(monkeypatch):
     from src.agents import verifier as vmod
 
     # Wrapped output — extraction should strip the fence.
+    from src.services.llm_service import RawCompletion
+
     fake_llm = MagicMock()
     fake_llm.chain = MagicMock()
-    fake_llm.complete_raw = AsyncMock(return_value=(
-        "Sure, here you go:\n\n"
-        "```diff\n"
-        "--- a/x.py\n+++ b/x.py\n"
-        "@@ -1 +1 @@\n-old\n+new\n"
-        "```\n"
-    ))
+    fake_llm.complete_raw_detailed = AsyncMock(
+        return_value=RawCompletion(
+            content=(
+                "Sure, here you go:\n\n"
+                "```diff\n"
+                "--- a/x.py\n+++ b/x.py\n"
+                "@@ -1 +1 @@\n-old\n+new\n"
+                "```\n"
+            ),
+            finish_reason="stop",
+            provider="mock",
+            model="mock-model",
+        )
+    )
 
     with patch("src.services.llm_service.LLMService", return_value=fake_llm):
         result = await vmod._attempt_repair(
@@ -538,14 +556,67 @@ async def test_attempt_repair_returns_none_on_garbage(monkeypatch):
     """A response with no diff at all returns None."""
     from src.agents import verifier as vmod
 
+    from src.services.llm_service import RawCompletion
+
     fake_llm = MagicMock()
     fake_llm.chain = MagicMock()
-    fake_llm.complete_raw = AsyncMock(return_value="I cannot fix this.")
+    fake_llm.complete_raw_detailed = AsyncMock(
+        return_value=RawCompletion(
+            content="I cannot fix this.",
+            finish_reason="stop",
+            provider="mock",
+            model="mock-model",
+        )
+    )
 
     with patch("src.services.llm_service.LLMService", return_value=fake_llm):
         result = await vmod._attempt_repair(
             original_context={},
             failed_output="test failed",
+            previous_diff="--- a\n+++ b\n",
+        )
+
+    assert result is None
+
+@pytest.mark.asyncio
+async def test_attempt_repair_returns_none_on_truncated_response():
+    """
+    A response that stopped because of the token limit is rejected
+    even if the diff-shaped prefix it produced looks valid. This is
+    the bug that took six rounds of debugging to identify: a
+    truncated diff and a malformed diff both produce "corrupt patch"
+    from git apply, and only finish_reason tells them apart.
+    """
+    from src.agents import verifier as vmod
+    from src.services.llm_service import RawCompletion
+
+    # A diff that parses but is incomplete — the hunk header claims
+    # more lines than the body contains.
+    truncated = (
+        "--- a/x.py\n"
+        "+++ b/x.py\n"
+        "@@ -1,5 +1,5 @@\n"
+        " ctx1\n"
+        "-old\n"
+        "+new\n"
+        # body ends here — should have 2 more context lines
+    )
+
+    fake_llm = MagicMock()
+    fake_llm.chain = MagicMock()
+    fake_llm.complete_raw_detailed = AsyncMock(
+        return_value=RawCompletion(
+            content=truncated,
+            finish_reason="length",
+            provider="mock",
+            model="mock-model",
+        )
+    )
+
+    with patch("src.services.llm_service.LLMService", return_value=fake_llm):
+        result = await vmod._attempt_repair(
+            original_context={},
+            failed_output="git apply failed",
             previous_diff="--- a\n+++ b\n",
         )
 
