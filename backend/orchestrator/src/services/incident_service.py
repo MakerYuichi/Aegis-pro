@@ -468,6 +468,93 @@ class IncidentService:
                 status=STATUS_DECISION_FAILED,
                 thought=f"agent_exception: {e}",
             )
+            
+    def _read_code_context_from_clone(
+        self,
+        repo_workdir: str,
+        file_path: str,
+        line_number: int,
+        context_lines: int = 30,
+    ) -> dict | None:
+        """
+        Read the code around the failing line from a local clone.
+
+        Used by the Fixer when the Investigator has already cloned the
+        repo. Returns the same shape GitHubService.get_file_content
+        returns, so downstream consumers (the Fixer prompt) don't care
+        where the content came from.
+
+        Path resolution: the stack trace's file_path is often relative
+        to a build directory (e.g. backend/orchestrator/) rather than
+        the repo root. If the exact path doesn't exist, search for a
+        file with the same basename elsewhere in the clone. That's the
+        same logic the Investigator's read_file tool uses.
+
+        Returns None when the clone is missing, the file isn't found,
+        or reading fails. The caller treats None as "no code context"
+        and falls back to the GitHub API.
+        """
+        from pathlib import Path
+
+        if not repo_workdir:
+            return None
+
+        repo_path = Path(repo_workdir)
+        if not repo_path.is_dir():
+            return None
+
+        candidate = (repo_path / file_path).resolve()
+        try:
+            candidate.relative_to(repo_path.resolve())
+        except ValueError:
+            return None
+
+        if not candidate.is_file():
+            # Search by basename for the monorepo case.
+            basename = Path(file_path).name
+            match = None
+            for found in repo_path.rglob(basename):
+                if found.is_file() and any(
+                    part not in {
+                        ".git", "node_modules", "venv", ".venv",
+                        "dist", "build", "__pycache__",
+                    }
+                    for part in found.parts
+                ):
+                    match = found
+                    break
+            if match is None:
+                return None
+            candidate = match
+
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            logger.warning(f"Fixer: could not read {candidate}: {e}")
+            return None
+
+        lines = text.splitlines()
+        total = len(lines)
+
+        start = max(0, line_number - context_lines - 1)
+        end = min(total, line_number + context_lines)
+
+        code_snippet = []
+        raw_snippet = []
+        for i in range(start, end):
+            line_num = i + 1
+            marker = ">>> " if i == line_number - 1 else "    "
+            code_snippet.append(f"{line_num:4d} {marker}{lines[i]}")
+            raw_snippet.append(lines[i])
+
+        return {
+            "file_path": file_path,
+            "line_number": line_number,
+            "total_lines": total,
+            "code_snippet": "\n".join(code_snippet),
+            "raw_snippet": "\n".join(raw_snippet),
+            "full_file": "\n".join(lines) if total < 100 else None,
+        }
 
     # ------------------------------------------------------------------
     # Stage 3 — Fixer (Act)
@@ -501,10 +588,30 @@ class IncidentService:
         if not (stack_analysis and stack_analysis.get("file_path")):
             return result
 
-        # Fetch code context once. The Fixer needs it for its prompt;
-        # we also record it for the dashboard. Previously the pipeline
-        # fetched this twice — once here, once inside AutoFixService.
-        if service.get("repo_name"):
+        # Fetch code context once. Prefer reading from the clone the
+        # Investigator created — it's on disk, it's not rate-limited,
+        # and it handles the monorepo path mismatch the GitHub API
+        # does not (the stack trace says src/services/foo.py; the repo
+        # has backend/orchestrator/src/services/foo.py). Fall back to
+        # the GitHub API only when there is no clone.
+        code_context = None
+        repo_workdir = context.get("repo_workdir")
+
+        if repo_workdir:
+            code_context = self._read_code_context_from_clone(
+                repo_workdir=repo_workdir,
+                file_path=stack_analysis["file_path"],
+                line_number=stack_analysis.get("line_number", 1),
+                context_lines=30,
+            )
+            if code_context:
+                logger.info(
+                    f"✅ Code context read from clone: "
+                    f"{code_context.get('file_path')}:"
+                    f"{code_context.get('line_number')}"
+                )
+
+        if code_context is None and service.get("repo_name"):
             try:
                 github = get_github_service()
                 code_context = await github.get_file_content(
@@ -515,12 +622,15 @@ class IncidentService:
                 )
                 if code_context:
                     logger.info(
-                        f"✅ Code context fetched: {code_context.get('file_path')}:"
+                        f"✅ Code context fetched from GitHub: "
+                        f"{code_context.get('file_path')}:"
                         f"{code_context.get('line_number')}"
                     )
-                    result["code_context"] = code_context
             except Exception as e:
                 logger.error(f"Code context error: {e}")
+
+        if code_context:
+            result["code_context"] = code_context
 
         try:
             autofix = AutoFixService()
@@ -533,8 +643,10 @@ class IncidentService:
                     "line_number": stack_analysis.get("line_number"),
                     "exception_type": stack_analysis.get("exception_type"),
                     "root_cause": analysis.get("root_cause"),
+                    "null_source": context.get("null_source"),
                 },
                 require_permission=True,
+                code_context=code_context,
             )
 
             if fix_result and not fix_result.get("error"):
