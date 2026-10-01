@@ -345,8 +345,8 @@ def test_thought_is_truncated_to_200_chars(agent):
     long_thought = "x" * 500
     raw = (
         '{"thought": "' + long_thought + '", '
-        '"action": "refuse", '
-        '"args": {"reason": "too_long"}}'
+        '"next_step": "refuse", '
+        '"parameters": {"reason": "too_long"}}'
     )
     action = agent._parse_action(raw)
     assert action is not None
@@ -357,8 +357,8 @@ def test_thought_is_truncated_to_200_chars(agent):
 def test_diagnose_without_confidence_defaults_to_0_7(agent):
     raw = (
         '{"thought": "found it", '
-        '"action": "diagnose", '
-        '"args": {"null_source": "self.rag", "evidence": "e"}}'
+        '"next_step": "diagnose", '
+        '"parameters": {"null_source": "self.rag", "evidence": "e"}}'
     )
     action = agent._parse_action(raw)
     assert action is not None
@@ -367,8 +367,8 @@ def test_diagnose_without_confidence_defaults_to_0_7(agent):
 
 def test_diagnose_confidence_clamped(agent):
     raw = (
-        '{"thought": "t", "action": "diagnose", '
-        '"args": {"null_source": "x", "confidence": 5.0}}'
+        '{"thought": "t", "next_step": "diagnose", '
+        '"parameters": {"null_source": "x", "confidence": 5.0}}'
     )
     action = agent._parse_action(raw)
     assert action is not None
@@ -376,24 +376,24 @@ def test_diagnose_confidence_clamped(agent):
 
 
 def test_diagnose_without_null_source_is_rejected(agent):
-    raw = '{"thought": "t", "action": "diagnose", "args": {}}'
+    raw = '{"thought": "t", "next_step": "diagnose", "parameters": {}}'
     assert agent._parse_action(raw) is None
 
 
 def test_invalid_action_kind_is_rejected(agent):
-    raw = '{"thought": "t", "action": "explode", "args": {}}'
+    raw = '{"thought": "t", "next_step": "explode", "parameters": {}}'
     assert agent._parse_action(raw) is None
 
 
 def test_args_must_be_a_dict(agent):
-    raw = '{"thought": "t", "action": "read_file", "args": "foo.py"}'
+    raw = '{"thought": "t", "next_step": "read_file", "parameters": "foo.py"}'
     assert agent._parse_action(raw) is None
 
 
 def test_refuse_candidates_coerced_to_string_list(agent):
     raw = (
-        '{"thought": "t", "action": "refuse", '
-        '"args": {"reason": "r", '
+        '{"thought": "t", "next_step": "refuse", '
+        '"parameters": {"reason": "r", '
         '"candidates_considered": ["a", 42, null, "b"]}}'
     )
     action = agent._parse_action(raw)
