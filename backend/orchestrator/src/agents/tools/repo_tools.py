@@ -26,6 +26,13 @@ Design notes:
   observation records which resolver ran so the agent knows how much
   to trust the result.
 
+- read_file auto-resolves when the requested path doesn't exist. The
+  stack trace's file path is often relative to a subdirectory (e.g.
+  backend/orchestrator/) rather than the repo root. If read_file can
+  find a file with the same basename elsewhere, it reads that file
+  and records the substitution in metadata. This saves an iteration
+  on nearly every incident against a monorepo layout.
+
 - No tool touches the network. No tool writes to disk. No tool calls
   an LLM. All three are pure functions of (repo, args).
 """
@@ -34,7 +41,7 @@ from __future__ import annotations
 import ast
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from loguru import logger
@@ -89,7 +96,7 @@ class ToolResult:
 
 
 # ---------------------------------------------------------------------------
-# Path safety
+# Path safety and resolution
 # ---------------------------------------------------------------------------
 
 def _safe_resolve(repo: str | Path, path: str) -> tuple[Path | None, str | None]:
@@ -131,6 +138,68 @@ def _safe_resolve(repo: str | Path, path: str) -> tuple[Path | None, str | None]
     return resolved, None
 
 
+def _find_by_basename(repo: str | Path, path: str) -> str | None:
+    """
+    Find a file in the repo whose basename matches `path`'s basename.
+
+    Used when the requested path doesn't exist at the given location —
+    the stack trace's file path is often relative to a build directory
+    (e.g. backend/orchestrator/) rather than the repo root. Given
+    "src/services/incident_service.py", this finds
+    "backend/orchestrator/src/services/incident_service.py".
+
+    Match ranking: prefer candidates whose trailing path segments
+    overlap with the requested path. So src/services/foo.py prefers
+    backend/orchestrator/src/services/foo.py over unrelated/foo.py.
+    Ties broken by shorter path.
+
+    Returns the repo-relative path of the best match, or None.
+    """
+    basename = Path(path).name
+    if not basename:
+        return None
+
+    repo_path = Path(repo).resolve()
+    if not repo_path.is_dir():
+        return None
+
+    requested_parts = Path(path).parts
+    candidates: list[tuple[int, str]] = []
+
+    for candidate in repo_path.rglob(basename):
+        if not candidate.is_file():
+            continue
+        # Skip vendored, build, and cache directories so we don't
+        # resolve to a node_modules copy of a file.
+        if any(part in _SEARCH_EXCLUDES for part in candidate.parts):
+            continue
+
+        try:
+            rel = candidate.relative_to(repo_path).as_posix()
+        except ValueError:
+            continue
+
+        candidate_parts = Path(rel).parts
+
+        # Count trailing path segments that match, from the end.
+        # src/services/foo.py vs backend/orchestrator/src/services/foo.py
+        # → 3 segments overlap (src, services, foo.py).
+        score = 0
+        for i in range(1, min(len(requested_parts), len(candidate_parts)) + 1):
+            if requested_parts[-i] == candidate_parts[-i]:
+                score += 1
+            else:
+                break
+
+        candidates.append((score, rel))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda c: (-c[0], len(c[1])))
+    return candidates[0][1]
+
+
 # ---------------------------------------------------------------------------
 # read_file
 # ---------------------------------------------------------------------------
@@ -148,6 +217,12 @@ async def read_file(
     at MAX_FILE_CHARS). If only start_line is given, reads to EOF. If
     only end_line is given, reads from 1.
 
+    If the exact path doesn't exist but a file with the same basename
+    exists elsewhere in the repo, this reads that file instead and
+    records the substitution in metadata.resolved_from_basename. That
+    keeps the agent from spending an iteration recovering from a
+    monorepo layout that the stack trace didn't account for.
+
     The result includes line numbers so the agent can reference them
     in a subsequent diagnose turn.
     """
@@ -161,11 +236,29 @@ async def read_file(
     if resolved is None:
         return ToolResult(ok=False, tool="read_file", args=args, error=reason)
 
+    resolved_from_basename = None
     if not resolved.is_file():
-        return ToolResult(
-            ok=False, tool="read_file", args=args,
-            error=f"not_a_file: {path}",
-        )
+        # The exact path doesn't exist. Try to find a file with the
+        # same basename elsewhere in the repo, and read that instead.
+        hint = _find_by_basename(repo, path)
+        if hint:
+            logger.info(
+                f"read_file: {path} not found; resolving to {hint}"
+            )
+            resolved_from_basename = hint
+            resolved, reason = _safe_resolve(repo, hint)
+            if resolved is None or not resolved.is_file():
+                # The hint didn't resolve either — fall through to
+                # the original error so the agent sees the miss.
+                return ToolResult(
+                    ok=False, tool="read_file", args=args,
+                    error=f"not_a_file: {path}",
+                )
+        else:
+            return ToolResult(
+                ok=False, tool="read_file", args=args,
+                error=f"not_a_file: {path}",
+            )
 
     try:
         text = resolved.read_text(encoding="utf-8", errors="replace")
@@ -207,18 +300,22 @@ async def read_file(
         numbered = numbered[:MAX_FILE_CHARS]
         truncated = True
 
+    metadata: dict[str, Any] = {
+        "total_lines": total,
+        "start_line": start,
+        "end_line": end,
+        "lines_returned": end - start + 1,
+    }
+    if resolved_from_basename:
+        metadata["resolved_from_basename"] = resolved_from_basename
+
     return ToolResult(
         ok=True,
         tool="read_file",
         args=args,
         result=numbered,
         truncated=truncated,
-        metadata={
-            "total_lines": total,
-            "start_line": start,
-            "end_line": end,
-            "lines_returned": end - start + 1,
-        },
+        metadata=metadata,
     )
 
 
@@ -254,6 +351,10 @@ async def read_symbol(repo: str, path: str, symbol_name: str) -> ToolResult:
     language's definition patterns and returns the matching line plus
     a window of context. Marked as best-effort in the result metadata.
 
+    Like read_file, if the exact path doesn't exist but a file with
+    the same basename exists elsewhere in the repo, this resolves to
+    that file and records the substitution in metadata.
+
     Returns ToolResult(ok=False, error="symbol_not_found") if nothing
     matches. That's an observation, not an error — the agent may try
     a different name or a different file.
@@ -270,11 +371,25 @@ async def read_symbol(repo: str, path: str, symbol_name: str) -> ToolResult:
     if resolved is None:
         return ToolResult(ok=False, tool="read_symbol", args=args, error=reason)
 
+    resolved_from_basename = None
     if not resolved.is_file():
-        return ToolResult(
-            ok=False, tool="read_symbol", args=args,
-            error=f"not_a_file: {path}",
-        )
+        hint = _find_by_basename(repo, path)
+        if hint:
+            logger.info(
+                f"read_symbol: {path} not found; resolving to {hint}"
+            )
+            resolved_from_basename = hint
+            resolved, reason = _safe_resolve(repo, hint)
+            if resolved is None or not resolved.is_file():
+                return ToolResult(
+                    ok=False, tool="read_symbol", args=args,
+                    error=f"not_a_file: {path}",
+                )
+        else:
+            return ToolResult(
+                ok=False, tool="read_symbol", args=args,
+                error=f"not_a_file: {path}",
+            )
 
     try:
         text = resolved.read_text(encoding="utf-8", errors="replace")
@@ -287,10 +402,14 @@ async def read_symbol(repo: str, path: str, symbol_name: str) -> ToolResult:
     suffix = resolved.suffix.lower()
 
     if suffix in _PY_EXT:
-        return _read_symbol_python(resolved, text, symbol_name, args)
+        result = _read_symbol_python(resolved, text, symbol_name, args)
+    else:
+        # Non-Python: line-scan.
+        result = _read_symbol_heuristic(resolved, text, symbol_name, args, suffix)
 
-    # Non-Python: line-scan.
-    return _read_symbol_heuristic(resolved, text, symbol_name, args, suffix)
+    if resolved_from_basename:
+        result.metadata["resolved_from_basename"] = resolved_from_basename
+    return result
 
 
 def _read_symbol_python(
@@ -541,8 +660,12 @@ async def search_codebase(
     `pattern` is a Python re pattern. Case-sensitive by default — the
     agent can prefix `(?i)` if it wants case-insensitive.
 
-    `file_glob` is a fnmatch-style glob applied to the relative path
-    (e.g. "*.py", "src/**/*.ts"). None means "all text files".
+    `file_glob` uses PurePosixPath.match semantics, so `**` means
+    recursive across directories. `**/*.py` matches any .py at any
+    depth; `backend/**/services/*.py` matches a file directly under
+    any services/ directory below backend/.
+
+    None means "all text files".
     """
     args = {"pattern": pattern, "file_glob": file_glob}
 
@@ -565,8 +688,6 @@ async def search_codebase(
             ok=False, tool="search_codebase", args=args, error="repo_not_found",
         )
 
-    import fnmatch
-
     matches: list[dict] = []
     truncated = False
 
@@ -580,7 +701,7 @@ async def search_codebase(
 
         rel = file_path.relative_to(repo_path).as_posix()
 
-        if file_glob and not fnmatch.fnmatch(rel, file_glob):
+        if file_glob and not PurePosixPath(rel).match(file_glob):
             continue
 
         # Skip likely-binary files by extension. Best-effort; the

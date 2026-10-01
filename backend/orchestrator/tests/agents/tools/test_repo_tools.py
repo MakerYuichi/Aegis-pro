@@ -325,3 +325,29 @@ async def test_tool_result_to_observation_shape(repo):
     assert obs["ok"] is True
     assert obs["args"]["path"] == "utils.py"
     assert isinstance(obs["result"], str)
+
+
+@pytest.mark.asyncio
+async def test_search_codebase_recursive_glob(repo):
+    """
+    ** must match across path separators, not just one segment.
+    Regression test for the glob semantics that fnmatch got wrong.
+    """
+    r = await search_codebase(repo, r"def ", file_glob="**/*.py")
+    assert r.ok
+    assert r.metadata["match_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_search_codebase_deep_glob_matches_direct_child(repo):
+    """
+    The case the agent hit: a file directly under the glob's
+    directory, not in a subdirectory.
+    """
+    r = await search_codebase(
+        repo, r"get_rag_service",
+        file_glob="**/*.py",
+    )
+    assert r.ok
+    # incident_service.py is at the repo root of the fixture.
+    assert r.metadata["match_count"] >= 1
