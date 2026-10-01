@@ -134,7 +134,20 @@ class AutoFixService:
         self,
         incident_data: dict,
         require_permission: bool = True,
+        code_context: dict | None = None,
     ) -> dict:
+        """
+        Generate a fix for an incident.
+
+        `code_context` is optional. When provided, it's used directly
+        and no GitHub API call is made. When absent, the method falls
+        back to fetching from GitHub for backward compatibility with
+        the stage-mode path.
+
+        The caller (IncidentService._stage_fixer) reads code_context
+        from the Investigator's clone when available, which avoids
+        the monorepo path mismatch that GitHub's contents API hits.
+        """
         try:
             service_name = incident_data.get("service_name")
             file_path = incident_data.get("file_path")
@@ -151,12 +164,17 @@ class AutoFixService:
                 return {
                     "error": "Missing repo_name — cannot generate fix without a target repository"
                 }
-            code_context = await self.github.get_file_content(
-                repo_name=repo_name,
-                file_path=file_path,
-                line_number=line_number,
-                context_lines=10,
-            )
+
+            # Only fetch from GitHub when the caller didn't already
+            # provide a code_context. The Fixer reads from the
+            # Investigator's clone when one exists.
+            if code_context is None:
+                code_context = await self.github.get_file_content(
+                    repo_name=repo_name,
+                    file_path=file_path,
+                    line_number=line_number,
+                    context_lines=10,
+                )
 
             if not code_context:
                 return {"error": "Failed to fetch code from GitHub"}
