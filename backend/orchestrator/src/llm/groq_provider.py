@@ -12,9 +12,9 @@ class GroqProvider(LLMProvider):
     name = "groq"
 
     DEFAULT_MODELS = [
+        "qwen/qwen3.8-27b",
         "openai/gpt-oss-120b",
         "openai/gpt-oss-20b",
-        "qwen/qwen3.8-27b",
     ]
 
     def __init__(self):
