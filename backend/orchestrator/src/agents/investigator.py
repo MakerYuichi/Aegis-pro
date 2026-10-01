@@ -201,21 +201,22 @@ class InvestigatorAgent:
             "job is to identify the exact null source for a null "
             "dereference, using the tools provided.\n\n"
             "You MUST respond with a single JSON object. No prose "
-            "before or after. No Markdown fences.\n\n"
+            "before or after. No Markdown fences. The object describes "
+            "your next step — it is NOT a function call.\n\n"
             "Schema:\n"
             "{\n"
             '  "thought": "one sentence, at most 200 characters",\n'
-            '  "action": "read_file" | "read_symbol" | "search_codebase" '
+            '  "next_step": "read_file" | "read_symbol" | "search_codebase" '
             '| "diagnose" | "refuse",\n'
-            '  "args": { ... }\n'
+            '  "parameters": { ... }\n'
             "}\n\n"
-            "Tool actions:\n"
-            '  read_file       args: {"path": str, "start_line": int?, "end_line": int?}\n'
-            '  read_symbol     args: {"path": str, "symbol_name": str}\n'
-            '  search_codebase args: {"pattern": str, "file_glob": str?}\n\n'
-            "Terminal actions:\n"
-            '  diagnose args: {"null_source": str, "evidence": str, "confidence": float}\n'
-            '  refuse   args: {"reason": str, "candidates_considered": [str]}\n\n'
+            "Next-step parameters:\n"
+            '  read_file       parameters: {"path": str, "start_line": int?, "end_line": int?}\n'
+            '  read_symbol     parameters: {"path": str, "symbol_name": str}\n'
+            '  search_codebase parameters: {"pattern": str, "file_glob": str?}\n\n'
+            "Terminal next-steps:\n"
+            '  diagnose parameters: {"null_source": str, "evidence": str, "confidence": float}\n'
+            '  refuse   parameters: {"reason": str, "candidates_considered": [str]}\n\n'
             "Rules:\n"
             "1. Use read_symbol to find where a name is defined or "
             "assigned. Example: to check whether self.rag can be None, "
@@ -223,11 +224,29 @@ class InvestigatorAgent:
             "2. Only call diagnose when you can name the exact "
             "expression that is None. Include evidence: which line(s) "
             "show that this expression can be None.\n"
-            "3. If after your available tool calls you cannot "
-            "identify a specific null source, call refuse. Do not "
-            "guess. A refusal is a correct answer.\n"
-            "4. Do not propose a fix. Do not output a diff. Only "
+            "3. Do NOT refuse on your first attempt. A single failed "
+            "tool call is not enough information to refuse. If a "
+            'read_file call returns "not_a_file", the path from the '
+            "stack trace likely does not match the repo layout — use "
+            "search_codebase to find the file by name before giving up. "
+            "You must either succeed at reading the failing code, or "
+            "try at least three different paths to find it, before you "
+            "may call refuse.\n"
+            "4. A refusal after real investigation is a correct answer. "
+            "A refusal on the first error is not.\n"
+            "5. If you have identified an expression X such that "
+            "X.something() is the failing call, and you have read the "
+            "line where X is assigned, that assignment is your null "
+            "source. Call diagnose immediately with null_source=X. Do "
+            "not continue investigating. You have enough information.\n"
+            "6. You have a maximum of 8 iterations. If you have used 5 "
+            "iterations and have not diagnosed, use your next iteration "
+            "to diagnose the best candidate you have identified. An "
+            "answer with confidence 0.6 is better than no answer at 8 "
+            "iterations.\n"
+            "7. Do not propose a fix. Do not output a diff. Only "
             "diagnose the null source or refuse."
+            
         )
 
     def _build_decision_prompt(
@@ -310,7 +329,7 @@ class InvestigatorAgent:
         if payload is None or not isinstance(payload, dict):
             return None
 
-        action = payload.get("action")
+        action = payload.get("next_step")
         if not isinstance(action, str) or action not in VALID_ACTIONS:
             logger.warning(f"Investigator: invalid action {action!r}")
             return None
@@ -320,7 +339,7 @@ class InvestigatorAgent:
             thought = str(thought)
         thought = thought[:THOUGHT_MAX_CHARS]
 
-        args = payload.get("args") or {}
+        args = payload.get("parameters") or {}
         if not isinstance(args, dict):
             # Args must be an object. A bare value is a schema
             # violation, not something to coerce.
