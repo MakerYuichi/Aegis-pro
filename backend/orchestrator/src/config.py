@@ -86,7 +86,29 @@ class Settings(BaseSettings):
     
     CURATOR_FEW_SHOT: bool = False
     CURATOR_MAX_OUTCOMES: int = 3
-
+    
+    INVESTIGATOR_MODE: str = "stage"
+    INVESTIGATOR_MAX_ITERATIONS: int = 5
+    INVESTIGATOR_TIME_BUDGET_SECONDS: float = 30.0
+    
+    INVESTIGATOR_MODE: str = "stage"
+    INVESTIGATOR_MAX_ITERATIONS: int = 5
+    INVESTIGATOR_TIME_BUDGET_SECONDS: float = 30.0
+    # Clone-once support for the Investigator agent. When the agent
+    # needs filesystem access, it clones the target repo here and
+    # writes the path into context["repo_workdir"]. Later stages
+    # (Verifier) reuse the same checkout instead of cloning again.
+    #
+    # INVESTIGATOR_CLONE_TIMEOUT_SECONDS bounds the git clone. A
+    # large monorepo can exceed this — the clone fails, the agent's
+    # tools all return repo_not_found, and the agent refuses. That's
+    # an honest degradation, not a silent failure.
+    INVESTIGATOR_CLONE_TIMEOUT_SECONDS: int = 60
+    # Base directory for the clone. Empty means "use a tempdir under
+    # the system temp root". Set explicitly when you want clones to
+    # land somewhere inspectable, e.g. /var/lib/aegis/investigator-workdir.
+    
+    INVESTIGATOR_WORKDIR: str = ""
     # Kubernetes (optional)
     K8S_API_URL: Optional[str] = None
     K8S_TOKEN: Optional[str] = None
