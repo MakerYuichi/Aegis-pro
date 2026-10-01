@@ -119,35 +119,50 @@ class IncidentService:
             await self.record_related_prs(
                 context["incident_id"], context["related_prs"]
             )
+        
+        if context.get("investigation"):
+            await self.record_investigation(
+                context["incident_id"], context["investigation"]
+            )
 
         # Stage 3 — Fixer (Act)
-        context.update(await self._stage_fixer(context))
+                # From here on, the pipeline may hold a cloned checkout in
+        # context["repo_workdir"] (populated by the Investigator agent
+        # when INVESTIGATOR_MODE=agent). Cleanup is deferred so the
+        # Verifier can reuse the same checkout instead of cloning
+        # again. One clone per incident, total.
+        try:
+            # Stage 3 — Fixer (Act)
+            context.update(await self._stage_fixer(context))
 
-        if context.get("code_context"):
-            await self.record_code_context(
-                context["incident_id"], context["code_context"]
-            )
+            if context.get("code_context"):
+                await self.record_code_context(
+                    context["incident_id"], context["code_context"]
+                )
 
-        if context.get("auto_fix"):
-            await self.record_auto_fix(
-                context["incident_id"], context["auto_fix"]
-            )
+            if context.get("auto_fix"):
+                await self.record_auto_fix(
+                    context["incident_id"], context["auto_fix"]
+                )
 
-        # Stage 4 — Verifier (Verify). Gated by VERIFY_BEFORE_REPORT.
-        context.update(await self._stage_verifier(context))
+            # Stage 4 — Verifier (Verify). Gated by VERIFY_BEFORE_REPORT.
+            context.update(await self._stage_verifier(context))
 
-        if context.get("verification"):
-            await self.record_verification(
-                context["incident_id"], context["verification"]
-            )
+            if context.get("verification"):
+                await self.record_verification(
+                    context["incident_id"], context["verification"]
+                )
 
-        # Stage 5 — Communicator (Report). Side effects only.
-        await self._stage_communicator(context)
+            # Stage 5 — Communicator (Report). Side effects only.
+            await self._stage_communicator(context)
 
-        # Stage 6 — Curator (Learn). Side effects only.
-        await self._stage_curator(context)
+            # Stage 6 — Curator (Learn). Side effects only.
+            await self._stage_curator(context)
 
-        return self._build_response(context)
+            return self._build_response(context)
+        finally:
+            from src.agents.repo_clone import cleanup_repo
+            cleanup_repo(context.get("repo_workdir"))
 
     # ------------------------------------------------------------------
     # Stage 1 — Watcher (Perceive)
@@ -328,13 +343,131 @@ class IncidentService:
             except Exception as e:
                 logger.error(f"Related PRs error: {e}")
 
-        return {
+        result: dict = {
             "analysis": analysis,
             "rag_used": rag_used,
             "incident_data": incident_data,
             "github_context": github_context,
             "related_prs": related_prs,
         }
+        
+        if settings.INVESTIGATOR_MODE == "agent":
+            investigation = await self._run_investigator_agent(
+                context=context,
+                service_name=service_name,
+                message=message,
+                repo=service.get("repo_name") or service_name,
+                stack_trace=context.get("stack_trace"),
+                stack_analysis=stack_analysis,
+                github_context=github_context,
+                related_prs=related_prs,
+                rag_context=rag_context,
+                fix_outcomes=fix_outcomes_context,
+                blast_radius=blast_radius,
+            )
+
+            result["investigation"] = investigation.to_dict()
+
+            if investigation.status == "diagnosed":
+                result["null_source"] = investigation.null_source
+                logger.info(
+                    f"🔬 Investigator diagnosed null source: "
+                    f"{investigation.null_source} "
+                    f"(confidence {investigation.confidence:.2f}, "
+                    f"{investigation.iterations} iterations)"
+                )
+            else:
+                result["auto_fix_skipped_reason"] = investigation.status
+                logger.info(
+                    f"🔬 Investigator returned {investigation.status}; "
+                    f"auto-fix will be skipped"
+                )
+
+        return result
+        
+    async def _run_investigator_agent(
+        self,
+        *,
+        context: dict,
+        service_name: str,
+        message: str,
+        repo: str,
+        stack_trace: str | None,
+        stack_analysis: dict | None,
+        github_context: dict | None,
+        related_prs: list | None,
+        rag_context: str,
+        fix_outcomes: str,
+        blast_radius: dict,
+    ):
+        """
+        Build an InvestigatorContext, run the agent, return the
+        InvestigationResult.
+
+        Never raises — any exception inside the agent becomes a
+        result with status="decision_failed" and the exception is
+        logged. The pipeline must not be broken by the agent.
+
+        Clones the repo once and writes the path into
+        context["repo_workdir"]. The Verifier reuses that same
+        checkout instead of cloning again. Cleanup is the
+        coordinator's job (see declare_incident), not this method's —
+        the directory has to survive past this stage.
+        """
+        from src.agents.investigator import InvestigatorAgent
+        from src.agents.investigator_context import build_investigator_context
+        from src.agents.investigator_models import (
+            STATUS_DECISION_FAILED,
+            InvestigationResult,
+        )
+        from src.agents.repo_clone import clone_repo
+
+        try:
+            # One clone for the whole incident. If this fails, the
+            # agent's tools will all return repo_not_found and the
+            # agent will refuse — the honest outcome.
+            clone_path, clone_error = await clone_repo(
+                repo, commit_sha=context.get("commit_sha"),
+            )
+            if clone_path:
+                context["repo_workdir"] = clone_path
+            else:
+                logger.warning(
+                    f"Investigator: could not clone {repo!r} — "
+                    f"{clone_error}. Tools will fail; agent will refuse."
+                )
+
+            ctx = build_investigator_context(
+                service_name=service_name,
+                message=message,
+                repo=repo,
+                stack_trace=stack_trace,
+                stack_analysis=stack_analysis,
+                github_context=github_context,
+                related_prs=related_prs,
+                rag_context=rag_context,
+                fix_outcomes=fix_outcomes,
+                blast_radius=blast_radius,
+            )
+            # repo_root is the cloned path, not the GitHub name. If
+            # the clone failed, we pass the empty string and every
+            # tool returns repo_not_found — which is what the agent
+            # is designed to handle.
+            agent = InvestigatorAgent(
+                llm_service=self.llm,
+                repo_root=clone_path or "",
+            )
+            return await agent.investigate(
+                ctx,
+                max_iterations=settings.INVESTIGATOR_MAX_ITERATIONS,
+                time_budget_seconds=settings.INVESTIGATOR_TIME_BUDGET_SECONDS,
+            )
+        except Exception as e:
+            logger.error(f"Investigator agent error: {e}")
+            return InvestigationResult(
+                status=STATUS_DECISION_FAILED,
+                thought=f"agent_exception: {e}",
+            )
 
     # ------------------------------------------------------------------
     # Stage 3 — Fixer (Act)
@@ -356,6 +489,14 @@ class IncidentService:
         incident_id = context["incident_id"]
 
         result = {}
+        
+        skip_reason = context.get("auto_fix_skipped_reason")
+        if skip_reason:
+            logger.info(
+                f"⏭️  Skipping auto-fix for {incident_id}: "
+                f"investigator returned {skip_reason}"
+            )
+            return result
 
         if not (stack_analysis and stack_analysis.get("file_path")):
             return result
@@ -657,7 +798,20 @@ class IncidentService:
         verification = context.get("verification")
         if verification:
             response["verification"] = dict(verification)
-
+            
+        investigation = context.get("investigation")
+        if investigation:
+            response["investigation"] = {
+                "status": investigation.get("status"),
+                "null_source": investigation.get("null_source"),
+                "confidence": investigation.get("confidence"),
+                "iterations": investigation.get("iterations"),
+                "history": investigation.get("history", []),
+            }
+        skip_reason = context.get("auto_fix_skipped_reason")
+        if skip_reason:
+            response["auto_fix_skipped_reason"] = skip_reason
+        
         return response
 
 
@@ -816,6 +970,27 @@ class IncidentService:
                 return
 
             merged = merge_incident_metadata(existing, "verification", verification)
+            await session.execute(
+                text("UPDATE incidents SET extra_metadata = CAST(:m AS jsonb) WHERE incident_id = :id"),
+                {"m": merged, "id": incident_id}
+            )
+            await session.commit()
+            
+    async def record_investigation(self, incident_id: str, investigation: dict):
+        """
+        Merge the Investigator agent's result into
+        extra_metadata.investigation.
+
+        Same shape as record_verification — merge-not-overwrite, via
+        merge_incident_metadata.
+        """
+        async with get_db_session() as session:
+            existing, found = await self._load_extra_metadata(session, incident_id)
+            if not found:
+                logger.warning(f"record_investigation: incident {incident_id} not found")
+                return
+
+            merged = merge_incident_metadata(existing, "investigation", investigation)
             await session.execute(
                 text("UPDATE incidents SET extra_metadata = CAST(:m AS jsonb) WHERE incident_id = :id"),
                 {"m": merged, "id": incident_id}
