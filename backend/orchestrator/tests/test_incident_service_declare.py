@@ -875,3 +875,91 @@ async def test_investigator_mode_agent_clone_failure_degrades_honestly(
     assert captured["repo_root"] == ""
     assert result["investigation"]["status"] == "refused"
     assert result["auto_fix_skipped_reason"] == "refused"
+
+@pytest.mark.asyncio
+async def test_fixer_reads_code_context_from_clone_when_present(
+    service_with_db, monkeypatch, tmp_path
+):
+    """
+    When a clone is present in context["repo_workdir"], the Fixer
+    reads code context from disk instead of calling GitHub.
+    Specifically verifies that the monorepo path resolution works:
+    the stack trace says src/services/incident_service.py, the clone
+    has it at backend/orchestrator/src/services/incident_service.py,
+    and the Fixer finds it.
+    """
+    from src.config import settings
+    monkeypatch.setattr(settings, "INVESTIGATOR_MODE", "agent")
+
+    # Build a fake clone that mirrors the monorepo layout.
+    clone = tmp_path / "clone"
+    nested = clone / "backend" / "orchestrator" / "src" / "services"
+    nested.mkdir(parents=True)
+    (nested / "incident_service.py").write_text(
+        "\n".join(f"# line {i}" for i in range(1, 200))
+    )
+
+    # The stack trace must point at a file the clone actually has.
+    MONOREPO_STACK = (
+        "AttributeError: 'NoneType' object has no attribute 'search_similar_outcomes'\n"
+        "    at IncidentService.declare_incident(src/services/incident_service.py:150)"
+    )
+
+    async def fake_investigate(*args, **kwargs):
+        from src.agents.investigator_models import (
+            STATUS_DIAGNOSED, InvestigationResult,
+        )
+        if "context" in kwargs:
+            kwargs["context"]["repo_workdir"] = str(clone)
+        return InvestigationResult(
+            status=STATUS_DIAGNOSED,
+            null_source="self.rag",
+            evidence="test",
+            confidence=0.9,
+            iterations=3,
+            history=[],
+        )
+
+    github_called = {"n": 0}
+
+    async def fake_get_file_content(*args, **kwargs):
+        github_called["n"] += 1
+        return {}
+
+    with patch.object(
+        service_with_db, "_run_investigator_agent",
+        new=AsyncMock(side_effect=fake_investigate),
+    ), \
+    patch("src.services.incident_service.get_github_service") as ghs, \
+    patch("src.services.incident_service.AutoFixService") as autofix_cls, \
+    patch("src.services.incident_service.OnCallService") as OnCall, \
+    patch("src.services.incident_service.AlertService") as Alert, \
+    patch("src.services.incident_service.KubernetesService") as K8s, \
+    patch("src.services.incident_service.manager") as ws:
+        ghs.return_value.get_file_content = AsyncMock(
+            side_effect=fake_get_file_content,
+        )
+        ghs.return_value.get_recent_prs = AsyncMock(return_value=[])
+        ghs.return_value.get_blame_with_pr = AsyncMock(return_value={})
+        ghs.return_value.get_related_prs = AsyncMock(return_value=[])
+
+        autofix_cls.return_value.generate_fix = AsyncMock(
+            return_value={"status": "fix_generated", "fix": "diff"}
+        )
+
+        OnCall.return_value.get_on_call = AsyncMock(
+            return_value={"primary": None, "secondary": None, "tertiary": None})
+        OnCall.return_value.get_escalation_policy = AsyncMock(return_value=[])
+        Alert.return_value.send_alerts = AsyncMock()
+        K8s.return_value.get_deployment_status = AsyncMock(return_value="ok")
+        ws.broadcast = AsyncMock()
+
+        result = await service_with_db.declare_incident(
+            "payment-api", "DB down", stack_trace=MONOREPO_STACK
+        )
+
+    assert github_called["n"] == 0, (
+        f"Fixer should not call GitHub when a clone is present; "
+        f"get_file_content was called {github_called['n']} time(s)"
+    )
+    assert result.get("auto_fix") is not None
