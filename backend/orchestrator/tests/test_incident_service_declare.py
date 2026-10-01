@@ -754,3 +754,124 @@ async def test_record_verification_logs_warning_on_missing_row():
         loguru_logger.remove(sink_id)
 
     assert any("INC-DOES-NOT-EXIST" in m for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_investigator_mode_agent_clones_and_stores_workdir(
+    service_with_db, monkeypatch
+):
+    """
+    INVESTIGATOR_MODE=agent, clone succeeds → context["repo_workdir"]
+    is set to the clone path. Cleanup runs at the end of declare_incident.
+    """
+    from src.config import settings
+    from src.agents.investigator_models import (
+        STATUS_DIAGNOSED, InvestigationResult,
+    )
+    from src.agents.repo_clone import _base_dir
+    import uuid
+
+    monkeypatch.setattr(settings, "INVESTIGATOR_MODE", "agent")
+
+    # The fake clone must land under _base_dir() so that
+    # cleanup_repo's "is this inside our base dir?" check passes.
+    # That's the same contract real clone_repo honors.
+    clone_dir = _base_dir() / f"inv-test-{uuid.uuid4().hex[:12]}"
+    clone_dir.mkdir(parents=True, exist_ok=True)
+    (clone_dir / "marker.txt").write_text("clone")
+
+    async def fake_clone(repo, commit_sha=None, **kw):
+        return str(clone_dir), None
+
+    captured: dict = {}
+
+    async def fake_investigate(self, ctx, **kw):
+        captured["repo_root"] = self.repo_root
+        return InvestigationResult(
+            status=STATUS_DIAGNOSED,
+            null_source="self.rag",
+            evidence="e",
+            confidence=0.8,
+            iterations=1,
+            history=[],
+        )
+
+    with patch("src.agents.repo_clone.clone_repo", new=fake_clone), \
+         patch("src.agents.investigator.InvestigatorAgent.investigate",
+               new=fake_investigate), \
+         patch("src.services.incident_service.OnCallService") as OnCall, \
+         patch("src.services.incident_service.AlertService") as Alert, \
+         patch("src.services.incident_service.KubernetesService") as K8s, \
+         patch("src.services.incident_service.manager") as ws:
+        OnCall.return_value.get_on_call = AsyncMock(
+            return_value={"primary": None, "secondary": None, "tertiary": None})
+        OnCall.return_value.get_escalation_policy = AsyncMock(return_value=[])
+        Alert.return_value.send_alerts = AsyncMock()
+        K8s.return_value.get_deployment_status = AsyncMock(return_value="ok")
+        ws.broadcast = AsyncMock()
+
+        result = await service_with_db.declare_incident(
+            "payment-api", "DB down", stack_trace=STACK_TRACE
+        )
+
+    assert captured["repo_root"] == str(clone_dir)
+    assert not clone_dir.exists(), (
+        f"cleanup did not run. Clone dir still exists at {clone_dir}. "
+        f"Contents: {list(clone_dir.iterdir()) if clone_dir.exists() else 'N/A'}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_investigator_mode_agent_clone_failure_degrades_honestly(
+    service_with_db, monkeypatch
+):
+    """
+    INVESTIGATOR_MODE=agent, clone fails → the pipeline still runs
+    end to end, the agent is invoked with an empty repo_root, and the
+    response reflects whatever the agent returns.
+    """
+    from src.config import settings
+    from src.agents.investigator_models import (
+        STATUS_REFUSED, InvestigationResult,
+    )
+    monkeypatch.setattr(settings, "INVESTIGATOR_MODE", "agent")
+
+    async def fake_clone(repo, commit_sha=None, **kw):
+        return None, "clone_timeout after 60s"
+
+    captured: dict = {}
+
+    async def fake_investigate(self, ctx, **kw):
+        captured["repo_root"] = self.repo_root
+        return InvestigationResult(
+            status=STATUS_REFUSED,
+            reason="no_null_source_visible",
+            candidates_considered=[],
+            iterations=0,
+            history=[],
+        )
+
+    with patch("src.agents.repo_clone.clone_repo", new=fake_clone), \
+         patch("src.agents.investigator.InvestigatorAgent.investigate",
+               new=fake_investigate), \
+         patch("src.services.incident_service.OnCallService") as OnCall, \
+         patch("src.services.incident_service.AlertService") as Alert, \
+         patch("src.services.incident_service.KubernetesService") as K8s, \
+         patch("src.services.incident_service.manager") as ws:
+        OnCall.return_value.get_on_call = AsyncMock(
+            return_value={"primary": None, "secondary": None, "tertiary": None})
+        OnCall.return_value.get_escalation_policy = AsyncMock(return_value=[])
+        Alert.return_value.send_alerts = AsyncMock()
+        K8s.return_value.get_deployment_status = AsyncMock(return_value="ok")
+        ws.broadcast = AsyncMock()
+
+        result = await service_with_db.declare_incident(
+            "payment-api", "DB down", stack_trace=STACK_TRACE
+        )
+
+    # The agent still ran. It got an empty repo_root because the
+    # clone failed. Tools all return repo_not_found, and the agent
+    # chose to refuse — the honest outcome.
+    assert captured["repo_root"] == ""
+    assert result["investigation"]["status"] == "refused"
+    assert result["auto_fix_skipped_reason"] == "refused"

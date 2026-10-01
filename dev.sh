@@ -15,4 +15,5 @@ set -euo pipefail
 HOST_UID="$(id -u)" \
 HOST_GID="$(id -g)" \
 VERIFIER_HOST_WORKDIR="$(pwd)/verifier-workdir" \
+INVESTIGATOR_MODE="${INVESTIGATOR_MODE:-stage}" \
   exec docker-compose --env-file demo.env "$@"
