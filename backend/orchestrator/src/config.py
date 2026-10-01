@@ -92,8 +92,8 @@ class Settings(BaseSettings):
     INVESTIGATOR_TIME_BUDGET_SECONDS: float = 30.0
     
     INVESTIGATOR_MODE: str = "stage"
-    INVESTIGATOR_MAX_ITERATIONS: int = 5
-    INVESTIGATOR_TIME_BUDGET_SECONDS: float = 30.0
+    INVESTIGATOR_MAX_ITERATIONS: int = 8
+    INVESTIGATOR_TIME_BUDGET_SECONDS: float = 90.0
     # Clone-once support for the Investigator agent. When the agent
     # needs filesystem access, it clones the target repo here and
     # writes the path into context["repo_workdir"]. Later stages
