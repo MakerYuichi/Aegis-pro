@@ -135,6 +135,7 @@ class AutoFixService:
         incident_data: dict,
         require_permission: bool = True,
         code_context: dict | None = None,
+        diagnosis_block: str = "",
     ) -> dict:
         """
         Generate a fix for an incident.
@@ -155,6 +156,7 @@ class AutoFixService:
             error_type = incident_data.get("exception_type")
             root_cause = incident_data.get("root_cause")
             incident_id = incident_data.get("incident_id")
+            null_source = incident_data.get("null_source")
 
             if not file_path or not line_number:
                 return {"error": "Missing file path or line number"}
@@ -178,6 +180,15 @@ class AutoFixService:
 
             if not code_context:
                 return {"error": "Failed to fetch code from GitHub"}
+            
+            scope_instruction = (
+                f"Your diff MUST modify the line where {null_source} "
+                f"is assigned or used. Do NOT modify any other line."
+                if diagnosis_block and null_source
+                else f"The diff must modify ONLY line {line_number}, "
+                     f"or a small range containing it. Do not modify other lines."
+            )
+
 
             prompt = f"""You are an expert software engineer. Fix this issue.
 
@@ -185,8 +196,8 @@ Error: {error_type}
 Root Cause: {root_cause}
 File: {file_path}
 Target line: {line_number}
-The diff must modify ONLY this line, or a small range containing it.
-Do not modify other lines.
+{diagnosis_block}
+{scope_instruction}
 
 Current Code:
 {code_context.get('raw_snippet') or code_context['code_snippet']}
