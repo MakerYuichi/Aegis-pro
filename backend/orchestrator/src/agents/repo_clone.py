@@ -52,6 +52,8 @@ def _base_dir() -> Path:
     Where clones go. Honours settings.INVESTIGATOR_WORKDIR when set,
     otherwise falls back to the system temp root.
     """
+    import sys
+    print(f"[TRACE] _base_dir called, INVESTIGATOR_WORKDIR={settings.INVESTIGATOR_WORKDIR!r}", file=sys.stderr)
     if settings.INVESTIGATOR_WORKDIR:
         base = Path(settings.INVESTIGATOR_WORKDIR)
         base.mkdir(parents=True, exist_ok=True)
