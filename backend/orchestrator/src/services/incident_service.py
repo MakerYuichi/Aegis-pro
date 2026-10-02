@@ -621,21 +621,65 @@ class IncidentService:
         null_source = context.get("null_source")
 
         if null_source and context.get("investigation"):
+            # Normalize the null source for matching. The Investigator
+            # sometimes emits "self.rag", sometimes "get_rag_service()",
+            # and sometimes "get_rag_service" — all refer to the same
+            # thing. Strip trailing parens and whitespace on both sides.
+            normalized = null_source.strip().rstrip("()")
+
+            # Look for the *usage* line first. The usage is always in
+            # the file the stack trace points at. The assignment may
+            # be in a different file (get_rag_service is defined in
+            # rag_service.py), where its line number means nothing in
+            # the file we're fixing.
+            usage_line = None
             for obs in context["investigation"].get("history", []):
-                args = obs.get("args", {})
-                if (
-                    obs.get("tool") == "read_symbol"
-                    and args.get("symbol_name") == null_source
-                ):
-                    meta = obs.get("metadata", {})
-                    if meta.get("start_line"):
-                        target_line = meta["start_line"]
-                        logger.info(
-                            f"🎯 Fixer: targeting line {target_line} "
-                            f"(assignment of `{null_source}`) instead of "
-                            f"stack-trace line {trace_line}"
-                        )
+                if obs.get("tool") != "search_codebase":
+                    continue
+                result_text = obs.get("result", "")
+                for line in result_text.splitlines():
+                    if normalized not in line:
+                        continue
+                    # search_codebase result format:
+                    #   "path/to/file.py:123: the line content"
+                    parts = line.split(":", 2)
+                    if len(parts) < 2:
+                        continue
+                    try:
+                        usage_line = int(parts[1])
+                    except ValueError:
+                        continue
                     break
+                if usage_line:
+                    break
+
+            if usage_line:
+                target_line = usage_line
+                logger.info(
+                    f"🎯 Fixer: targeting line {target_line} "
+                    f"(usage of `{null_source}`) instead of "
+                    f"stack-trace line {trace_line}"
+                )
+            else:
+                # Fall back to the assignment line if the usage site
+                # wasn't found in the history.
+                for obs in context["investigation"].get("history", []):
+                    args = obs.get("args", {})
+                    symbol = (args.get("symbol_name") or "").strip().rstrip("()")
+                    if (
+                        obs.get("tool") == "read_symbol"
+                        and symbol
+                        and symbol == normalized
+                    ):
+                        meta = obs.get("metadata", {})
+                        if meta.get("start_line"):
+                            target_line = meta["start_line"]
+                            logger.info(
+                                f"🎯 Fixer: targeting line {target_line} "
+                                f"(assignment of `{null_source}`) instead of "
+                                f"stack-trace line {trace_line}"
+                            )
+                        break
         
         code_context = None
         repo_workdir = context.get("repo_workdir")
