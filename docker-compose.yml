@@ -91,6 +91,7 @@ services:
       LLM_FALLBACKS: ${LLM_FALLBACKS-gemini,openrouter}
       AUTO_FIX_MODE: ${AUTO_FIX_MODE:-read_only}
       ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      INVESTIGATOR_MODE: ${INVESTIGATOR_MODE:-stage} 
       # Hugging Face cache. The orchestrator runs as a non-root user
       # (see `user:` above), so the library's default cache location
       # (/.cache) isn't writable. Point it at the named volume.

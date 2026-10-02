@@ -34,6 +34,7 @@ happens. That's an honest degradation, not a silent failure.
 from abc import ABC, abstractmethod
 from typing import Literal, Optional
 from dataclasses import dataclass, field
+from src.agents.repo_clone import _remove_tree
 import asyncio
 import os
 import re
@@ -187,24 +188,7 @@ class NoOpVerifier(Verifier):
 
 
 class HostedVerifier(Verifier):
-    """
-    Runs the diff against the repo's own tests in Docker on the AEGIS
-    PRO host.
-
-    Deployment constraint: requires Docker CLI + daemon reachable from
-    the orchestrator container. In docker-compose that's satisfied by
-    the docker-proxy sidecar (see docker-compose.yml and issue #101).
-    Deployments without Docker access should keep
-    VERIFY_BEFORE_REPORT=false — the pipeline then runs NoOpVerifier
-    instead.
-
-    Sandbox model:
-      - git clone runs in the orchestrator (trusted code, our network).
-      - docker run executes the tests in a sibling container with
-        --network none (untrusted execution, no network).
-      - Repo is bind-mounted from the host; the sibling sees the
-        HOST path, not the orchestrator's internal path.
-    """
+   
 
     async def verify(
         self,
@@ -217,8 +201,24 @@ class HostedVerifier(Verifier):
         start = time.monotonic()
         logger.error(f"[TRACE] verify start repo={repo_name} diff_len={len(diff)}")
 
-        workdir = self._new_workdir()
-        try:
+        # Prefer the clone the Provisioner created. When
+        # context["repo_workdir"] is set, it points at a checkout
+        # under VERIFIER_CONTAINER_WORKDIR, visible to both the
+        # orchestrator and (via the host bind mount) the sibling
+        # container the tests run in. In that case, no second clone.
+        existing = (context or {}).get("repo_workdir")
+        reuse = False
+        workdir: Path
+
+        if existing:
+            candidate = Path(existing)
+            if candidate.is_dir() and (candidate / "repo").is_dir():
+                workdir = candidate
+                reuse = True
+                logger.info(f"Verifier: reusing clone at {workdir}")
+
+        if not reuse:
+            workdir = self._new_workdir()
             clone_ok, clone_err = await self._clone(repo_name, commit_sha, workdir)
             if not clone_ok:
                 logger.error(f"[TRACE] return: clone_failed")
@@ -230,6 +230,7 @@ class HostedVerifier(Verifier):
                     verifier="hosted",
                 )
 
+        try:
             command, reason_prefix = _detect_runner(workdir / "repo", language)
             if command is None:
                 logger.error(f"[TRACE] return: no_verification_surface")
@@ -254,19 +255,36 @@ class HostedVerifier(Verifier):
             ).get("file_path")
             file_lines: list[str] = []
             if target_path:
-                try:
-                    full = workdir / "repo" / target_path
-                    file_lines = full.read_text(
-                        encoding="utf-8", errors="replace"
-                    ).splitlines()
-                except Exception as e:
+                full = _resolve_repo_path(workdir / "repo", target_path)
+                if full is not None:
+                    try:
+                        file_lines = full.read_text(
+                            encoding="utf-8", errors="replace"
+                        ).splitlines()
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not read {target_path} for "
+                            f"realignment: {e}"
+                        )
+                else:
                     logger.warning(
-                        f"Could not read {target_path} for "
-                        f"realignment: {e}"
+                        f"Could not find {target_path} in clone "
+                        f"for realignment"
                     )
 
             if file_lines:
-                diff, realignment = _realign_diff(diff, file_lines)
+                repo_relative_path = None
+                if full is not None:
+                    try:
+                        repo_relative_path = full.relative_to(
+                            workdir / "repo"
+                        ).as_posix()
+                    except ValueError:
+                        repo_relative_path = None
+
+                diff, realignment = _realign_diff(
+                    diff, file_lines, repo_relative_path
+                )
                 logger.info(
                     f"Realignment: {realignment.hunks_realigned}/"
                     f"{realignment.hunks_total} hunks realigned, "
@@ -373,8 +391,17 @@ class HostedVerifier(Verifier):
             )
 
         finally:
-            shutil.rmtree(workdir, ignore_errors=True)
-
+            # Only remove clones we created. The Provisioner's clone
+            # is cleaned up by the coordinator's finally block.
+            if not reuse:
+                try:
+                    _remove_tree(workdir)
+                    logger.debug(f"🧹 Verifier removed {workdir}")
+                except Exception as e:
+                    logger.warning(
+                        f"Verifier: failed to remove {workdir}: {e}"
+                )
+                    
     def _new_workdir(self) -> Path:
         """
         Create a fresh subdirectory under the verifier workdir.
@@ -445,6 +472,26 @@ def _repo_url(repo_name: str) -> str:
         return repo_name
     return f"https://github.com/{repo_name}.git"
 
+def _resolve_repo_path(repo_root: Path, file_path: str) -> Path | None:
+    candidate = repo_root / file_path
+    if candidate.is_file():
+        return candidate
+
+    basename = Path(file_path).name
+    if not basename:
+        return None
+
+    excludes = {
+        ".git", "node_modules", "venv", ".venv",
+        "dist", "build", "__pycache__",
+    }
+    for found in repo_root.rglob(basename):
+        if found.is_file() and not any(
+            part in excludes for part in found.parts
+        ):
+            return found
+    return None
+
 
 def _image_for_language(language: str) -> str:
     if (language or "").lower().startswith("node"):
@@ -470,61 +517,34 @@ def _detect_runner(repo_dir: Path, language: str) -> tuple[str | None, str]:
 _RealignReason = Literal["ambiguous_match", "unanchorable"]
 
 
-def _realign_diff(diff: str, file_lines: list[str]) -> tuple[str, RealignmentReport]:
+def _realign_diff(
+    diff: str,
+    file_lines: list[str],
+    repo_relative_path: str | None = None,
+) -> tuple[str, RealignmentReport]:
     """
-    Rewrite each hunk's starting line number by searching the target
-    file for that hunk's context and removed lines.
-
-    The LLM frequently produces a diff whose hunk header declares a
-    starting line that doesn't match where the hunk's content
-    actually appears. git apply --recount fixes counts but not
-    starting numbers, so an off-by-10 header causes git apply to
-    fail with "patch does not apply" even when the content is
-    unambiguous.
-
-    This function is pure: it takes the diff text and the target
-    file's lines, and returns a corrected diff plus a report of
-    what it did. It never touches the filesystem.
-
-    Algorithm, per hunk:
-      1. Build the hunk's search signature from its context (' ')
-         and removed ('-') lines. Added ('+') lines are the fix's
-         new content and don't exist in the file.
-      2. Try three tolerance tiers in order:
-           tier 1: exact match
-           tier 2: right-strip each line, exact match
-           tier 3: strip both sides, compare non-whitespace content
-      3. At the first tier that produces matches:
-           - exactly one match  -> realign the hunk using the
-             file's actual bytes at the matched location
-           - zero matches       -> try the next tier
-           - more than one      -> stop, flag the hunk as
-             "ambiguous_match", leave it unchanged
-      4. If no tier produces a match, leave the hunk unchanged.
-
-    Hunks are processed independently. One hunk failing to realign
-    does not affect the others.
-
-    A hunk with no context and no removed lines (a pure insertion)
-    can't be anchored. If the diff's file header is --- /dev/null,
-    that's a new file and realignment isn't meaningful; the hunk is
-    left alone silently. If the file header is --- a/path, that's
-    a pure insertion into an existing file — a suspicious shape
-    that likely means a degenerate header — and the hunk is left
-    alone and flagged as "unanchorable".
-
-    "\\ No newline at end of file" markers are skipped when
-    building signatures, and their presence in the output is
-    derived from file_lines rather than carried over from the
-    input diff. The LLM's assertions about newline state are not
-    trusted.
+    ... existing docstring ...
+    
+    If `repo_relative_path` is provided, the diff's --- and +++ file
+    headers are rewritten to that path. This is what makes a diff
+    whose header said "src/services/foo.py" (from the stack trace)
+    apply against a file that actually lives at
+    "backend/orchestrator/src/services/foo.py" (in the repo).
     """
     report = RealignmentReport()
-    
+
     lines = diff.split("\n")
     if not lines:
         return diff, report
-    
+
+    # Rewrite the file headers to the resolved repo-relative path.
+    # git apply -p1 strips the a/ or b/ prefix and expects the rest
+    # to match a path in the working tree. The stack trace's path is
+    # not that path in a monorepo. The realigner has already resolved
+    # the correct path; use it.
+    if repo_relative_path:
+        lines = _rewrite_file_headers(lines, repo_relative_path)
+
     is_new_file = any(
         line.startswith("--- /dev/null") for line in lines
     )
@@ -1013,3 +1033,25 @@ def _normalize_diff_paths(diff: str) -> str:
         else:
             out.append(line)
     return "\n".join(out)
+
+
+def _rewrite_file_headers(
+    lines: list[str], repo_relative_path: str
+) -> list[str]:
+    """
+    Rewrite the --- and +++ header lines to point at
+    repo_relative_path, preserving the a/ and b/ prefixes git apply
+    expects.
+
+    Only the file header lines are touched. Everything else in the
+    diff, including hunk bodies, is passed through unchanged.
+    """
+    out = []
+    for line in lines:
+        if line.startswith("--- ") and not line.startswith("--- /dev/null"):
+            out.append(f"--- a/{repo_relative_path}")
+        elif line.startswith("+++ ") and not line.startswith("+++ /dev/null"):
+            out.append(f"+++ b/{repo_relative_path}")
+        else:
+            out.append(line)
+    return out

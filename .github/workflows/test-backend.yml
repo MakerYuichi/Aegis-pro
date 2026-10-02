@@ -51,6 +51,7 @@ jobs:
       LLM_PROVIDER: mock
       LLM_FALLBACKS: ""
       AUTO_FIX_MODE: read_only
+      INVESTIGATOR_WORKDIR: ""
       GROQ_API_KEY: ""
       GEMINI_API_KEY: ""
       GOOGLE_API_KEY: ""

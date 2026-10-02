@@ -134,7 +134,21 @@ class AutoFixService:
         self,
         incident_data: dict,
         require_permission: bool = True,
+        code_context: dict | None = None,
+        diagnosis_block: str = "",
     ) -> dict:
+        """
+        Generate a fix for an incident.
+
+        `code_context` is optional. When provided, it's used directly
+        and no GitHub API call is made. When absent, the method falls
+        back to fetching from GitHub for backward compatibility with
+        the stage-mode path.
+
+        The caller (IncidentService._stage_fixer) reads code_context
+        from the Investigator's clone when available, which avoids
+        the monorepo path mismatch that GitHub's contents API hits.
+        """
         try:
             service_name = incident_data.get("service_name")
             file_path = incident_data.get("file_path")
@@ -142,6 +156,7 @@ class AutoFixService:
             error_type = incident_data.get("exception_type")
             root_cause = incident_data.get("root_cause")
             incident_id = incident_data.get("incident_id")
+            null_source = incident_data.get("null_source")
 
             if not file_path or not line_number:
                 return {"error": "Missing file path or line number"}
@@ -151,15 +166,29 @@ class AutoFixService:
                 return {
                     "error": "Missing repo_name — cannot generate fix without a target repository"
                 }
-            code_context = await self.github.get_file_content(
-                repo_name=repo_name,
-                file_path=file_path,
-                line_number=line_number,
-                context_lines=10,
-            )
+
+            # Only fetch from GitHub when the caller didn't already
+            # provide a code_context. The Fixer reads from the
+            # Investigator's clone when one exists.
+            if code_context is None:
+                code_context = await self.github.get_file_content(
+                    repo_name=repo_name,
+                    file_path=file_path,
+                    line_number=line_number,
+                    context_lines=10,
+                )
 
             if not code_context:
                 return {"error": "Failed to fetch code from GitHub"}
+            
+            scope_instruction = (
+                f"Your diff MUST modify the line where {null_source} "
+                f"is assigned or used. Do NOT modify any other line."
+                if diagnosis_block and null_source
+                else f"The diff must modify ONLY line {line_number}, "
+                     f"or a small range containing it. Do not modify other lines."
+            )
+
 
             prompt = f"""You are an expert software engineer. Fix this issue.
 
@@ -167,8 +196,8 @@ Error: {error_type}
 Root Cause: {root_cause}
 File: {file_path}
 Target line: {line_number}
-The diff must modify ONLY this line, or a small range containing it.
-Do not modify other lines.
+{diagnosis_block}
+{scope_instruction}
 
 Current Code:
 {code_context.get('raw_snippet') or code_context['code_snippet']}
@@ -233,7 +262,11 @@ Full format example:
 
             raw_response = await self.llm.complete_raw_detailed(
                 prompt=prompt,
-                system=(...),
+                system=(
+                    "You are an expert software engineer. Return ONLY a unified "
+                    "diff in git-apply-compatible format. No prose, no Markdown "
+                    "fences, no explanation."
+                ),
                 temperature=0.2,
                 max_tokens=1500,
             )

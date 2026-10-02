@@ -17,26 +17,6 @@ from src.websocket import manager
 
 
 def merge_incident_metadata(existing_json, key: str, value) -> str:
-    """
-    Read-merge-write for the extra_metadata JSONB column.
-
-    This is the ONLY correct way to add a key to extra_metadata after
-    the initial INSERT. The previous save_incident_metadata() did a
-    blind `SET extra_metadata = :param`, which silently dropped prior
-    writes — the last writer won. Every record_* method below uses
-    this helper or a sibling with the same shape.
-
-    Args:
-        existing_json: the current extra_metadata value. May be a
-            JSON string, a dict (from SQLAlchemy's JSONB decoding),
-            None, or malformed text. All four are handled.
-        key: a single top-level key. No dotted paths — see
-            record_related_prs for the one legitimate nested case.
-        value: any JSON-serializable value.
-
-    Returns:
-        A JSON string ready for CAST(:m AS jsonb).
-    """
     if not existing_json:
         metadata = {}
     else:
@@ -67,26 +47,6 @@ class IncidentService:
         stack_trace: str = None,
         reported_by: str = None,
     ) -> dict:
-        """
-        Coordinator for the incident pipeline.
-
-        Six named stages, in order:
-
-          1. Watcher      — perceive: service lookup, stack parse, blast radius
-          2. Investigator — reason:  RAG context, LLM analysis, GitHub context
-          3. Fixer        — act:     auto-fix diff, code context
-          4. Verifier     — verify:  (stub, lands in a follow-up)
-          5. Communicator — report:  on-call, alerts, K8s, WebSocket
-          6. Curator      — learn:   RAG store
-
-        The coordinator owns all writes. Each stage is a pure function
-        of its inputs — no DB access, no direct persistence — so each
-        stage can be tested in isolation.
-
-        Inputs to later stages include everything earlier stages
-        produced. Each stage returns only the keys it newly produces.
-        No stage returns a key some earlier stage already owns.
-        """
         context = {
             "service_name": service_name,
             "message": message,
@@ -99,7 +59,17 @@ class IncidentService:
         if context.get("error"):
             return context
 
-        # Stage 2 — Investigator (Reason)
+        # Stage 2 — Provisioner (Clone once)
+        #
+        # The Provisioner creates one clone per incident when the
+        # incident will need filesystem access (repo_name + file_path
+        # both set). Every later stage that needs the clone reads
+        # context["repo_workdir"]; none of them create or remove it.
+        # The coordinator's finally below calls the Provisioner's
+        # cleanup to remove the clone after all stages are done.
+        context.update(await self._stage_provisioner(context))
+
+        # Stage 3 — Investigator (Reason)
         context.update(await self._stage_investigator(context))
 
         # Persist the diagnosed incident before any enrichment. This is
@@ -119,36 +89,50 @@ class IncidentService:
             await self.record_related_prs(
                 context["incident_id"], context["related_prs"]
             )
+        
+        if context.get("investigation"):
+            await self.record_investigation(
+                context["incident_id"], context["investigation"]
+            )
 
         # Stage 3 — Fixer (Act)
-        context.update(await self._stage_fixer(context))
+                # From here on, the pipeline may hold a cloned checkout in
+        # context["repo_workdir"] (populated by the Investigator agent
+        # when INVESTIGATOR_MODE=agent). Cleanup is deferred so the
+        # Verifier can reuse the same checkout instead of cloning
+        # again. One clone per incident, total.
+        try:
+            # Stage 3 — Fixer (Act)
+            context.update(await self._stage_fixer(context))
 
-        if context.get("code_context"):
-            await self.record_code_context(
-                context["incident_id"], context["code_context"]
-            )
+            if context.get("code_context"):
+                await self.record_code_context(
+                    context["incident_id"], context["code_context"]
+                )
 
-        if context.get("auto_fix"):
-            await self.record_auto_fix(
-                context["incident_id"], context["auto_fix"]
-            )
+            if context.get("auto_fix"):
+                await self.record_auto_fix(
+                    context["incident_id"], context["auto_fix"]
+                )
 
-        # Stage 4 — Verifier (Verify). Gated by VERIFY_BEFORE_REPORT.
-        context.update(await self._stage_verifier(context))
+            # Stage 4 — Verifier (Verify). Gated by VERIFY_BEFORE_REPORT.
+            context.update(await self._stage_verifier(context))
 
-        if context.get("verification"):
-            await self.record_verification(
-                context["incident_id"], context["verification"]
-            )
+            if context.get("verification"):
+                await self.record_verification(
+                    context["incident_id"], context["verification"]
+                )
 
-        # Stage 5 — Communicator (Report). Side effects only.
-        await self._stage_communicator(context)
+            # Stage 5 — Communicator (Report). Side effects only.
+            await self._stage_communicator(context)
 
-        # Stage 6 — Curator (Learn). Side effects only.
-        await self._stage_curator(context)
+            # Stage 6 — Curator (Learn). Side effects only.
+            await self._stage_curator(context)
 
-        return self._build_response(context)
-
+            return self._build_response(context)
+        finally:
+            from src.agents.provisioner import cleanup_repo
+            cleanup_repo(context.get("repo_workdir"))
     # ------------------------------------------------------------------
     # Stage 1 — Watcher (Perceive)
     # ------------------------------------------------------------------
@@ -190,9 +174,35 @@ class IncidentService:
             "stack_analysis": stack_analysis,
             "blast_radius": blast_radius,
         }
+        
+        # ------------------------------------------------------------------
+    # Stage 2 — Provisioner (Clone once)
+    # ------------------------------------------------------------------
+
+    async def _stage_provisioner(self, context: dict) -> dict:
+        """
+        Provision. Clone the incident's repo into
+        context["repo_workdir"] when the incident will need filesystem
+        access.
+
+        The Provisioner is the sole owner of the clone's lifecycle.
+        It creates the clone here and it defines the cleanup that the
+        coordinator calls in its finally block. No other stage
+        creates, reads the process of creating, or removes the clone.
+
+        Returns:
+            {"repo_workdir": "<path>"} on success.
+            {} when no clone is needed (no repo, no stack-trace file
+            path, or the clone failed). An empty return is not an
+            error — downstream stages detect the missing clone and
+            degrade honestly.
+        """
+        from src.agents.provisioner import provision_clone
+
+        return await provision_clone(context)
 
     # ------------------------------------------------------------------
-    # Stage 2 — Investigator (Reason)
+    # Stage 3 — Investigator (Reason)
     # ------------------------------------------------------------------
 
     async def _stage_investigator(self, context: dict) -> dict:
@@ -328,13 +338,244 @@ class IncidentService:
             except Exception as e:
                 logger.error(f"Related PRs error: {e}")
 
-        return {
+        result: dict = {
             "analysis": analysis,
             "rag_used": rag_used,
             "incident_data": incident_data,
             "github_context": github_context,
             "related_prs": related_prs,
         }
+        
+        if settings.INVESTIGATOR_MODE == "agent":
+            investigation = await self._run_investigator_agent(
+                context=context,
+                service_name=service_name,
+                message=message,
+                repo=service.get("repo_name") or service_name,
+                stack_trace=context.get("stack_trace"),
+                stack_analysis=stack_analysis,
+                github_context=github_context,
+                related_prs=related_prs,
+                rag_context=rag_context,
+                fix_outcomes=fix_outcomes_context,
+                blast_radius=blast_radius,
+            )
+
+            result["investigation"] = investigation.to_dict()
+
+            if investigation.status == "diagnosed":
+                result["null_source"] = investigation.null_source
+                logger.info(
+                    f"🔬 Investigator diagnosed null source: "
+                    f"{investigation.null_source} "
+                    f"(confidence {investigation.confidence:.2f}, "
+                    f"{investigation.iterations} iterations)"
+                )
+            else:
+                result["auto_fix_skipped_reason"] = investigation.status
+                logger.info(
+                    f"🔬 Investigator returned {investigation.status}; "
+                    f"auto-fix will be skipped"
+                )
+
+        return result
+        
+    async def _run_investigator_agent(
+        self,
+        *,
+        context: dict,
+        service_name: str,
+        message: str,
+        repo: str,
+        stack_trace: str | None,
+        stack_analysis: dict | None,
+        github_context: dict | None,
+        related_prs: list | None,
+        rag_context: str,
+        fix_outcomes: str,
+        blast_radius: dict,
+    ):
+        """
+        Build an InvestigatorContext, run the agent, return the
+        InvestigationResult.
+
+        The clone is created by the Provisioner stage and removed by
+        the coordinator's finally. This method reads
+        context["repo_workdir"] but never creates or removes it.
+
+        When the clone is absent (no repo, no file path, or the clone
+        failed), the agent's repo_root is the empty string and every
+        tool returns repo_not_found. The agent refuses. That's the
+        honest outcome — better than inventing a path.
+
+        Never raises — any exception inside the agent becomes a
+        result with status="decision_failed" and the exception is
+        logged. The pipeline must not be broken by the agent.
+        """
+        from src.agents.investigator import InvestigatorAgent
+        from src.agents.investigator_context import build_investigator_context
+        from src.agents.investigator_models import (
+            STATUS_DECISION_FAILED,
+            InvestigationResult,
+        )
+
+        try:
+            repo_workdir = context.get("repo_workdir")
+
+            ctx = build_investigator_context(
+                service_name=service_name,
+                message=message,
+                repo=repo,
+                stack_trace=stack_trace,
+                stack_analysis=stack_analysis,
+                github_context=github_context,
+                related_prs=related_prs,
+                rag_context=rag_context,
+                fix_outcomes=fix_outcomes,
+                blast_radius=blast_radius,
+            )
+            agent = InvestigatorAgent(
+                llm_service=self.llm,
+                repo_root=repo_workdir or "",
+            )
+            return await agent.investigate(
+                ctx,
+                max_iterations=settings.INVESTIGATOR_MAX_ITERATIONS,
+                time_budget_seconds=settings.INVESTIGATOR_TIME_BUDGET_SECONDS,
+            )
+        except Exception as e:
+            logger.error(f"Investigator agent error: {e}")
+            return InvestigationResult(
+                status=STATUS_DECISION_FAILED,
+                thought=f"agent_exception: {e}",
+            )
+            
+    def _read_code_context_from_clone(
+        self,
+        repo_workdir: str,
+        file_path: str,
+        line_number: int,
+        context_lines: int = 30,
+    ) -> dict | None:
+        """
+        Read the code around the failing line from a local clone.
+
+        Used by the Fixer when the Investigator has already cloned the
+        repo. Returns the same shape GitHubService.get_file_content
+        returns, so downstream consumers (the Fixer prompt) don't care
+        where the content came from.
+
+        Path resolution: the stack trace's file_path is often relative
+        to a build directory (e.g. backend/orchestrator/) rather than
+        the repo root. If the exact path doesn't exist, search for a
+        file with the same basename elsewhere in the clone. That's the
+        same logic the Investigator's read_file tool uses.
+
+        Returns None when the clone is missing, the file isn't found,
+        or reading fails. The caller treats None as "no code context"
+        and falls back to the GitHub API.
+        """
+        from pathlib import Path
+
+        if not repo_workdir:
+            return None
+
+        repo_path = Path(repo_workdir)
+        if not repo_path.is_dir():
+            return None
+
+        candidate = (repo_path / file_path).resolve()
+        try:
+            candidate.relative_to(repo_path.resolve())
+        except ValueError:
+            return None
+
+        if not candidate.is_file():
+            # Search by basename for the monorepo case.
+            basename = Path(file_path).name
+            match = None
+            for found in repo_path.rglob(basename):
+                if found.is_file() and any(
+                    part not in {
+                        ".git", "node_modules", "venv", ".venv",
+                        "dist", "build", "__pycache__",
+                    }
+                    for part in found.parts
+                ):
+                    match = found
+                    break
+            if match is None:
+                return None
+            candidate = match
+
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            logger.warning(f"Fixer: could not read {candidate}: {e}")
+            return None
+
+        lines = text.splitlines()
+        total = len(lines)
+
+        start = max(0, line_number - context_lines - 1)
+        end = min(total, line_number + context_lines)
+
+        code_snippet = []
+        raw_snippet = []
+        for i in range(start, end):
+            line_num = i + 1
+            marker = ">>> " if i == line_number - 1 else "    "
+            code_snippet.append(f"{line_num:4d} {marker}{lines[i]}")
+            raw_snippet.append(lines[i])
+
+        return {
+            "file_path": file_path,
+            "line_number": line_number,
+            "total_lines": total,
+            "code_snippet": "\n".join(code_snippet),
+            "raw_snippet": "\n".join(raw_snippet),
+            "full_file": "\n".join(lines) if total < 100 else None,
+        }
+        
+        
+    def _build_diagnosis_block(self, context: dict) -> str:
+        """
+        Render the Investigator's diagnosis as a prompt fragment for
+        the Fixer.
+
+        Today the only diagnosis kind is a null source. When the
+        agent learns others, add a branch here — the Fixer's prompt
+        template does not change, and AutoFixService does not change.
+
+        Returns an empty string when there is no diagnosis (stage
+        mode, or the agent refused). An empty block leaves the
+        Fixer's prompt unchanged.
+
+        The block is deliberately prose, not JSON. The Fixer is an
+        LLM; prose is what it reasons over. Structured output from
+        the Investigator was already used at the pipeline level —
+        by the time we're building the fix prompt, the structured
+        part is done.
+        """
+        null_source = context.get("null_source")
+        if not null_source:
+            return ""
+
+        return (
+            f"\nThe exception is a null dereference. The Investigator "
+            f"has identified the null source as:\n\n"
+            f"    {null_source}\n\n"
+            f"Your diff MUST address this exact expression. Either "
+            f"guard its use, add a null check where it's assigned, or "
+            f"replace it with a safe alternative. Do NOT modify any "
+            f"other line in the file — a diff that touches unrelated "
+            f"code will fail verification.\n\n"
+            f"Note: the stack trace's line number may be stale. The "
+            f"line that failed when the alert fired may not be the "
+            f"line that contains the null source now. Fix the code "
+            f"where {null_source} is assigned or used, not where the "
+            f"stack trace points."
+        )
 
     # ------------------------------------------------------------------
     # Stage 3 — Fixer (Act)
@@ -356,30 +597,129 @@ class IncidentService:
         incident_id = context["incident_id"]
 
         result = {}
+        
+        skip_reason = context.get("auto_fix_skipped_reason")
+        if skip_reason:
+            logger.info(
+                f"⏭️  Skipping auto-fix for {incident_id}: "
+                f"investigator returned {skip_reason}"
+            )
+            return result
 
         if not (stack_analysis and stack_analysis.get("file_path")):
             return result
 
-        # Fetch code context once. The Fixer needs it for its prompt;
-        # we also record it for the dashboard. Previously the pipeline
-        # fetched this twice — once here, once inside AutoFixService.
-        if service.get("repo_name"):
+        # Fetch code context once. Prefer reading from the clone the
+        # Investigator created — it's on disk, it's not rate-limited,
+        # and it handles the monorepo path mismatch the GitHub API
+        # does not (the stack trace says src/services/foo.py; the repo
+        # has backend/orchestrator/src/services/foo.py). Fall back to
+        # the GitHub API only when there is no clone.
+        
+        trace_line = stack_analysis.get("line_number", 1)
+        target_line = trace_line
+        null_source = context.get("null_source")
+
+        if null_source and context.get("investigation"):
+            # Normalize the null source for matching. The Investigator
+            # sometimes emits "self.rag", sometimes "get_rag_service()",
+            # and sometimes "get_rag_service" — all refer to the same
+            # thing. Strip trailing parens and whitespace on both sides.
+            normalized = null_source.strip().rstrip("()")
+
+            # Look for the *usage* line first. The usage is always in
+            # the file the stack trace points at. The assignment may
+            # be in a different file (get_rag_service is defined in
+            # rag_service.py), where its line number means nothing in
+            # the file we're fixing.
+            usage_line = None
+            for obs in context["investigation"].get("history", []):
+                if obs.get("tool") != "search_codebase":
+                    continue
+                result_text = obs.get("result", "")
+                for line in result_text.splitlines():
+                    if normalized not in line:
+                        continue
+                    # search_codebase result format:
+                    #   "path/to/file.py:123: the line content"
+                    parts = line.split(":", 2)
+                    if len(parts) < 2:
+                        continue
+                    try:
+                        usage_line = int(parts[1])
+                    except ValueError:
+                        continue
+                    break
+                if usage_line:
+                    break
+
+            if usage_line:
+                target_line = usage_line
+                logger.info(
+                    f"🎯 Fixer: targeting line {target_line} "
+                    f"(usage of `{null_source}`) instead of "
+                    f"stack-trace line {trace_line}"
+                )
+            else:
+                # Fall back to the assignment line if the usage site
+                # wasn't found in the history.
+                for obs in context["investigation"].get("history", []):
+                    args = obs.get("args", {})
+                    symbol = (args.get("symbol_name") or "").strip().rstrip("()")
+                    if (
+                        obs.get("tool") == "read_symbol"
+                        and symbol
+                        and symbol == normalized
+                    ):
+                        meta = obs.get("metadata", {})
+                        if meta.get("start_line"):
+                            target_line = meta["start_line"]
+                            logger.info(
+                                f"🎯 Fixer: targeting line {target_line} "
+                                f"(assignment of `{null_source}`) instead of "
+                                f"stack-trace line {trace_line}"
+                            )
+                        break
+        
+        code_context = None
+        repo_workdir = context.get("repo_workdir")
+
+        if repo_workdir:
+            code_context = self._read_code_context_from_clone(
+                repo_workdir=repo_workdir,
+                file_path=stack_analysis["file_path"],
+                line_number=target_line,
+                context_lines=30,
+            )
+            if code_context:
+                logger.info(
+                    f"✅ Code context read from clone: "
+                    f"{code_context.get('file_path')}:"
+                    f"{code_context.get('line_number')}"
+                )
+
+        if code_context is None and service.get("repo_name"):
             try:
                 github = get_github_service()
                 code_context = await github.get_file_content(
                     repo_name=service["repo_name"],
                     file_path=stack_analysis["file_path"],
-                    line_number=stack_analysis.get("line_number", 1),
+                    line_number=target_line,
                     context_lines=30,
                 )
                 if code_context:
                     logger.info(
-                        f"✅ Code context fetched: {code_context.get('file_path')}:"
+                        f"✅ Code context fetched from GitHub: "
+                        f"{code_context.get('file_path')}:"
                         f"{code_context.get('line_number')}"
                     )
-                    result["code_context"] = code_context
             except Exception as e:
                 logger.error(f"Code context error: {e}")
+
+        if code_context:
+            result["code_context"] = code_context
+            
+        diagnosis_block = self._build_diagnosis_block(context)
 
         try:
             autofix = AutoFixService()
@@ -392,8 +732,11 @@ class IncidentService:
                     "line_number": stack_analysis.get("line_number"),
                     "exception_type": stack_analysis.get("exception_type"),
                     "root_cause": analysis.get("root_cause"),
+                    "null_source": null_source,
                 },
                 require_permission=True,
+                code_context=code_context,
+                diagnosis_block=diagnosis_block,
             )
 
             if fix_result and not fix_result.get("error"):
@@ -657,7 +1000,20 @@ class IncidentService:
         verification = context.get("verification")
         if verification:
             response["verification"] = dict(verification)
-
+            
+        investigation = context.get("investigation")
+        if investigation:
+            response["investigation"] = {
+                "status": investigation.get("status"),
+                "null_source": investigation.get("null_source"),
+                "confidence": investigation.get("confidence"),
+                "iterations": investigation.get("iterations"),
+                "history": investigation.get("history", []),
+            }
+        skip_reason = context.get("auto_fix_skipped_reason")
+        if skip_reason:
+            response["auto_fix_skipped_reason"] = skip_reason
+        
         return response
 
 
@@ -816,6 +1172,27 @@ class IncidentService:
                 return
 
             merged = merge_incident_metadata(existing, "verification", verification)
+            await session.execute(
+                text("UPDATE incidents SET extra_metadata = CAST(:m AS jsonb) WHERE incident_id = :id"),
+                {"m": merged, "id": incident_id}
+            )
+            await session.commit()
+            
+    async def record_investigation(self, incident_id: str, investigation: dict):
+        """
+        Merge the Investigator agent's result into
+        extra_metadata.investigation.
+
+        Same shape as record_verification — merge-not-overwrite, via
+        merge_incident_metadata.
+        """
+        async with get_db_session() as session:
+            existing, found = await self._load_extra_metadata(session, incident_id)
+            if not found:
+                logger.warning(f"record_investigation: incident {incident_id} not found")
+                return
+
+            merged = merge_incident_metadata(existing, "investigation", investigation)
             await session.execute(
                 text("UPDATE incidents SET extra_metadata = CAST(:m AS jsonb) WHERE incident_id = :id"),
                 {"m": merged, "id": incident_id}

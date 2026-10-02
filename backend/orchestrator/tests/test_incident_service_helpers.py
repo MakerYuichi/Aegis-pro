@@ -114,12 +114,14 @@ def _quiet_peripherals():
 
 @pytest.mark.asyncio
 async def test_declare_incident_autofix_success_merges_into_metadata(
-    autofix_orchestrated, seeded_services
+    autofix_orchestrated, seeded_services, monkeypatch
 ):
     """
     Real DB: a successful fix from AutoFixService lands in the
     extra_metadata.auto_fix key on the persisted incident row.
     """
+   
+    monkeypatch.setattr("src.services.incident_service.settings.INVESTIGATOR_MODE", "stage")
     autofix_result = {
         "status": "fix_generated",
         "fix": "--- a\n+++ b\n",
@@ -157,12 +159,15 @@ async def test_declare_incident_autofix_success_merges_into_metadata(
 
 @pytest.mark.asyncio
 async def test_declare_incident_autofix_error_result_not_merged(
-    autofix_orchestrated, seeded_services
+    autofix_orchestrated, seeded_services, monkeypatch
 ):
     """
     Real DB: when AutoFixService returns {"error": ...}, the row's
     extra_metadata must NOT have an auto_fix key.
     """
+    from src.config import settings
+    monkeypatch.setattr(settings, "INVESTIGATOR_MODE", "stage")
+    
     fake_autofix = MagicMock()
     fake_autofix.generate_fix = AsyncMock(return_value={"error": "no code found"})
 
@@ -190,13 +195,16 @@ async def test_declare_incident_autofix_error_result_not_merged(
 
 @pytest.mark.asyncio
 async def test_declare_incident_autofix_exception_is_swallowed(
-    autofix_orchestrated, seeded_services
+    autofix_orchestrated, seeded_services, monkeypatch
 ):
     """
     Real DB: when AutoFixService.generate_fix raises, declare_incident
     still persists the incident and returns success. The auto_fix key
     is absent.
     """
+    from src.config import settings
+    monkeypatch.setattr(settings, "INVESTIGATOR_MODE", "stage")
+
     fake_autofix = MagicMock()
     fake_autofix.generate_fix = AsyncMock(side_effect=RuntimeError("llm down"))
 
