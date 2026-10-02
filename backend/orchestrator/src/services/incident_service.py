@@ -569,7 +569,12 @@ class IncidentService:
             f"guard its use, add a null check where it's assigned, or "
             f"replace it with a safe alternative. Do NOT modify any "
             f"other line in the file — a diff that touches unrelated "
-            f"code will fail verification."
+            f"code will fail verification.\n\n"
+            f"Note: the stack trace's line number may be stale. The "
+            f"line that failed when the alert fired may not be the "
+            f"line that contains the null source now. Fix the code "
+            f"where {null_source} is assigned or used, not where the "
+            f"stack trace points."
         )
 
     # ------------------------------------------------------------------
