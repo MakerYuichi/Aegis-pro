@@ -772,31 +772,27 @@ async def test_provisioner_clones_and_investigator_uses_it(
     constructed with that path as its repo_root. The coordinator
     removes the clone after the pipeline completes.
     """
-    from src.config import settings
     from src.agents.investigator_models import (
         STATUS_DIAGNOSED, InvestigationResult,
     )
+    from src.agents.investigator import InvestigatorAgent
     from src.agents.repo_clone import _base_dir
     import uuid
 
+    # --- Dotted-path patch: mode ---
     monkeypatch.setattr(
-        "src.agents.investigator.InvestigatorAgent.investigate",
-        fake_investigate,
+        "src.services.incident_service.settings.INVESTIGATOR_MODE",
+        "agent",
     )
 
+    # --- Scratch dir under _base_dir() ---
     clone_dir = _base_dir() / f"inv-test-{uuid.uuid4().hex[:12]}"
     clone_dir.mkdir(parents=True, exist_ok=True)
     (clone_dir / "repo").mkdir()
     (clone_dir / "marker.txt").write_text("clone")
 
-    async def fake_provision(context):
-        return {"repo_workdir": str(clone_dir)}
-
-    # Capture the repo_root that InvestigatorAgent is constructed with.
+    # --- Fakes: define BEFORE any monkeypatch references them ---
     captured: dict = {}
-    real_init = None
-
-    from src.agents.investigator import InvestigatorAgent
     real_init = InvestigatorAgent.__init__
 
     def capturing_init(self, llm_service, repo_root):
@@ -813,10 +809,26 @@ async def test_provisioner_clones_and_investigator_uses_it(
             history=[],
         )
 
-    with patch("src.agents.provisioner.provision_clone", new=fake_provision), \
-         patch.object(InvestigatorAgent, "__init__", capturing_init), \
-         patch.object(InvestigatorAgent, "investigate", fake_investigate), \
-         patch("src.services.incident_service.OnCallService") as OnCall, \
+    async def fake_provision(context):
+        return {"repo_workdir": str(clone_dir)}
+
+    # --- Dotted-path patches: class methods ---
+    monkeypatch.setattr(
+        "src.agents.investigator.InvestigatorAgent.__init__",
+        capturing_init,
+    )
+    monkeypatch.setattr(
+        "src.agents.investigator.InvestigatorAgent.investigate",
+        fake_investigate,
+    )
+
+    # --- Provisioner is patched through its module ---
+    monkeypatch.setattr(
+        "src.agents.provisioner.provision_clone",
+        fake_provision,
+    )
+
+    with patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
          patch("src.services.incident_service.manager") as ws:
@@ -834,7 +846,6 @@ async def test_provisioner_clones_and_investigator_uses_it(
     assert captured["repo_root"] == str(clone_dir)
     assert not clone_dir.exists()
 
-
 @pytest.mark.asyncio
 async def test_provisioner_skips_clone_without_file_path(
     service_with_db, monkeypatch
@@ -848,19 +859,17 @@ async def test_provisioner_skips_clone_without_file_path(
     )
     from src.agents.investigator import InvestigatorAgent
 
-    # Dotted-path patch — resolves through the module at patch time,
-    # independent of which `settings` object the test imported.
     monkeypatch.setattr(
         "src.services.incident_service.settings.INVESTIGATOR_MODE",
         "agent",
     )
 
     captured: dict = {}
-    original_init = InvestigatorAgent.__init__
+    real_init = InvestigatorAgent.__init__
 
     def capturing_init(self, llm_service, repo_root):
         captured["repo_root"] = repo_root
-        return original_init(self, llm_service, repo_root)
+        return real_init(self, llm_service, repo_root)
 
     async def fake_investigate(self, ctx, **kw):
         return InvestigationResult(
@@ -871,7 +880,6 @@ async def test_provisioner_skips_clone_without_file_path(
             history=[],
         )
 
-    # Dotted-path class patch too, for the same reason.
     monkeypatch.setattr(
         "src.agents.investigator.InvestigatorAgent.__init__",
         capturing_init,
