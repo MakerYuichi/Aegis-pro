@@ -648,6 +648,22 @@ _SEARCH_EXCLUDES = {
     ".next", ".nuxt", ".turbo", ".parcel-cache",
 }
 
+def _matches_glob(rel_path: str, pattern: str) -> bool:
+    """
+    Match a repo-relative POSIX path against a glob pattern.
+
+    Extends PurePosixPath.match so that `**/` matches zero or more
+    directories, not one or more. `**/*.py` matches "foo.py" as well
+    as "subdir/foo.py". PurePosixPath.match treats `**/` as
+    one-or-more, which surprises both the agent and the human reader.
+    """
+    path = PurePosixPath(rel_path)
+    if path.match(pattern):
+        return True
+    # `**/` at the start should also match a bare filename.
+    if pattern.startswith("**/") and path.match(pattern[3:]):
+        return True
+    return False
 
 async def search_codebase(
     repo: str, pattern: str, file_glob: str | None = None
@@ -701,7 +717,7 @@ async def search_codebase(
 
         rel = file_path.relative_to(repo_path).as_posix()
 
-        if file_glob and not PurePosixPath(rel).match(file_glob):
+        if file_glob and not _matches_glob(rel, file_glob):
             continue
 
         # Skip likely-binary files by extension. Best-effort; the
