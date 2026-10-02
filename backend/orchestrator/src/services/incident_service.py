@@ -615,6 +615,28 @@ class IncidentService:
         # does not (the stack trace says src/services/foo.py; the repo
         # has backend/orchestrator/src/services/foo.py). Fall back to
         # the GitHub API only when there is no clone.
+        
+        trace_line = stack_analysis.get("line_number", 1)
+        target_line = trace_line
+        null_source = context.get("null_source")
+
+        if null_source and context.get("investigation"):
+            for obs in context["investigation"].get("history", []):
+                args = obs.get("args", {})
+                if (
+                    obs.get("tool") == "read_symbol"
+                    and args.get("symbol_name") == null_source
+                ):
+                    meta = obs.get("metadata", {})
+                    if meta.get("start_line"):
+                        target_line = meta["start_line"]
+                        logger.info(
+                            f"🎯 Fixer: targeting line {target_line} "
+                            f"(assignment of `{null_source}`) instead of "
+                            f"stack-trace line {trace_line}"
+                        )
+                    break
+        
         code_context = None
         repo_workdir = context.get("repo_workdir")
 
@@ -666,7 +688,7 @@ class IncidentService:
                     "line_number": stack_analysis.get("line_number"),
                     "exception_type": stack_analysis.get("exception_type"),
                     "root_cause": analysis.get("root_cause"),
-                    "null_source": context.get("null_source"),
+                    "null_source": null_source,
                 },
                 require_permission=True,
                 code_context=code_context,
