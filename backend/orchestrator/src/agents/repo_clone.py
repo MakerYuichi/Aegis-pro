@@ -24,6 +24,7 @@ import asyncio
 import shutil
 import subprocess
 import tempfile
+import os     
 import uuid
 from pathlib import Path
 
@@ -141,6 +142,39 @@ async def clone_repo(
         shutil.rmtree(target, ignore_errors=True)
         return None, f"clone_exception: {e}"
 
+def _on_rm_error(func, path, exc_info):
+    """
+    Error handler for shutil.rmtree that handles read-only files.
+
+    Git clones contain read-only pack files
+    (.git/objects/pack/*.pack) with mode 0444. Python 3.11's
+    shutil.rmtree refuses to delete them and raises
+    PermissionError. The standard fix is to make the file writable
+    and retry.
+
+    Python 3.12 changed this behavior — its rmtree handles
+    read-only files on its own. Until the project runs on 3.12+,
+    this callback is required for git clones to actually be
+    removed.
+    """
+    try:
+        os.chmod(path, 0o700)
+        func(path)
+    except Exception as e:
+        logger.warning(f"rmtree: could not remove {path}: {e}")
+
+
+def _remove_tree(path: str | Path) -> None:
+    """
+    Remove a directory tree, handling read-only files.
+
+    Wraps shutil.rmtree with the read-only workaround. Does not
+    swallow errors silently — failures are logged at WARNING via
+    the onerror callback. If the top-level call fails, it raises
+    (the caller decides whether to log or propagate).
+    """
+    shutil.rmtree(str(path), onerror=_on_rm_error)
+
 
 def cleanup_repo(path: str | None) -> None:
     """
@@ -179,7 +213,7 @@ def cleanup_repo(path: str | None) -> None:
         return
 
     try:
-        shutil.rmtree(target, ignore_errors=False)
+        _remove_tree(target)
         logger.debug(f"🧹 Removed clone {target}")
     except Exception as e:
         # Do not raise. Cleanup failure must not break the pipeline.
