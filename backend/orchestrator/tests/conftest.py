@@ -63,8 +63,7 @@ def _reset_settings(monkeypatch):
     importlib.reload(svc_factory)
 
     # Default to the production mode. Agent-mode tests override this.
-    monkeypatch.setattr(settings, "INVESTIGATOR_MODE", "stage")
-
+    
     yield
 
 
