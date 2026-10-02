@@ -17,26 +17,6 @@ from src.websocket import manager
 
 
 def merge_incident_metadata(existing_json, key: str, value) -> str:
-    """
-    Read-merge-write for the extra_metadata JSONB column.
-
-    This is the ONLY correct way to add a key to extra_metadata after
-    the initial INSERT. The previous save_incident_metadata() did a
-    blind `SET extra_metadata = :param`, which silently dropped prior
-    writes — the last writer won. Every record_* method below uses
-    this helper or a sibling with the same shape.
-
-    Args:
-        existing_json: the current extra_metadata value. May be a
-            JSON string, a dict (from SQLAlchemy's JSONB decoding),
-            None, or malformed text. All four are handled.
-        key: a single top-level key. No dotted paths — see
-            record_related_prs for the one legitimate nested case.
-        value: any JSON-serializable value.
-
-    Returns:
-        A JSON string ready for CAST(:m AS jsonb).
-    """
     if not existing_json:
         metadata = {}
     else:
@@ -67,26 +47,6 @@ class IncidentService:
         stack_trace: str = None,
         reported_by: str = None,
     ) -> dict:
-        """
-        Coordinator for the incident pipeline.
-
-        Six named stages, in order:
-
-          1. Watcher      — perceive: service lookup, stack parse, blast radius
-          2. Investigator — reason:  RAG context, LLM analysis, GitHub context
-          3. Fixer        — act:     auto-fix diff, code context
-          4. Verifier     — verify:  (stub, lands in a follow-up)
-          5. Communicator — report:  on-call, alerts, K8s, WebSocket
-          6. Curator      — learn:   RAG store
-
-        The coordinator owns all writes. Each stage is a pure function
-        of its inputs — no DB access, no direct persistence — so each
-        stage can be tested in isolation.
-
-        Inputs to later stages include everything earlier stages
-        produced. Each stage returns only the keys it newly produces.
-        No stage returns a key some earlier stage already owns.
-        """
         context = {
             "service_name": service_name,
             "message": message,
@@ -99,7 +59,17 @@ class IncidentService:
         if context.get("error"):
             return context
 
-        # Stage 2 — Investigator (Reason)
+        # Stage 2 — Provisioner (Clone once)
+        #
+        # The Provisioner creates one clone per incident when the
+        # incident will need filesystem access (repo_name + file_path
+        # both set). Every later stage that needs the clone reads
+        # context["repo_workdir"]; none of them create or remove it.
+        # The coordinator's finally below calls the Provisioner's
+        # cleanup to remove the clone after all stages are done.
+        context.update(await self._stage_provisioner(context))
+
+        # Stage 3 — Investigator (Reason)
         context.update(await self._stage_investigator(context))
 
         # Persist the diagnosed incident before any enrichment. This is
@@ -161,9 +131,8 @@ class IncidentService:
 
             return self._build_response(context)
         finally:
-            from src.agents.repo_clone import cleanup_repo
+            from src.agents.provisioner import cleanup_repo
             cleanup_repo(context.get("repo_workdir"))
-
     # ------------------------------------------------------------------
     # Stage 1 — Watcher (Perceive)
     # ------------------------------------------------------------------
@@ -205,9 +174,35 @@ class IncidentService:
             "stack_analysis": stack_analysis,
             "blast_radius": blast_radius,
         }
+        
+        # ------------------------------------------------------------------
+    # Stage 2 — Provisioner (Clone once)
+    # ------------------------------------------------------------------
+
+    async def _stage_provisioner(self, context: dict) -> dict:
+        """
+        Provision. Clone the incident's repo into
+        context["repo_workdir"] when the incident will need filesystem
+        access.
+
+        The Provisioner is the sole owner of the clone's lifecycle.
+        It creates the clone here and it defines the cleanup that the
+        coordinator calls in its finally block. No other stage
+        creates, reads the process of creating, or removes the clone.
+
+        Returns:
+            {"repo_workdir": "<path>"} on success.
+            {} when no clone is needed (no repo, no stack-trace file
+            path, or the clone failed). An empty return is not an
+            error — downstream stages detect the missing clone and
+            degrade honestly.
+        """
+        from src.agents.provisioner import provision_clone
+
+        return await provision_clone(context)
 
     # ------------------------------------------------------------------
-    # Stage 2 — Investigator (Reason)
+    # Stage 3 — Investigator (Reason)
     # ------------------------------------------------------------------
 
     async def _stage_investigator(self, context: dict) -> dict:
@@ -404,15 +399,18 @@ class IncidentService:
         Build an InvestigatorContext, run the agent, return the
         InvestigationResult.
 
+        The clone is created by the Provisioner stage and removed by
+        the coordinator's finally. This method reads
+        context["repo_workdir"] but never creates or removes it.
+
+        When the clone is absent (no repo, no file path, or the clone
+        failed), the agent's repo_root is the empty string and every
+        tool returns repo_not_found. The agent refuses. That's the
+        honest outcome — better than inventing a path.
+
         Never raises — any exception inside the agent becomes a
         result with status="decision_failed" and the exception is
         logged. The pipeline must not be broken by the agent.
-
-        Clones the repo once and writes the path into
-        context["repo_workdir"]. The Verifier reuses that same
-        checkout instead of cloning again. Cleanup is the
-        coordinator's job (see declare_incident), not this method's —
-        the directory has to survive past this stage.
         """
         from src.agents.investigator import InvestigatorAgent
         from src.agents.investigator_context import build_investigator_context
@@ -420,22 +418,9 @@ class IncidentService:
             STATUS_DECISION_FAILED,
             InvestigationResult,
         )
-        from src.agents.repo_clone import clone_repo
 
         try:
-            # One clone for the whole incident. If this fails, the
-            # agent's tools will all return repo_not_found and the
-            # agent will refuse — the honest outcome.
-            clone_path, clone_error = await clone_repo(
-                repo, commit_sha=context.get("commit_sha"),
-            )
-            if clone_path:
-                context["repo_workdir"] = clone_path
-            else:
-                logger.warning(
-                    f"Investigator: could not clone {repo!r} — "
-                    f"{clone_error}. Tools will fail; agent will refuse."
-                )
+            repo_workdir = context.get("repo_workdir")
 
             ctx = build_investigator_context(
                 service_name=service_name,
@@ -449,13 +434,9 @@ class IncidentService:
                 fix_outcomes=fix_outcomes,
                 blast_radius=blast_radius,
             )
-            # repo_root is the cloned path, not the GitHub name. If
-            # the clone failed, we pass the empty string and every
-            # tool returns repo_not_found — which is what the agent
-            # is designed to handle.
             agent = InvestigatorAgent(
                 llm_service=self.llm,
-                repo_root=clone_path or "",
+                repo_root=repo_workdir or "",
             )
             return await agent.investigate(
                 ctx,
@@ -555,6 +536,41 @@ class IncidentService:
             "raw_snippet": "\n".join(raw_snippet),
             "full_file": "\n".join(lines) if total < 100 else None,
         }
+        
+        
+    def _build_diagnosis_block(self, context: dict) -> str:
+        """
+        Render the Investigator's diagnosis as a prompt fragment for
+        the Fixer.
+
+        Today the only diagnosis kind is a null source. When the
+        agent learns others, add a branch here — the Fixer's prompt
+        template does not change, and AutoFixService does not change.
+
+        Returns an empty string when there is no diagnosis (stage
+        mode, or the agent refused). An empty block leaves the
+        Fixer's prompt unchanged.
+
+        The block is deliberately prose, not JSON. The Fixer is an
+        LLM; prose is what it reasons over. Structured output from
+        the Investigator was already used at the pipeline level —
+        by the time we're building the fix prompt, the structured
+        part is done.
+        """
+        null_source = context.get("null_source")
+        if not null_source:
+            return ""
+
+        return (
+            f"\nThe exception is a null dereference. The Investigator "
+            f"has identified the null source as:\n\n"
+            f"    {null_source}\n\n"
+            f"Your diff MUST address this exact expression. Either "
+            f"guard its use, add a null check where it's assigned, or "
+            f"replace it with a safe alternative. Do NOT modify any "
+            f"other line in the file — a diff that touches unrelated "
+            f"code will fail verification."
+        )
 
     # ------------------------------------------------------------------
     # Stage 3 — Fixer (Act)
@@ -631,6 +647,8 @@ class IncidentService:
 
         if code_context:
             result["code_context"] = code_context
+            
+        diagnosis_block = self._build_diagnosis_block(context)
 
         try:
             autofix = AutoFixService()
@@ -647,6 +665,7 @@ class IncidentService:
                 },
                 require_permission=True,
                 code_context=code_context,
+                diagnosis_block=diagnosis_block,
             )
 
             if fix_result and not fix_result.get("error"):
