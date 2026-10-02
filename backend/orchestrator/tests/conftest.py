@@ -48,13 +48,22 @@ def _reset_settings(monkeypatch):
     Deliberately does NOT reload src.config: src.database captured
     settings.DATABASE_URL at import time, and reloading config would
     leave the engine bound to a stale URL.
+
+    Also forces INVESTIGATOR_MODE=stage for every test. Tests that
+    exercise agent mode set it explicitly with monkeypatch; tests
+    that don't see the production default. Without this, a leaked
+    .env value from a manual run leaks into the entire suite.
     """
     import importlib
+    from src.config import settings
     from src.llm import factory as llm_factory
     from src.services import factory as svc_factory
 
     importlib.reload(llm_factory)
     importlib.reload(svc_factory)
+
+    # Default to the production mode. Agent-mode tests override this.
+    monkeypatch.setattr(settings, "INVESTIGATOR_MODE", "stage")
 
     yield
 

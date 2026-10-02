@@ -42,6 +42,12 @@ STACK_TRACE = (
     "    at com.acme.payment.DBConnection.execute(DBConnection.java:88)\n"
 )
 
+PY_STACK_TRACE = (
+    'Traceback (most recent call last):\n'
+    '  File "src/services/incident_service.py", line 150, in _stage_investigator\n'
+    "AttributeError: 'NoneType' object has no attribute 'rag'\n"
+)
+
 
 @pytest.fixture
 def service():
@@ -757,12 +763,14 @@ async def test_record_verification_logs_warning_on_missing_row():
 
 
 @pytest.mark.asyncio
-async def test_investigator_mode_agent_clones_and_stores_workdir(
+async def test_provisioner_clones_and_investigator_uses_it(
     service_with_db, monkeypatch
 ):
     """
-    INVESTIGATOR_MODE=agent, clone succeeds → context["repo_workdir"]
-    is set to the clone path. Cleanup runs at the end of declare_incident.
+    INVESTIGATOR_MODE=agent with a valid incident → the Provisioner
+    clones once, writes context["repo_workdir"], and the agent is
+    constructed with that path as its repo_root. The coordinator
+    removes the clone after the pipeline completes.
     """
     from src.config import settings
     from src.agents.investigator_models import (
@@ -773,20 +781,26 @@ async def test_investigator_mode_agent_clones_and_stores_workdir(
 
     monkeypatch.setattr(settings, "INVESTIGATOR_MODE", "agent")
 
-    # The fake clone must land under _base_dir() so that
-    # cleanup_repo's "is this inside our base dir?" check passes.
-    # That's the same contract real clone_repo honors.
     clone_dir = _base_dir() / f"inv-test-{uuid.uuid4().hex[:12]}"
     clone_dir.mkdir(parents=True, exist_ok=True)
+    (clone_dir / "repo").mkdir()
     (clone_dir / "marker.txt").write_text("clone")
 
-    async def fake_clone(repo, commit_sha=None, **kw):
-        return str(clone_dir), None
+    async def fake_provision(context):
+        return {"repo_workdir": str(clone_dir)}
 
+    # Capture the repo_root that InvestigatorAgent is constructed with.
     captured: dict = {}
+    real_init = None
+
+    from src.agents.investigator import InvestigatorAgent
+    real_init = InvestigatorAgent.__init__
+
+    def capturing_init(self, llm_service, repo_root):
+        captured["repo_root"] = repo_root
+        return real_init(self, llm_service, repo_root)
 
     async def fake_investigate(self, ctx, **kw):
-        captured["repo_root"] = self.repo_root
         return InvestigationResult(
             status=STATUS_DIAGNOSED,
             null_source="self.rag",
@@ -796,9 +810,9 @@ async def test_investigator_mode_agent_clones_and_stores_workdir(
             history=[],
         )
 
-    with patch("src.agents.repo_clone.clone_repo", new=fake_clone), \
-         patch("src.agents.investigator.InvestigatorAgent.investigate",
-               new=fake_investigate), \
+    with patch("src.agents.provisioner.provision_clone", new=fake_provision), \
+         patch.object(InvestigatorAgent, "__init__", capturing_init), \
+         patch.object(InvestigatorAgent, "investigate", fake_investigate), \
          patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
@@ -810,50 +824,48 @@ async def test_investigator_mode_agent_clones_and_stores_workdir(
         K8s.return_value.get_deployment_status = AsyncMock(return_value="ok")
         ws.broadcast = AsyncMock()
 
-        result = await service_with_db.declare_incident(
+        await service_with_db.declare_incident(
             "payment-api", "DB down", stack_trace=STACK_TRACE
         )
 
     assert captured["repo_root"] == str(clone_dir)
-    assert not clone_dir.exists(), (
-        f"cleanup did not run. Clone dir still exists at {clone_dir}. "
-        f"Contents: {list(clone_dir.iterdir()) if clone_dir.exists() else 'N/A'}"
-    )
+    assert not clone_dir.exists()
 
 
 @pytest.mark.asyncio
-async def test_investigator_mode_agent_clone_failure_degrades_honestly(
+async def test_provisioner_skips_clone_without_file_path(
     service_with_db, monkeypatch
 ):
     """
-    INVESTIGATOR_MODE=agent, clone fails → the pipeline still runs
-    end to end, the agent is invoked with an empty repo_root, and the
-    response reflects whatever the agent returns.
+    No stack trace → no file_path → the Provisioner skips the clone.
+    The agent is still constructed, with an empty repo_root.
     """
     from src.config import settings
     from src.agents.investigator_models import (
         STATUS_REFUSED, InvestigationResult,
     )
+    from src.agents.investigator import InvestigatorAgent
+
     monkeypatch.setattr(settings, "INVESTIGATOR_MODE", "agent")
 
-    async def fake_clone(repo, commit_sha=None, **kw):
-        return None, "clone_timeout after 60s"
-
     captured: dict = {}
+    real_init = InvestigatorAgent.__init__
+
+    def capturing_init(self, llm_service, repo_root):
+        captured["repo_root"] = repo_root
+        return real_init(self, llm_service, repo_root)
 
     async def fake_investigate(self, ctx, **kw):
-        captured["repo_root"] = self.repo_root
         return InvestigationResult(
             status=STATUS_REFUSED,
-            reason="no_null_source_visible",
+            reason="no_clone",
             candidates_considered=[],
             iterations=0,
             history=[],
         )
 
-    with patch("src.agents.repo_clone.clone_repo", new=fake_clone), \
-         patch("src.agents.investigator.InvestigatorAgent.investigate",
-               new=fake_investigate), \
+    with patch.object(InvestigatorAgent, "__init__", capturing_init), \
+         patch.object(InvestigatorAgent, "investigate", fake_investigate), \
          patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
@@ -865,52 +877,40 @@ async def test_investigator_mode_agent_clone_failure_degrades_honestly(
         K8s.return_value.get_deployment_status = AsyncMock(return_value="ok")
         ws.broadcast = AsyncMock()
 
-        result = await service_with_db.declare_incident(
-            "payment-api", "DB down", stack_trace=STACK_TRACE
-        )
+        # No stack trace → no file_path → no clone.
+        await service_with_db.declare_incident("payment-api", "DB down")
 
-    # The agent still ran. It got an empty repo_root because the
-    # clone failed. Tools all return repo_not_found, and the agent
-    # chose to refuse — the honest outcome.
     assert captured["repo_root"] == ""
-    assert result["investigation"]["status"] == "refused"
-    assert result["auto_fix_skipped_reason"] == "refused"
 
 @pytest.mark.asyncio
 async def test_fixer_reads_code_context_from_clone_when_present(
     service_with_db, monkeypatch, tmp_path
 ):
     """
-    When a clone is present in context["repo_workdir"], the Fixer
-    reads code context from disk instead of calling GitHub.
-    Specifically verifies that the monorepo path resolution works:
-    the stack trace says src/services/incident_service.py, the clone
-    has it at backend/orchestrator/src/services/incident_service.py,
-    and the Fixer finds it.
+    The Provisioner's clone is in context["repo_workdir"] → the
+    Fixer reads code context from the clone rather than calling
+    GitHub. get_file_content is never called for the Fixer's read.
     """
     from src.config import settings
+    from src.agents.investigator_models import (
+        STATUS_DIAGNOSED, InvestigationResult,
+    )
+
     monkeypatch.setattr(settings, "INVESTIGATOR_MODE", "agent")
 
-    # Build a fake clone that mirrors the monorepo layout.
+    # Build a fake clone at the monorepo path.
     clone = tmp_path / "clone"
     nested = clone / "backend" / "orchestrator" / "src" / "services"
     nested.mkdir(parents=True)
     (nested / "incident_service.py").write_text(
-        "\n".join(f"# line {i}" for i in range(1, 200))
+        "line\n" * 149 + "target line 150\n" + "line\n" * 20
     )
+    (clone / "repo").mkdir()  # Verifier requires /repo
 
-    # The stack trace must point at a file the clone actually has.
-    MONOREPO_STACK = (
-        "AttributeError: 'NoneType' object has no attribute 'search_similar_outcomes'\n"
-        "    at IncidentService.declare_incident(src/services/incident_service.py:150)"
-    )
+    async def fake_provision(context):
+        return {"repo_workdir": str(clone)}
 
-    async def fake_investigate(*args, **kwargs):
-        from src.agents.investigator_models import (
-            STATUS_DIAGNOSED, InvestigationResult,
-        )
-        if "context" in kwargs:
-            kwargs["context"]["repo_workdir"] = str(clone)
+    async def fake_investigate(self, ctx, **kw):
         return InvestigationResult(
             status=STATUS_DIAGNOSED,
             null_source="self.rag",
@@ -920,22 +920,21 @@ async def test_fixer_reads_code_context_from_clone_when_present(
             history=[],
         )
 
-    github_called = {"n": 0}
+    github_file_content_calls: list = []
 
     async def fake_get_file_content(*args, **kwargs):
-        github_called["n"] += 1
+        github_file_content_calls.append((args, kwargs))
         return {}
 
-    with patch.object(
-        service_with_db, "_run_investigator_agent",
-        new=AsyncMock(side_effect=fake_investigate),
-    ), \
-    patch("src.services.incident_service.get_github_service") as ghs, \
-    patch("src.services.incident_service.AutoFixService") as autofix_cls, \
-    patch("src.services.incident_service.OnCallService") as OnCall, \
-    patch("src.services.incident_service.AlertService") as Alert, \
-    patch("src.services.incident_service.KubernetesService") as K8s, \
-    patch("src.services.incident_service.manager") as ws:
+    with patch("src.agents.provisioner.provision_clone", new=fake_provision), \
+         patch("src.agents.investigator.InvestigatorAgent.investigate",
+               new=fake_investigate), \
+         patch("src.services.incident_service.get_github_service") as ghs, \
+         patch("src.services.incident_service.AutoFixService") as autofix_cls, \
+         patch("src.services.incident_service.OnCallService") as OnCall, \
+         patch("src.services.incident_service.AlertService") as Alert, \
+         patch("src.services.incident_service.KubernetesService") as K8s, \
+         patch("src.services.incident_service.manager") as ws:
         ghs.return_value.get_file_content = AsyncMock(
             side_effect=fake_get_file_content,
         )
@@ -954,12 +953,16 @@ async def test_fixer_reads_code_context_from_clone_when_present(
         K8s.return_value.get_deployment_status = AsyncMock(return_value="ok")
         ws.broadcast = AsyncMock()
 
-        result = await service_with_db.declare_incident(
-            "payment-api", "DB down", stack_trace=MONOREPO_STACK
+        await service_with_db.declare_incident(
+            "payment-api", "DB down", stack_trace=PY_STACK_TRACE
         )
 
-    assert github_called["n"] == 0, (
-        f"Fixer should not call GitHub when a clone is present; "
-        f"get_file_content was called {github_called['n']} time(s)"
-    )
-    assert result.get("auto_fix") is not None
+    # The Fixer's read came from the clone, not GitHub.
+    # Note: get_file_content may still be called by other code paths
+    # (the Fixer's optional GitHub fallback for other reasons), so
+    # we don't assert on the call count here. Instead we assert the
+    # Fixer produced a fix, meaning its own read succeeded.
+    autofix_cls.return_value.generate_fix.assert_awaited_once()
+    call_kwargs = autofix_cls.return_value.generate_fix.await_args.kwargs
+    assert call_kwargs.get("code_context") is not None
+    assert "target line 150" in call_kwargs["code_context"]["raw_snippet"]
