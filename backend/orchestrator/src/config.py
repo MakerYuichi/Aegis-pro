@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     # the system temp root". Set explicitly when you want clones to
     # land somewhere inspectable, e.g. /var/lib/aegis/investigator-workdir.
     
-    INVESTIGATOR_WORKDIR: str = ""
+    INVESTIGATOR_WORKDIR: str = "/verifier-workdir"
     # Kubernetes (optional)
     K8S_API_URL: Optional[str] = None
     K8S_TOKEN: Optional[str] = None
