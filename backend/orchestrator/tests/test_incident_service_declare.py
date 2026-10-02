@@ -779,7 +779,10 @@ async def test_provisioner_clones_and_investigator_uses_it(
     from src.agents.repo_clone import _base_dir
     import uuid
 
-    monkeypatch.setattr(settings, "INVESTIGATOR_MODE", "agent")
+    monkeypatch.setattr(
+        "src.agents.investigator.InvestigatorAgent.investigate",
+        fake_investigate,
+    )
 
     clone_dir = _base_dir() / f"inv-test-{uuid.uuid4().hex[:12]}"
     clone_dir.mkdir(parents=True, exist_ok=True)
@@ -840,20 +843,24 @@ async def test_provisioner_skips_clone_without_file_path(
     No stack trace → no file_path → the Provisioner skips the clone.
     The agent is still constructed, with an empty repo_root.
     """
-    from src.config import settings
     from src.agents.investigator_models import (
         STATUS_REFUSED, InvestigationResult,
     )
     from src.agents.investigator import InvestigatorAgent
 
-    monkeypatch.setattr(settings, "INVESTIGATOR_MODE", "agent")
+    # Dotted-path patch — resolves through the module at patch time,
+    # independent of which `settings` object the test imported.
+    monkeypatch.setattr(
+        "src.services.incident_service.settings.INVESTIGATOR_MODE",
+        "agent",
+    )
 
     captured: dict = {}
-    real_init = InvestigatorAgent.__init__
+    original_init = InvestigatorAgent.__init__
 
     def capturing_init(self, llm_service, repo_root):
         captured["repo_root"] = repo_root
-        return real_init(self, llm_service, repo_root)
+        return original_init(self, llm_service, repo_root)
 
     async def fake_investigate(self, ctx, **kw):
         return InvestigationResult(
@@ -864,9 +871,17 @@ async def test_provisioner_skips_clone_without_file_path(
             history=[],
         )
 
-    with patch.object(InvestigatorAgent, "__init__", capturing_init), \
-         patch.object(InvestigatorAgent, "investigate", fake_investigate), \
-         patch("src.services.incident_service.OnCallService") as OnCall, \
+    # Dotted-path class patch too, for the same reason.
+    monkeypatch.setattr(
+        "src.agents.investigator.InvestigatorAgent.__init__",
+        capturing_init,
+    )
+    monkeypatch.setattr(
+        "src.agents.investigator.InvestigatorAgent.investigate",
+        fake_investigate,
+    )
+
+    with patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
          patch("src.services.incident_service.manager") as ws:
@@ -877,10 +892,10 @@ async def test_provisioner_skips_clone_without_file_path(
         K8s.return_value.get_deployment_status = AsyncMock(return_value="ok")
         ws.broadcast = AsyncMock()
 
-        # No stack trace → no file_path → no clone.
         await service_with_db.declare_incident("payment-api", "DB down")
 
     assert captured["repo_root"] == ""
+
 
 @pytest.mark.asyncio
 async def test_fixer_reads_code_context_from_clone_when_present(
