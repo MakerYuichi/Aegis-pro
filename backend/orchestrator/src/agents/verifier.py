@@ -187,24 +187,7 @@ class NoOpVerifier(Verifier):
 
 
 class HostedVerifier(Verifier):
-    """
-    Runs the diff against the repo's own tests in Docker on the AEGIS
-    PRO host.
-
-    Deployment constraint: requires Docker CLI + daemon reachable from
-    the orchestrator container. In docker-compose that's satisfied by
-    the docker-proxy sidecar (see docker-compose.yml and issue #101).
-    Deployments without Docker access should keep
-    VERIFY_BEFORE_REPORT=false — the pipeline then runs NoOpVerifier
-    instead.
-
-    Sandbox model:
-      - git clone runs in the orchestrator (trusted code, our network).
-      - docker run executes the tests in a sibling container with
-        --network none (untrusted execution, no network).
-      - Repo is bind-mounted from the host; the sibling sees the
-        HOST path, not the orchestrator's internal path.
-    """
+   
 
     async def verify(
         self,
@@ -217,8 +200,24 @@ class HostedVerifier(Verifier):
         start = time.monotonic()
         logger.error(f"[TRACE] verify start repo={repo_name} diff_len={len(diff)}")
 
-        workdir = self._new_workdir()
-        try:
+        # Prefer the clone the Provisioner created. When
+        # context["repo_workdir"] is set, it points at a checkout
+        # under VERIFIER_CONTAINER_WORKDIR, visible to both the
+        # orchestrator and (via the host bind mount) the sibling
+        # container the tests run in. In that case, no second clone.
+        existing = (context or {}).get("repo_workdir")
+        reuse = False
+        workdir: Path
+
+        if existing:
+            candidate = Path(existing)
+            if candidate.is_dir() and (candidate / "repo").is_dir():
+                workdir = candidate
+                reuse = True
+                logger.info(f"Verifier: reusing clone at {workdir}")
+
+        if not reuse:
+            workdir = self._new_workdir()
             clone_ok, clone_err = await self._clone(repo_name, commit_sha, workdir)
             if not clone_ok:
                 logger.error(f"[TRACE] return: clone_failed")
@@ -230,6 +229,7 @@ class HostedVerifier(Verifier):
                     verifier="hosted",
                 )
 
+        try:
             command, reason_prefix = _detect_runner(workdir / "repo", language)
             if command is None:
                 logger.error(f"[TRACE] return: no_verification_surface")
@@ -254,15 +254,21 @@ class HostedVerifier(Verifier):
             ).get("file_path")
             file_lines: list[str] = []
             if target_path:
-                try:
-                    full = workdir / "repo" / target_path
-                    file_lines = full.read_text(
-                        encoding="utf-8", errors="replace"
-                    ).splitlines()
-                except Exception as e:
+                full = _resolve_repo_path(workdir / "repo", target_path)
+                if full is not None:
+                    try:
+                        file_lines = full.read_text(
+                            encoding="utf-8", errors="replace"
+                        ).splitlines()
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not read {target_path} for "
+                            f"realignment: {e}"
+                        )
+                else:
                     logger.warning(
-                        f"Could not read {target_path} for "
-                        f"realignment: {e}"
+                        f"Could not find {target_path} in clone "
+                        f"for realignment"
                     )
 
             if file_lines:
@@ -373,7 +379,10 @@ class HostedVerifier(Verifier):
             )
 
         finally:
-            shutil.rmtree(workdir, ignore_errors=True)
+            # Only remove clones we created. The Provisioner's clone
+            # is cleaned up by the coordinator's finally block.
+            if not reuse:
+                shutil.rmtree(workdir, ignore_errors=True)
 
     def _new_workdir(self) -> Path:
         """
@@ -444,6 +453,26 @@ def _repo_url(repo_name: str) -> str:
     if repo_name.startswith("http") or repo_name.startswith("git@"):
         return repo_name
     return f"https://github.com/{repo_name}.git"
+
+def _resolve_repo_path(repo_root: Path, file_path: str) -> Path | None:
+    candidate = repo_root / file_path
+    if candidate.is_file():
+        return candidate
+
+    basename = Path(file_path).name
+    if not basename:
+        return None
+
+    excludes = {
+        ".git", "node_modules", "venv", ".venv",
+        "dist", "build", "__pycache__",
+    }
+    for found in repo_root.rglob(basename):
+        if found.is_file() and not any(
+            part in excludes for part in found.parts
+        ):
+            return found
+    return None
 
 
 def _image_for_language(language: str) -> str:
