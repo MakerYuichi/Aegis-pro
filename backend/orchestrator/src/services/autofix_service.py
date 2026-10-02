@@ -262,7 +262,11 @@ Full format example:
 
             raw_response = await self.llm.complete_raw_detailed(
                 prompt=prompt,
-                system=(...),
+                system=(
+                    "You are an expert software engineer. Return ONLY a unified "
+                    "diff in git-apply-compatible format. No prose, no Markdown "
+                    "fences, no explanation."
+                ),
                 temperature=0.2,
                 max_tokens=1500,
             )
