@@ -34,6 +34,7 @@ happens. That's an honest degradation, not a silent failure.
 from abc import ABC, abstractmethod
 from typing import Literal, Optional
 from dataclasses import dataclass, field
+from src.agents.repo_clone import _remove_tree
 import asyncio
 import os
 import re
@@ -393,8 +394,14 @@ class HostedVerifier(Verifier):
             # Only remove clones we created. The Provisioner's clone
             # is cleaned up by the coordinator's finally block.
             if not reuse:
-                shutil.rmtree(workdir, ignore_errors=True)
-
+                try:
+                    _remove_tree(workdir)
+                    logger.debug(f"🧹 Verifier removed {workdir}")
+                except Exception as e:
+                    logger.warning(
+                        f"Verifier: failed to remove {workdir}: {e}"
+                )
+                    
     def _new_workdir(self) -> Path:
         """
         Create a fresh subdirectory under the verifier workdir.
