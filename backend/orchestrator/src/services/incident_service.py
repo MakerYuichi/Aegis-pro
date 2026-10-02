@@ -644,7 +644,7 @@ class IncidentService:
             code_context = self._read_code_context_from_clone(
                 repo_workdir=repo_workdir,
                 file_path=stack_analysis["file_path"],
-                line_number=stack_analysis.get("line_number", 1),
+                line_number=target_line,
                 context_lines=30,
             )
             if code_context:
@@ -660,7 +660,7 @@ class IncidentService:
                 code_context = await github.get_file_content(
                     repo_name=service["repo_name"],
                     file_path=stack_analysis["file_path"],
-                    line_number=stack_analysis.get("line_number", 1),
+                    line_number=target_line,
                     context_lines=30,
                 )
                 if code_context:
