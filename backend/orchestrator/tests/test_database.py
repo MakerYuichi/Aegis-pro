@@ -34,37 +34,34 @@ def test_database_url_already_asyncpg_remains_unchanged():
     result = url.replace("postgresql://", "postgresql+asyncpg://")
     assert result == "postgresql+asyncpg://user:pass@host/db"
 
-
 # ---------------------------------------------------------------------------
-# Engine creation
+# Engine configuration
 # ---------------------------------------------------------------------------
-
-def test_engine_created_with_debug_true(monkeypatch):
-    """Situation: DEBUG=True. Expected: Engine echo=True."""
-    monkeypatch.setenv("DEBUG", "true")
-    import importlib
-    from src import config
-    importlib.reload(config)
-    importlib.reload(db_module)
-    # Check that engine would be created with echo=True
-    # (Actual engine creation happens at import time, we verify the logic)
-
-
-def test_engine_created_with_debug_false(monkeypatch):
-    """Situation: DEBUG=False. Expected: Engine echo=False."""
-    monkeypatch.setenv("DEBUG", "false")
-    import importlib
-    from src import config
-    importlib.reload(config)
-    importlib.reload(db_module)
-
-
-def test_engine_pool_configuration():
-    """Situation: Engine is created. Expected: Pool configured with size=10, max_overflow=20, pre_ping=True, recycle=3600."""
-    # This is verified by inspection of the source code
-    # The test documents the expected configuration
-    assert True  # Configuration is hardcoded in source
-
+#
+# The engine is created at module-import time, against the settings
+# singleton. There is no runtime API to rebuild it against alternate
+# settings, which means the previous "tests" here couldn't assert
+# anything real:
+#
+#   - test_engine_created_with_debug_true / _false
+#       Reloaded src.config and src.database to force a fresh engine,
+#       then asserted nothing. The reload split the settings singleton
+#       across the suite and caused identity-dependent failures in
+#       unrelated tests (notably test_mock_services). Removed.
+#
+#   - test_engine_pool_configuration
+#       Contained `assert True`. Asserted nothing. Removed.
+#
+# If we want these to be real tests, the correct change is in
+# src/database.py: extract the engine construction into a pure
+# function `_create_engine(settings: Settings) -> AsyncEngine`, call
+# it once at module load with the singleton, and test it in isolation
+# against fresh `Settings(...)` instances. That's a refactor, not a
+# test. Tracked as a follow-up.
+#
+# In the meantime: no test here. Removing no-op tests is better than
+# keeping them — a test that runs but asserts nothing is worse than
+# no test, because it looks like coverage.
 
 # ---------------------------------------------------------------------------
 # init_db
