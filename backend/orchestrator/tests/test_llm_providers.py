@@ -181,13 +181,19 @@ async def test_groq_provider_iterates_models_on_failure(monkeypatch):
     Expected: Falls through to second model on failure.
     Function: src.llm.groq_provider.GroqProvider.complete
     """
-    monkeypatch.setenv("GROQ_API_KEY", "test-key")
-    import importlib
-    from src import config
-    importlib.reload(config)
+    from src.config import settings
+
+    # Patch the settings singleton directly. The provider reads
+    # GROQ_API_KEY at instantiation, and the singleton is a single
+    # object across the whole test session — no module reload needed.
+    #
+    # An importlib.reload(config) here would produce a *new* settings
+    # object in the reloaded module, splitting the singleton identity
+    # that every other module holds. That's the bug that was breaking
+    # test_mock_services in the full suite.
+    monkeypatch.setattr(settings, "GROQ_API_KEY", "test-key")
 
     from src.llm import groq_provider as gp
-    importlib.reload(gp)
 
     mock_resp = MagicMock()
     mock_resp.choices = [MagicMock()]
@@ -213,13 +219,11 @@ async def test_ollama_provider_posts_to_generate_endpoint(monkeypatch):
     Expected: Posts to generate endpoint.
     Function: src.llm.ollama_provider.OllamaProvider.complete
     """
-    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    import importlib
-    from src import config
-    importlib.reload(config)
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "OLLAMA_BASE_URL", "http://localhost:11434")
 
     from src.llm import ollama_provider as op
-    importlib.reload(op)
 
     with patch("httpx.AsyncClient") as MockClient:
         mock_post = AsyncMock()

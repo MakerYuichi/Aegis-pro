@@ -776,27 +776,85 @@ def _rebuild_hunk_body(
 
 
 def _detect_python_runner(repo_dir: Path) -> tuple[str | None, str]:
+    """
+    Walk the degradation ladder for Python, looking for test
+    configuration at any depth — not just the repo root.
+
+    Rationale: repos often keep their Python code in a subdirectory
+    (backend/orchestrator/, src/, app/). Looking only at the repo
+    root misses pytest configs and test directories that live one
+    or two levels down. The previous behavior collapsed such repos
+    to `compileall`, which reported `syntax_passed` — an honest but
+    weak claim. Finding the real test runner makes the verification
+    claim stronger.
+
+    When a config is found in a subdirectory, the returned command
+    `cd`s into that directory before running pytest. That matches
+    how a human would run the tests from the project root.
+    """
     repo_dir = Path(repo_dir)
     has_py_files = any(repo_dir.rglob("*.py"))
     if not has_py_files:
         return None, "nothing"
 
-    # 1. pytest via pyproject or ini
-    if (repo_dir / "pyproject.toml").exists() or \
-       (repo_dir / "pytest.ini").exists() or \
-       (repo_dir / "setup.cfg").exists() or \
-       (repo_dir / "tests").is_dir():
-        return "python -m pytest -q", "tests"
+    # 1. pytest via pyproject, pytest.ini, setup.cfg, or a tests/ dir —
+    #    at any depth. Return the pytest command anchored at the
+    #    directory that contains the config, so relative imports and
+    #    conftest.py files resolve correctly.
+    config_markers = (
+        "pyproject.toml",
+        "pytest.ini",
+        "setup.cfg",
+    )
+    for marker in config_markers:
+        for found in repo_dir.rglob(marker):
+            # Skip anything inside a hidden or virtualenv directory.
+            if any(
+                part.startswith(".") or part in ("venv", ".venv", "node_modules")
+                for part in found.relative_to(repo_dir).parts
+            ):
+                continue
+            rel = found.parent.relative_to(repo_dir)
+            if str(rel) == ".":
+                return "python -m pytest -q", "tests"
+            return f"cd {rel.as_posix()} && python -m pytest -q", "tests"
 
-    # 2. ruff
-    if (repo_dir / "ruff.toml").exists() or (repo_dir / ".ruff.toml").exists():
-        return "ruff check .", "linter"
+    # A bare tests/ directory (no config) is also a pytest signal.
+    for tests_dir in repo_dir.rglob("tests"):
+        if not tests_dir.is_dir():
+            continue
+        if any(
+            part.startswith(".") or part in ("venv", ".venv", "node_modules")
+            for part in tests_dir.relative_to(repo_dir).parts
+        ):
+            continue
+        rel = tests_dir.parent.relative_to(repo_dir)
+        if str(rel) == ".":
+            return "python -m pytest -q", "tests"
+        return f"cd {rel.as_posix()} && python -m pytest -q", "tests"
 
-    # 3. mypy
-    if (repo_dir / "mypy.ini").exists() or (repo_dir / ".mypy.ini").exists():
-        return "mypy .", "typecheck"
+    # 2. ruff — same any-depth treatment.
+    for marker in ("ruff.toml", ".ruff.toml"):
+        for found in repo_dir.rglob(marker):
+            if any(
+                part.startswith(".") and part not in (".ruff.toml",)
+                for part in found.relative_to(repo_dir).parts
+            ):
+                continue
+            rel = found.parent.relative_to(repo_dir)
+            if str(rel) == ".":
+                return "ruff check .", "linter"
+            return f"cd {rel.as_posix()} && ruff check .", "linter"
 
-    # 4. syntax-only
+    # 3. mypy — same.
+    for marker in ("mypy.ini", ".mypy.ini"):
+        for found in repo_dir.rglob(marker):
+            rel = found.parent.relative_to(repo_dir)
+            if str(rel) == ".":
+                return "mypy .", "typecheck"
+            return f"cd {rel.as_posix()} && mypy .", "typecheck"
+
+    # 4. syntax-only fallback.
     return "python -m compileall -q .", "syntax"
 
 
