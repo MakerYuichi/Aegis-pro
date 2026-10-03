@@ -42,29 +42,45 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 @pytest.fixture(autouse=True)
 def _reset_settings(monkeypatch):
     """
-    Reload LLM and service factories between tests so cached provider
-    chains don't leak across tests.
+    Snapshot the mutable settings fields that tests modify, and
+    restore them after each test.
 
-    Deliberately does NOT reload src.config: src.database captured
-    settings.DATABASE_URL at import time, and reloading config would
-    leave the engine bound to a stale URL.
+    Historical note: this fixture used to `importlib.reload` the LLM
+    and service factory modules between tests. That reload re-executed
+    their module-level code and recreated class objects that other
+    modules still held references to — a split-identity bug where
+    tests patched one `InvestigatorAgent` while production called
+    another, so the patch silently didn't take effect in CI.
 
-    Also forces INVESTIGATOR_MODE=stage for every test. Tests that
-    exercise agent mode set it explicitly with monkeypatch; tests
-    that don't see the production default. Without this, a leaked
-    .env value from a manual run leaks into the entire suite.
+    This version does the reset without touching module identity.
+    It captures the current value of every field tests are known to
+    mutate, yields, and restores. New fields to guard: add them to
+    `_MUTABLE_SETTINGS`.
+
+    Tests that mutate a field via `monkeypatch.setattr` get automatic
+    revert on top of this — their mutation is undone at teardown
+    regardless of what this fixture does.
     """
-    import importlib
     from src.config import settings
-    from src.llm import factory as llm_factory
-    from src.services import factory as svc_factory
 
-    importlib.reload(llm_factory)
-    importlib.reload(svc_factory)
+    # Every settings field that any test mutates. Extend this list
+    # when a new test mutates a new field.
+    _MUTABLE_SETTINGS = (
+        "DEMO_MODE",
+        "INVESTIGATOR_MODE",
+        "INVESTIGATOR_WORKDIR",
+        "AUTO_FIX_MODE",
+        "VERIFY_BEFORE_REPORT",
+        "CURATOR_FEW_SHOT",
+        "LLM_PROVIDER",
+    )
 
-    # Default to the production mode. Agent-mode tests override this.
-    
+    saved = {name: getattr(settings, name) for name in _MUTABLE_SETTINGS}
+
     yield
+
+    for name, value in saved.items():
+        setattr(settings, name, value)
 
 
 # ---------------------------------------------------------------------------
