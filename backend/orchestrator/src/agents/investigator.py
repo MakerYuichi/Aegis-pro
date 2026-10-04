@@ -32,6 +32,7 @@ Design constraints (from docs/INVESTIGATOR_AGENT.md):
 from __future__ import annotations
 
 import json
+import ast
 import re
 import time
 from typing import Any
@@ -67,6 +68,323 @@ DEFAULT_CONFIDENCE = 0.7
 # Loop defaults. Overridable at call time.
 DEFAULT_MAX_ITERATIONS = 5
 DEFAULT_TIME_BUDGET_SECONDS = 30.0
+
+
+# ---------------------------------------------------------------------------
+# Post-hoc diagnosis validation
+# ---------------------------------------------------------------------------
+
+# Refusal reasons. Two distinct outcomes, two distinct strings, so a
+# human reading the persisted incident knows which one happened.
+#
+#   _NOT_OBSERVED   — the agent never read the crash line. There is
+#                     no evidence to check the diagnosis against.
+#                     Refuse by construction.
+#   _NOT_IN_STMT    — the agent read the crash line, but the named
+#                     symbol does not appear in the crash statement.
+#                     The diagnosis is ungrounded.
+#
+# Both are refusals. The distinction matters for telemetry: if most
+# refusals are _NOT_OBSERVED, the agent is failing to investigate the
+# right window. If most are _NOT_IN_STMT, the agent is naming wrong
+# symbols. The fixes are different.
+REFUSAL_REASON_NOT_OBSERVED = "crash_line_not_observed"
+REFUSAL_REASON_NOT_IN_STATEMENT = "null_source_not_in_crash_statement"
+
+
+def _validate_diagnosis(
+    result: InvestigationResult,
+    history: list[dict[str, Any]],
+    *,
+    crash_file: str | None,
+    crash_line: int | None,
+) -> InvestigationResult:
+    """
+    Verify that a diagnosed symbol is grounded in the agent's own
+    tool-call history.
+
+    Two checks, in order:
+
+    1. Did the agent actually read the crash line? Look through the
+       history for a read_file / read_symbol observation whose window
+       contains the crash line. If none exists, the diagnosis has no
+       evidence to check against — refuse with
+       reason=REFUSAL_REASON_NOT_OBSERVED.
+
+    2. Is the diagnosed symbol present in the crash statement? Parse
+       the observation's text, find the narrowest AST statement
+       enclosing the crash line, and check whether the symbol appears
+       as a Name or Attribute node anywhere within that statement. If
+       not, refuse with reason=REFUSAL_REASON_NOT_IN_STATEMENT.
+
+    Why the agent's history and not a fresh file read: the claim we
+    are checking is "the agent's own reasoning supports this
+    diagnosis," not "this diagnosis is true of the file right now."
+    A fresh read could use a different line window than what the
+    agent actually saw and we would validate against evidence the
+    agent never had. Same discipline as realigning a diff against
+    the observation's own text rather than trusting what the LLM
+    claimed.
+
+    Why AST and not a line window: a fixed ±N window either misses
+    legitimate diagnoses whose symbol is an argument to the failing
+    call, or accepts nearby-but-wrong symbols. The enclosing
+    statement is the correct scope — it is what the crash line
+    *is*, not a neighborhood around it.
+
+    Returns the same result on success. Returns a refusal on either
+    failure mode.
+    """
+    if result.status != STATUS_DIAGNOSED:
+        return result
+
+    symbol = (result.null_source or "").strip()
+    if not symbol:
+        # The parser rejects a diagnose without a null_source; this
+        # is belt-and-suspenders.
+        return _refuse(result, history, REFUSAL_REASON_NOT_IN_STATEMENT, [])
+
+    if not crash_file or not crash_line:
+        # No crash site to validate against. Cannot verify, so refuse.
+        # Same honest degradation as everywhere else in the pipeline.
+        return _refuse(result, history, REFUSAL_REASON_NOT_OBSERVED, [symbol])
+
+    # Step 1: does any observation cover the crash line?
+    obs = _find_observation_at_crash(history, crash_line)
+    if obs is None:
+        logger.warning(
+            f"Investigator: no observation covers {crash_file}:{crash_line}; "
+            f"diagnosis {symbol!r} cannot be validated"
+        )
+        return _refuse(result, history, REFUSAL_REASON_NOT_OBSERVED, [symbol])
+
+    # Step 2: is the symbol present in the crash statement?
+    if not _symbol_in_crash_statement(obs, crash_line, symbol):
+        logger.warning(
+            f"Investigator: diagnosis {symbol!r} does not appear in the "
+            f"crash statement at {crash_file}:{crash_line}; "
+            f"rejecting as ungrounded"
+        )
+        return _refuse(
+            result, history, REFUSAL_REASON_NOT_IN_STATEMENT, [symbol]
+        )
+
+    return result
+
+
+def _refuse(
+    result: InvestigationResult,
+    history: list[dict[str, Any]],
+    reason: str,
+    candidates: list[str],
+) -> InvestigationResult:
+    """Build a refusal that preserves the agent's audit trail."""
+    return InvestigationResult(
+        status=STATUS_REFUSED,
+        reason=reason,
+        candidates_considered=candidates,
+        thought=result.thought,
+        iterations=result.iterations,
+        history=history,
+    )
+
+
+def _find_observation_at_crash(
+    history: list[dict[str, Any]], crash_line: int
+) -> dict[str, Any] | None:
+    """
+    Find a read_file / read_symbol observation whose window contains
+    the crash line.
+
+    Observations carry `metadata.start_line` and `metadata.end_line`
+    when they were produced by read_file or read_symbol. Both are
+    1-indexed, inclusive — the same convention the crash line uses.
+
+    Only successful observations qualify. A failed read_file
+    ("not_a_file") has no window and cannot ground a diagnosis.
+
+    Returns the first matching observation, or None.
+    """
+    for obs in history:
+        if not obs.get("ok"):
+            continue
+        tool = obs.get("tool")
+        if tool not in ("read_file", "read_symbol"):
+            continue
+        meta = obs.get("metadata") or {}
+        start = meta.get("start_line")
+        end = meta.get("end_line")
+        if start is None or end is None:
+            continue
+        if start <= crash_line <= end:
+            return obs
+    return None
+
+
+def _symbol_in_crash_statement(
+    obs: dict[str, Any], crash_line: int, symbol: str
+) -> bool:
+    """
+    True when `symbol` appears as an identifier in the AST statement
+    that encloses `crash_line` within the observation's text.
+
+    The observation's `result` is tool-formatted: every line is
+    prefixed with `f"{n:5d}  "` (five-char right-aligned number, two
+    spaces). This function strips that prefix, re-parses the code,
+    and walks the AST.
+
+    On any failure to parse (an observation's window may cut through
+    a block), the function falls back to a plain text match against
+    the crash line itself. That fallback is honest: if we cannot
+    parse, we cannot verify, and the caller treats an unparsed
+    observation the same way it treats an absent one — as
+    unverifiable.
+
+    Returns False when the symbol is absent from the statement.
+    """
+    raw_lines = _strip_line_prefixes(obs.get("result") or "")
+    if not raw_lines:
+        return False
+
+    meta = obs.get("metadata") or {}
+    start_line = meta.get("start_line") or 1
+    # The crash line is absolute; convert to a line index within the
+    # observation's window.
+    crash_index = crash_line - start_line
+    if crash_index < 0 or crash_index >= len(raw_lines):
+        return False
+
+    source = "\n".join(raw_lines)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        # The window doesn't parse standalone (a slice through a
+        # block, an indentation cut, etc.). Fall back to a text
+        # match on the crash line itself. This is weaker but honest.
+        return _symbol_in_line(raw_lines[crash_index], symbol)
+
+    statement = _narrowest_statement_at(tree, crash_index + 1)
+    if statement is None:
+        return _symbol_in_line(raw_lines[crash_index], symbol)
+
+    return _symbol_in_ast(statement, symbol)
+
+
+def _strip_line_prefixes(text: str) -> list[str]:
+    """
+    Remove the `NNNNN  ` prefix the tools add to each line.
+
+    read_file and read_symbol render `f"{n:5d}  {line}"` for every
+    line. This function returns just the source text of each line,
+    preserving order. Blank lines are preserved as empty strings.
+    """
+    if not text:
+        return []
+    stripped: list[str] = []
+    for line in text.split("\n"):
+        # The prefix is 5 digits, 2 spaces. Regex tolerant of any
+        # line-number width in case the tool changes format.
+        m = re.match(r"^\s*\d+\s\s(.*)$", line)
+        if m:
+            stripped.append(m.group(1))
+        else:
+            # A line without a prefix — could be a continuation or a
+            # trailing newline. Preserve as-is.
+            stripped.append(line)
+    return stripped
+
+
+def _narrowest_statement_at(
+    tree: ast.AST, line_number: int
+) -> ast.stmt | None:
+    
+    candidates: list[ast.stmt] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.stmt):
+            continue
+        lineno = getattr(node, "lineno", None)
+        end_lineno = getattr(node, "end_lineno", None)
+        if lineno is None or end_lineno is None:
+            continue
+        if lineno <= line_number <= end_lineno:
+            candidates.append(node)
+
+    if not candidates:
+        return None
+
+    def span(n: ast.stmt) -> int:
+        return getattr(n, "end_lineno", 0) - getattr(n, "lineno", 0)
+
+    candidates.sort(key=span)
+    return candidates[0]
+
+
+def _symbol_in_ast(node: ast.AST, symbol: str) -> bool:
+    """
+    True when `symbol` appears as an identifier anywhere within the
+    AST subtree rooted at `node`.
+
+    Matches:
+        - An `ast.Name` whose id equals the symbol's leaf
+          (e.g. `query` for symbol "query", or for "self.query").
+        - An `ast.Attribute` whose unparsed form equals the symbol
+          (e.g. `self.rag` for symbol "self.rag").
+
+    The leaf match handles the argument case: `search_similar_outcomes(query)`
+    has `query` as a Name node in the call's argument list, and it
+    counts even though it is never dot-accessed.
+    """
+    leaf = _symbol_leaf(symbol)
+    if not leaf:
+        return False
+
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and child.id == leaf:
+            return True
+        if isinstance(child, ast.Attribute):
+            try:
+                if ast.unparse(child) == symbol:
+                    return True
+            except Exception:
+                # ast.unparse can fail on unusual nodes; skip.
+                pass
+    return False
+
+
+def _symbol_in_line(line: str, symbol: str) -> bool:
+    """
+    Text fallback: does `symbol` (or its leaf) appear in this line as
+    a bare identifier?
+
+    Used only when the observation's text will not parse. Weaker
+    than the AST check — no scope awareness — but honest about its
+    limits. The lookbehind rejects matches inside longer identifiers
+    (`rag` does not match `storagerag`).
+    """
+    leaf = _symbol_leaf(symbol)
+    if not leaf:
+        return False
+    pattern = re.compile(r"(?<!\w)" + re.escape(leaf) + r"(?!\w)")
+    return bool(pattern.search(line))
+
+
+def _symbol_leaf(symbol: str) -> str:
+    """
+    Extract the final segment of a symbol for AST Name matching.
+
+    `self.rag`         → `rag`
+    `get_rag_service`  → `get_rag_service`
+    `get_rag_service()`→ `get_rag_service`
+    `order.items[0]`   → `items`
+    `x`                → `x`
+    ``                 → ``
+    """
+    s = symbol.strip().rstrip("()")
+    if not s:
+        return ""
+    s = s.split("[")[0]
+    parts = s.split(".")
+    return parts[-1].strip()
 
 
 class InvestigatorAgent:
@@ -121,7 +439,13 @@ class InvestigatorAgent:
                 )
 
             if action.action == "diagnose":
-                return self._diagnose_result(action, iteration, history)
+                diagnosed = self._diagnose_result(action, iteration, history)
+                return _validate_diagnosis(
+                    diagnosed,
+                    history,
+                    crash_file=context.file_path,
+                    crash_line=context.line_number,
+                )
 
             if action.action == "refuse":
                 return self._refuse_result(action, iteration, history)
@@ -237,16 +561,36 @@ class InvestigatorAgent:
             "5. If you have identified an expression X such that "
             "X.something() is the failing call, and you have read the "
             "line where X is assigned, that assignment is your null "
-            "source. Call diagnose immediately with null_source=X. Do "
-            "not continue investigating. You have enough information.\n"
+            "source. Call diagnose with null_source=X. Do not continue "
+            "investigating. You have enough information.\n"
             "6. You have a maximum of 8 iterations. If you have used 5 "
             "iterations and have not diagnosed, use your next iteration "
             "to diagnose the best candidate you have identified. An "
             "answer with confidence 0.6 is better than no answer at 8 "
             "iterations.\n"
             "7. Do not propose a fix. Do not output a diff. Only "
-            "diagnose the null source or refuse."
-            
+            "diagnose the null source or refuse.\n"
+            "8. CRITICAL — what makes a valid null_source. The null "
+            "source you name MUST be an expression that is actually "
+            "dereferenced at or near the crash site. Concretely:\n"
+            "     - The symbol must appear in the code you fetched, "
+            "not just in a function signature or a docstring.\n"
+            "     - If the expression is a function parameter, it can "
+            "only be the null source if that parameter is itself "
+            "dereferenced at the crash site (e.g. `param.attr` or "
+            "`param[key]`). Naming a parameter that is only received "
+            "and stored is not a diagnosis.\n"
+            "     - Prefer the expression that appears on the line the "
+            "stack trace names, or on a line very near it.\n"
+            "     - If you cannot point to a specific line in the code "
+            "you fetched where the named symbol is dereferenced, do "
+            "NOT diagnose it. Call refuse instead, or keep "
+            "investigating with a different tool.\n"
+            "   The pipeline will verify your diagnosis against the "
+            "code you fetched. A diagnosis that names a symbol the "
+            "pipeline cannot find will be rejected and the incident "
+            "will be reported as refused. Diagnose only what you can "
+            "show."
         )
 
     def _build_decision_prompt(
