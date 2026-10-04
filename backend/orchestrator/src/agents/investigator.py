@@ -67,6 +67,161 @@ DEFAULT_CONFIDENCE = 0.7
 # Loop defaults. Overridable at call time.
 DEFAULT_MAX_ITERATIONS = 5
 DEFAULT_TIME_BUDGET_SECONDS = 30.0
+REFUSAL_REASON_NOT_VISIBLE = "null_source_not_visible_in_fetched_code"
+
+
+# ---------------------------------------------------------------------------
+# Post-hoc diagnosis validation
+# ---------------------------------------------------------------------------
+
+# Dereference markers. A symbol that appears in fetched code must be
+# followed by one of these to count as "dereferenced here." Bare
+# occurrences (in a signature, a comment, an import) do not.
+_DEREF_MARKERS = (".", "[", "(")
+
+
+def _validate_diagnosis(
+    result: InvestigationResult,
+    history: list[dict[str, Any]],
+) -> InvestigationResult:
+    """
+    Verify that a diagnosed symbol is actually visible in the code
+    the agent fetched.
+
+    The Investigator is a bounded LLM loop. It can name a symbol
+    that is plausible-sounding but not actually present in the code
+    it read — a function parameter it saw in a signature, a variable
+    mentioned only in a docstring, a name from the surrounding
+    conversation rather than the source.
+
+    This validator catches that class of failure. It does NOT try to
+    verify that the diagnosis is *correct* — that's the Verifier's
+    job downstream. It only checks that the diagnosis is *grounded*:
+    the named symbol appears in the fetched code at a site where it
+    is dereferenced.
+
+    Generic by design: the validator reasons about "the symbol the
+    agent named" and "where in the fetched code that symbol is
+    dereferenced," not about null sources specifically. When the
+    agent learns new diagnosis kinds (unchecked return, unvalidated
+    input), this function does not need to change — only the
+    dereference markers or the "symbol to look for" extraction would.
+
+    Returns the same result on success. Returns a refusal on failure.
+
+    Refusal rather than downgrade: the pipeline's contract is that a
+    diagnosis is a claim the agent can support. An ungrounded
+    diagnosis is not a weak claim, it's a false one. Downgrading its
+    confidence and letting it flow to the Fixer would waste LLM
+    tokens on a diff that cannot be verified, and would produce a
+    `diff_does_not_apply` outcome whose cause (wrong diagnosis vs.
+    wrong diff) is not distinguishable from the outside.
+    """
+    if result.status != STATUS_DIAGNOSED:
+        return result
+
+    symbol = (result.null_source or "").strip()
+    if not symbol:
+        # Should be impossible — the parser rejects a diagnose
+        # without a null_source. Belt and suspenders.
+        return InvestigationResult(
+            status=STATUS_REFUSED,
+            reason=REFUSAL_REASON_NOT_VISIBLE,
+            candidates_considered=[],
+            thought=result.thought,
+            iterations=result.iterations,
+            history=history,
+        )
+
+    if _symbol_is_grounded(symbol, history):
+        return result
+
+    logger.warning(
+        f"Investigator: diagnosis {symbol!r} is not visible in the "
+        f"fetched code; rejecting as ungrounded"
+    )
+    return InvestigationResult(
+        status=STATUS_REFUSED,
+        reason=REFUSAL_REASON_NOT_VISIBLE,
+        candidates_considered=[symbol],
+        thought=result.thought,
+        iterations=result.iterations,
+        history=history,
+    )
+
+
+def _symbol_is_grounded(symbol: str, history: list[dict[str, Any]]) -> bool:
+    """
+    True when `symbol` appears in the fetched code at a site that
+    gives it meaning — either as a dereferenced expression, or as
+    the target of a real assignment.
+
+    A symbol is grounded if it appears as:
+        (a) a dereference — `rag.`, `rag[`, `rag(` — a usage
+        (b) an assignment — `rag = ...` — where its value comes from
+
+    Both are evidence the agent saw the symbol in the code it
+    fetched, not just in a signature or docstring.
+
+    Not grounding:
+        - A bare occurrence in a signature (`def f(rag)`)
+        - A default parameter value (`def f(code_context=None)`) —
+          this LOOKS like an assignment but is not. Filtered by the
+          per-line `def` check below.
+        - A comment or docstring occurrence.
+        - An import line.
+
+    The lookbehind is (?<!\\w): the preceding character must not be
+    a word character. A preceding dot is fine — `self.rag.` matches.
+    A preceding letter is not — `storagerag.` must not match `rag`.
+    """
+    leaf = _symbol_leaf(symbol)
+    if not leaf:
+        return False
+
+    escaped = re.escape(leaf)
+    deref_pattern = re.compile(r"(?<!\w)" + escaped + r"\s*[.\[\(]")
+    assign_pattern = re.compile(r"(?<!\w)" + escaped + r"\s*=\s*[^=]")
+    # Function-signature lines. Default parameter values are
+    # syntactically identical to assignments; the only way to tell
+    # them apart is the line context. Skip any line that starts with
+    # `def ` (or `async def `).
+    def_line = re.compile(r"(?:^|\s)(?:async\s+)?def\s")
+
+    for obs in history:
+        if not obs.get("ok"):
+            continue
+        text = obs.get("result") or ""
+        if not text:
+            continue
+
+        for line in text.splitlines():
+            if deref_pattern.search(line):
+                return True
+            if assign_pattern.search(line) and not def_line.search(line):
+                return True
+
+    return False
+
+
+def _symbol_leaf(symbol: str) -> str:
+    """
+    Extract the final segment of a symbol for text matching.
+
+    `self.rag`         → `rag`
+    `get_rag_service`  → `get_rag_service`
+    `get_rag_service()`→ `get_rag_service`
+    `order.items[0]`   → `items`
+    `x`                → `x`
+    ``                 → ``
+    """
+    s = symbol.strip().rstrip("()")
+    if not s:
+        return ""
+    # Split on dots, then take the last non-bracket segment.
+    s = s.split("[")[0]
+    parts = s.split(".")
+    return parts[-1].strip()
 
 
 class InvestigatorAgent:
@@ -121,7 +276,8 @@ class InvestigatorAgent:
                 )
 
             if action.action == "diagnose":
-                return self._diagnose_result(action, iteration, history)
+                diagnosed = self._diagnose_result(action, iteration, history)
+                return _validate_diagnosis(diagnosed, history)
 
             if action.action == "refuse":
                 return self._refuse_result(action, iteration, history)
@@ -237,16 +393,36 @@ class InvestigatorAgent:
             "5. If you have identified an expression X such that "
             "X.something() is the failing call, and you have read the "
             "line where X is assigned, that assignment is your null "
-            "source. Call diagnose immediately with null_source=X. Do "
-            "not continue investigating. You have enough information.\n"
+            "source. Call diagnose with null_source=X. Do not continue "
+            "investigating. You have enough information.\n"
             "6. You have a maximum of 8 iterations. If you have used 5 "
             "iterations and have not diagnosed, use your next iteration "
             "to diagnose the best candidate you have identified. An "
             "answer with confidence 0.6 is better than no answer at 8 "
             "iterations.\n"
             "7. Do not propose a fix. Do not output a diff. Only "
-            "diagnose the null source or refuse."
-            
+            "diagnose the null source or refuse.\n"
+            "8. CRITICAL — what makes a valid null_source. The null "
+            "source you name MUST be an expression that is actually "
+            "dereferenced at or near the crash site. Concretely:\n"
+            "     - The symbol must appear in the code you fetched, "
+            "not just in a function signature or a docstring.\n"
+            "     - If the expression is a function parameter, it can "
+            "only be the null source if that parameter is itself "
+            "dereferenced at the crash site (e.g. `param.attr` or "
+            "`param[key]`). Naming a parameter that is only received "
+            "and stored is not a diagnosis.\n"
+            "     - Prefer the expression that appears on the line the "
+            "stack trace names, or on a line very near it.\n"
+            "     - If you cannot point to a specific line in the code "
+            "you fetched where the named symbol is dereferenced, do "
+            "NOT diagnose it. Call refuse instead, or keep "
+            "investigating with a different tool.\n"
+            "   The pipeline will verify your diagnosis against the "
+            "code you fetched. A diagnosis that names a symbol the "
+            "pipeline cannot find will be rejected and the incident "
+            "will be reported as refused. Diagnose only what you can "
+            "show."
         )
 
     def _build_decision_prompt(
