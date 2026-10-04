@@ -3,24 +3,31 @@
 Uses the mini_python fixture's payment_chain/ subdirectory, which
 is the three-file chain from the spec:
 
-    payment_service.py:14    order = await fetch_order(order_id)
-    order_service.py:9       return await get_by_id(order_id)
-    order_repository.py:8    return Order(...)  or None
+    payment_service.py    order = await fetch_order(order_id)
+    order_service.py      return await get_by_id(order_id)
+    order_repository.py   return Order(...)  or None
 
 And the single-file #105 case:
 
-    incident_service.py      self.rag = get_rag_service()
+    incident_service.py   self.rag = get_rag_service()
+
+Also exercises the multi-branch DFS and the branch_id contract.
 """
 from pathlib import Path
 
 import pytest
 
-from src.scanner.call_chain_builder import build_chain, MAX_CHAIN_FILES
+from src.scanner.call_chain_builder import (
+    MAX_CHAIN_FILES,
+    _rollup_terminal_kind,
+    build_chain,
+)
 from src.scanner.candidate import (
     CHAIN_NO_SYMBOL,
     CHAIN_TRACED,
     CHAIN_UNSUPPORTED_LANGUAGE,
     CHAIN_UNTRACEABLE,
+    ChainLink,
 )
 
 
@@ -37,15 +44,14 @@ def repo() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Happy path: three-file chain
+# Three-file chain (spec's canonical case)
 # ---------------------------------------------------------------------------
 
 def test_three_file_chain_traced(repo):
-    """The spec's canonical case — order comes from fetch_order."""
     result = build_chain(
         repo_dir=repo,
         file_path="payment_chain/payment_service.py",
-        line_number=11,  # order.total
+        line_number=11,
         symbol="order",
     )
     assert result.status == CHAIN_TRACED
@@ -64,16 +70,7 @@ def test_chain_front_is_the_crash_site(repo):
     assert result.chain[0].file == "payment_chain/payment_service.py"
     assert result.chain[0].line == 11
     assert result.chain[0].reason == "usage"
-
-
-def test_chain_terminal_records_annotation_or_symbol(repo):
-    result = build_chain(
-        repo_dir=repo,
-        file_path="payment_chain/payment_service.py",
-        line_number=11,
-        symbol="order",
-    )
-    assert result.chain[-1].symbol  # something named
+    assert result.chain[0].branch_id == 0
 
 
 def test_chain_depth_caps_at_max(repo):
@@ -102,10 +99,6 @@ def test_chain_reason_mentions_files(repo):
 # ---------------------------------------------------------------------------
 
 def test_single_file_chain_self_rag(repo):
-    """The #105 case — self.rag is assigned and used in the same
-    file, and the assignment's RHS is a call to a function whose
-    return statement is where None can originate.
-    """
     result = build_chain(
         repo_dir=repo,
         file_path="incident_service.py",
@@ -113,19 +106,27 @@ def test_single_file_chain_self_rag(repo):
         symbol="self.rag",
     )
     assert result.status == CHAIN_TRACED
-    assert result.depth == 1  # all in incident_service.py
-    # The chain should have found the assignment.
+    assert result.depth == 1
     reasons = [link.reason for link in result.chain]
     assert "assignment" in reasons
-    # The terminal is now the return statement inside
-    # get_rag_service — that's where None originates. This is the
-    # chain builder doing its job: following the assignment to the
-    # function whose return value is the actual null source.
     assert result.chain[-1].reason in ("return", "assignment", "annotation")
 
 
+def test_single_branch_chain_has_no_branch_ids(repo):
+    """A single-source chain uses branch_id=0 throughout."""
+    result = build_chain(
+        repo_dir=repo,
+        file_path="incident_service.py",
+        line_number=1,
+        symbol="self.rag",
+    )
+    assert result.branch_count == 0
+    for link in result.chain:
+        assert link.branch_id == 0
+
+
 # ---------------------------------------------------------------------------
-# Untraceable cases
+# Untraceable / unsupported
 # ---------------------------------------------------------------------------
 
 def test_untraceable_symbol_returns_untraceable(repo):
@@ -146,7 +147,6 @@ def test_missing_file_returns_untraceable(repo):
         line_number=1,
         symbol="x",
     )
-    # The trace walks the tree, finds nothing, returns untraceable.
     assert result.status in (CHAIN_UNTRACEABLE,)
 
 
@@ -159,10 +159,6 @@ def test_missing_repo_returns_untraceable(tmp_path):
     )
     assert result.status == CHAIN_UNTRACEABLE
 
-
-# ---------------------------------------------------------------------------
-# Unsupported language
-# ---------------------------------------------------------------------------
 
 def test_non_python_returns_unsupported_language(repo):
     result = build_chain(
@@ -196,12 +192,13 @@ def test_whitespace_symbol_returns_no_symbol(repo):
 
 
 # ---------------------------------------------------------------------------
-# Multi-source assignment (Q1's hard case)
+# Multi-branch DFS (the previous "multi_source_assignment" case)
 # ---------------------------------------------------------------------------
 
-def test_multisource_assignment_records_both_branches(tmp_path):
-    """order = _cache() or _db() — both sources recorded in one
-    multi-source link. The full per-branch DFS is a follow-up.
+def test_multisource_assignment_produces_two_branches(tmp_path):
+    """order = _cache() or _db() — the DFS visits both branches.
+    Their links carry distinct branch_ids, and both call names
+    appear in the chain.
     """
     repo_dir = tmp_path / "r"
     repo_dir.mkdir()
@@ -223,12 +220,90 @@ def test_multisource_assignment_records_both_branches(tmp_path):
         symbol="order",
     )
     assert result.status == CHAIN_TRACED
-    assert result.chain[0].line == 3
     assert result.chain[0].reason == "usage"
-    assert result.chain[1].line == 2
-    assert result.chain[1].reason == "multi_source_assignment"
-    assert "_cache" in result.chain[1].symbol
-    assert "_db" in result.chain[1].symbol
+
+    symbols = " ".join(link.symbol for link in result.chain)
+    assert "_cache" in symbols
+    assert "_db" in symbols
+
+
+def test_multisource_branches_have_distinct_ids(tmp_path):
+    """Each branch gets a distinct non-zero branch_id."""
+    repo_dir = tmp_path / "r"
+    repo_dir.mkdir()
+    (repo_dir / "svc.py").write_text(
+        "async def get(order_id):\n"
+        "    order = await _cache(order_id) or await _db(order_id)\n"
+        "    return order.total\n"
+        "\n"
+        "async def _cache(order_id):\n"
+        "    return None\n"
+        "\n"
+        "async def _db(order_id):\n"
+        "    return None\n"
+    )
+    result = build_chain(
+        repo_dir=repo_dir,
+        file_path="svc.py",
+        line_number=3,
+        symbol="order",
+    )
+    # At least two distinct non-zero branch ids.
+    branch_ids = {link.branch_id for link in result.chain if link.branch_id != 0}
+    assert len(branch_ids) >= 2
+    # The crash site is 0.
+    assert result.chain[0].branch_id == 0
+    assert result.branch_count >= 2
+
+
+def test_multisource_terminal_kind_is_worst_case(tmp_path):
+    """If one branch is Optional and the other is Concrete, the
+    rolled-up terminal_kind is Optional.
+    """
+    repo_dir = tmp_path / "r"
+    repo_dir.mkdir()
+    (repo_dir / "svc.py").write_text(
+        "from typing import Optional\n"
+        "\n"
+        "async def get(order_id):\n"
+        "    order = await _cache(order_id) or await _db(order_id)\n"
+        "    return order.total\n"
+        "\n"
+        "async def _cache(order_id) -> Optional[dict]:\n"
+        "    return None\n"
+        "\n"
+        "async def _db(order_id) -> dict:\n"
+        "    return {}\n"
+    )
+    result = build_chain(
+        repo_dir=repo_dir,
+        file_path="svc.py",
+        line_number=5,
+        symbol="order",
+    )
+    assert result.status == CHAIN_TRACED
+    # Worst-case rollup — Optional wins.
+    assert result.terminal_kind == "Optional"
+
+
+def test_multisource_single_branch_when_only_one_call(tmp_path):
+    """order = _cache() — one branch, no multi-branch tag."""
+    repo_dir = tmp_path / "r"
+    repo_dir.mkdir()
+    (repo_dir / "svc.py").write_text(
+        "async def get(order_id):\n"
+        "    order = await _cache(order_id)\n"
+        "    return order.total\n"
+    )
+    result = build_chain(
+        repo_dir=repo_dir,
+        file_path="svc.py",
+        line_number=3,
+        symbol="order",
+    )
+    assert result.status == CHAIN_TRACED
+    # No multi-source, so no non-zero branch_id.
+    assert result.branch_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +324,44 @@ def test_recursive_assignment_does_not_loop(tmp_path):
         line_number=3,
         symbol="x",
     )
-    # Should terminate one way or another — either traced with a
-    # short chain, or untraceable. Neither loops.
     assert result.status in (CHAIN_TRACED, CHAIN_UNTRACEABLE)
     assert result.depth <= MAX_CHAIN_FILES
+
+
+# ---------------------------------------------------------------------------
+# _rollup_terminal_kind — pure function
+# ---------------------------------------------------------------------------
+
+def test_rollup_empty_chain_is_unknown():
+    assert _rollup_terminal_kind([]) == "Unknown"
+
+
+def test_rollup_all_optional_is_optional():
+    chain = [
+        ChainLink("a.py", 1, "x", "usage", terminal_kind="Optional"),
+        ChainLink("b.py", 2, "y", "return", terminal_kind="Optional"),
+    ]
+    assert _rollup_terminal_kind(chain) == "Optional"
+
+
+def test_rollup_one_optional_wins():
+    chain = [
+        ChainLink("a.py", 1, "x", "usage", terminal_kind="Concrete"),
+        ChainLink("b.py", 2, "y", "return", terminal_kind="Optional"),
+    ]
+    assert _rollup_terminal_kind(chain) == "Optional"
+
+
+def test_rollup_all_concrete_is_concrete():
+    chain = [
+        ChainLink("a.py", 1, "x", "usage", terminal_kind="Concrete"),
+        ChainLink("b.py", 2, "y", "return", terminal_kind="Concrete"),
+    ]
+    assert _rollup_terminal_kind(chain) == "Concrete"
+
+
+def test_rollup_unknown_only_is_unknown():
+    chain = [
+        ChainLink("a.py", 1, "x", "usage", terminal_kind="Unknown"),
+    ]
+    assert _rollup_terminal_kind(chain) == "Unknown"

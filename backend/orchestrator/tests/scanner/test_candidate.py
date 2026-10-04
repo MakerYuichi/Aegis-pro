@@ -28,7 +28,39 @@ def test_chain_link_to_dict_roundtrip():
     assert d == {
         "file": "a.py", "line": 10, "symbol": "order",
         "reason": "assignment", "snippet": "order = fetch()",
+        "terminal_kind": "Unknown",
+        "branch_id": 0,
     }
+    
+    
+def test_chain_link_to_dict_includes_terminal_kind():
+    link = ChainLink(
+        file="a.py", line=10, symbol="Order",
+        reason="return", terminal_kind="Concrete",
+    )
+    d = link.to_dict()
+    assert d["terminal_kind"] == "Concrete"
+
+
+def test_chain_link_to_dict_includes_branch_id():
+    link = ChainLink(
+        file="a.py", line=10, symbol="order",
+        reason="assignment", branch_id=2,
+    )
+    d = link.to_dict()
+    assert d["branch_id"] == 2
+
+
+def test_chain_link_defaults_branch_id_to_zero():
+    """branch_id defaults to 0, the sentinel for 'no branch point'."""
+    link = ChainLink(file="a.py", line=1, symbol="x", reason="usage")
+    assert link.branch_id == 0
+
+
+def test_chain_link_defaults_terminal_kind_to_unknown():
+    link = ChainLink(file="a.py", line=1, symbol="x", reason="usage")
+    assert link.terminal_kind == "Unknown"
+
 
 
 def test_chain_result_depth_counts_unique_files():
