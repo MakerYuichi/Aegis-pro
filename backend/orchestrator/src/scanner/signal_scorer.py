@@ -178,6 +178,8 @@ def _terminal_bonus(kind: str | None) -> float:
         return 0.15
     if kind == "Concrete":
         return -0.10
+    if kind == "Unknown":
+        return -0.05
     return 0.0
 
 
