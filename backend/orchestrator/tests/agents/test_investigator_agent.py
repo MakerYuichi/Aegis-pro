@@ -14,6 +14,7 @@ import pytest
 
 from src.agents.investigator import (
     DEFAULT_CONFIDENCE,
+    REFUSAL_REASON_NOT_VISIBLE,
     THOUGHT_MAX_CHARS,
     InvestigatorAgent,
 )
@@ -408,8 +409,10 @@ def test_refuse_candidates_coerced_to_string_list(agent):
 @pytest.mark.asyncio
 async def test_tool_error_becomes_observation_and_loop_continues(agent, context):
     """
-    read_file on a missing path returns a ToolResult with ok=False.
-    That becomes an observation, and the loop continues.
+    A read_file on a missing path returns ok=False. The loop
+    continues — the agent reaches the diagnose action. But the
+    diagnosis is ungrounded (the only observation is a failure), so
+    the validator converts it to a refusal.
     """
     agent._decide = _scripted_decide(
         InvestigatorAction(
@@ -419,16 +422,20 @@ async def test_tool_error_becomes_observation_and_loop_continues(agent, context)
         ),
         InvestigatorAction(
             action="diagnose",
-            thought="Gave up on that file, diagnosing anyway.",
+            thought="Diagnosing without evidence.",
             args={"null_source": "self.rag", "evidence": "from context"},
         ),
     )
     result = await agent.investigate(context)
 
-    assert result.status == STATUS_DIAGNOSED
+    # The loop ran to completion and the agent reached diagnose.
     assert len(result.history) == 1
     assert result.history[0]["ok"] is False
     assert "not_a_file" in result.history[0]["error"]
+
+    # The validator then rejected the diagnosis as ungrounded.
+    assert result.status == STATUS_REFUSED
+    assert result.reason == REFUSAL_REASON_NOT_VISIBLE
 
 
 # ---------------------------------------------------------------------------
