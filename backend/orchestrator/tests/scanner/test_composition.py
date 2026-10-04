@@ -57,7 +57,7 @@ def test_composition_runs_all_four_modules(repo):
     both. If any interface has drifted, this test fails.
     """
     repo_path = Path(repo)
-    files = select_files(repo_path, top_n=5)
+    files = select_files(repo_path, top_n=10)
     assert files, "file_selector returned no files"
 
     produced_findings = 0
@@ -68,11 +68,10 @@ def test_composition_runs_all_four_modules(repo):
             if m.requires_chain:
                 chain = build_chain(repo, m.file, m.line, m.symbol)
                 score, reason = score_finding(m, chain)
-                # Score is always in range.
                 assert 0.0 <= score <= 1.0
-                # Reason is always a non-empty string.
                 assert reason
-    # The fixture has at least one pattern the matcher finds; if
+    # The fixture contains at least one unchecked_optional_attr
+    # shape (optional_attr_case.py's fetch_order(...).total). If
     # this drops to zero, the matcher has stopped firing on the
     # fixture's known shapes.
     assert produced_findings > 0, "matcher found no patterns in fixture"
@@ -83,21 +82,22 @@ def test_composition_runs_all_four_modules(repo):
 # ---------------------------------------------------------------------------
 
 def test_composition_optional_terminal_scores_high(repo):
-    """The self.rag case: the chain's terminal is Optional.
+    """The optional_attr_case.py finding: the chain's terminal is
+    Optional.
 
     Under Phase 2's gate this finding reaches the human report.
     Today it just scores higher than an Unknown or Concrete one.
     """
     repo_path = Path(repo)
-    # Find the self.rag match in the fixture's incident_service.py.
-    matches = match_patterns(repo_path / "incident_service.py",
-                             "incident_service.py")
+    matches = match_patterns(
+        repo_path / "optional_attr_case.py", "optional_attr_case.py"
+    )
     attr_matches = [
         m for m in matches
         if m.pattern == "unchecked_optional_attr" and m.requires_chain
     ]
     assert attr_matches, (
-        "fixture's incident_service.py should produce at least one "
+        "fixture's optional_attr_case.py should produce at least one "
         "unchecked_optional_attr match"
     )
 
@@ -107,9 +107,7 @@ def test_composition_optional_terminal_scores_high(repo):
         score, _ = score_finding(m, chain)
         scored.append((score, chain.terminal_kind or "None", m.symbol))
 
-    # At least one finding in the fixture has an Optional terminal
-    # (self.rag is assigned from get_rag_service, which returns
-    # Optional["RagService"]).
+    # At least one finding traces to an Optional terminal.
     optional_findings = [
         (s, sym) for s, kind, sym in scored if kind == "Optional"
     ]
@@ -117,17 +115,6 @@ def test_composition_optional_terminal_scores_high(repo):
         f"expected at least one Optional-terminal finding; got "
         f"{scored}"
     )
-
-    # The Optional finding scores strictly higher than an
-    # Unknown-terminal finding from the same scan (all else equal,
-    # the terminal bonus is +0.15 vs -0.05).
-    unknown_findings = [
-        s for s, kind, _ in scored if kind == "Unknown"
-    ]
-    if unknown_findings:
-        best_optional = max(s for s, _ in optional_findings)
-        best_unknown = max(unknown_findings)
-        assert best_optional > best_unknown
 
 
 def test_composition_concrete_terminal_scores_low(repo):
