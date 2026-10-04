@@ -14,7 +14,7 @@ import pytest
 
 from src.agents.investigator import (
     DEFAULT_CONFIDENCE,
-    REFUSAL_REASON_NOT_VISIBLE,
+    REFUSAL_REASON_NOT_OBSERVED,
     THOUGHT_MAX_CHARS,
     InvestigatorAgent,
 )
@@ -56,20 +56,21 @@ def context(repo) -> InvestigatorContext:
         stack_trace=(
             "AttributeError: 'NoneType' object has no attribute "
             "'search_similar_outcomes'\n"
-            "    at IncidentService.declare_incident(incident_service.py:44)"
+            "    at IncidentService.declare_incident(incident_service.py:34)"
         ),
         exception_type="AttributeError",
         file_path="incident_service.py",
-        line_number=44,
-        code_window={
-            "start_line": 40,
-            "end_line": 48,
+        line_number=34,
+                code_window={
+            "start_line": 30,
+            "end_line": 35,
             "snippet": (
-                "   40      async def declare_incident(self, service_name, message):\n"
-                "   41          outcome = await self.rag.search_similar_outcomes(\n"
-                "   42              message, service_name\n"
-                "   43          )\n"
-                "   44          return outcome\n"
+                "   30          self.rag = get_rag_service()\n"
+                "   31          self.timeout = 30\n"
+                "   32  \n"
+                "   33      async def declare_incident(self, service_name: str, message: str):\n"
+                "   34          outcome = await self.rag.search_similar_outcomes(message, service_name)\n"
+                "   35          return outcome\n"
             ),
         },
         blame={"author": "eng@acme.com", "commit_hash": "abc1234",
@@ -113,21 +114,22 @@ def _scripted_decide(*actions: InvestigatorAction | None):
 @pytest.mark.asyncio
 async def test_diagnose_after_one_tool_call(agent, context):
     """
-    Agent reads a symbol, then diagnoses. Result carries null_source
-    and one entry in history.
+    Agent reads the crash site, then diagnoses. The validator
+    accepts because the observation covers the crash line and
+    `self.rag` appears in the crash statement.
     """
     agent._decide = _scripted_decide(
         InvestigatorAction(
-            action="read_symbol",
-            thought="Need to find where self.rag is assigned.",
-            args={"path": "incident_service.py", "symbol_name": "self.rag"},
+            action="read_file",
+            thought="Read the failing method.",
+            args={"path": "incident_service.py"},
         ),
         InvestigatorAction(
             action="diagnose",
             thought="self.rag is assigned from get_rag_service(), which can return None.",
             args={
                 "null_source": "self.rag",
-                "evidence": "__init__ assigns self.rag = get_rag_service()",
+                "evidence": "self.rag.search_similar_outcomes at the crash line",
                 "confidence": 0.85,
             },
         ),
@@ -140,26 +142,25 @@ async def test_diagnose_after_one_tool_call(agent, context):
     assert result.confidence == 0.85
     assert result.iterations == 2
     assert len(result.history) == 1
-    assert result.history[0]["tool"] == "read_symbol"
+    assert result.history[0]["tool"] == "read_file"
     assert result.history[0]["ok"] is True
-    assert "get_rag_service" in result.history[0]["result"]
 
 
 @pytest.mark.asyncio
 async def test_diagnose_after_five_tool_calls(agent, context):
     """
-    Agent uses all five iterations on tools, then diagnoses. The
-    diagnose on iteration 5 is the terminal.
+    Agent uses several iterations on tools, reads the crash site,
+    then diagnoses. The diagnose is the terminal; the observation
+    of the crash site grounds the diagnosis.
     """
     agent._decide = _scripted_decide(
         InvestigatorAction(action="search_codebase", thought="find rag",
                            args={"pattern": "get_rag_service"}),
-        InvestigatorAction(action="read_file", thought="read the file",
-                           args={"path": "incident_service.py",
-                                 "start_line": 1, "end_line": 20}),
         InvestigatorAction(action="read_symbol", thought="check self.rag",
                            args={"path": "incident_service.py",
                                  "symbol_name": "self.rag"}),
+        InvestigatorAction(action="read_file", thought="read crash site",
+                           args={"path": "incident_service.py"}),
         InvestigatorAction(action="read_symbol", thought="check def",
                            args={"path": "incident_service.py",
                                  "symbol_name": "get_rag_service"}),
@@ -411,8 +412,8 @@ async def test_tool_error_becomes_observation_and_loop_continues(agent, context)
     """
     A read_file on a missing path returns ok=False. The loop
     continues — the agent reaches the diagnose action. But the
-    diagnosis is ungrounded (the only observation is a failure), so
-    the validator converts it to a refusal.
+    diagnosis has no evidence (the only observation failed), so the
+    validator refuses with crash_line_not_observed.
     """
     agent._decide = _scripted_decide(
         InvestigatorAction(
@@ -428,14 +429,12 @@ async def test_tool_error_becomes_observation_and_loop_continues(agent, context)
     )
     result = await agent.investigate(context)
 
-    # The loop ran to completion and the agent reached diagnose.
     assert len(result.history) == 1
     assert result.history[0]["ok"] is False
     assert "not_a_file" in result.history[0]["error"]
 
-    # The validator then rejected the diagnosis as ungrounded.
     assert result.status == STATUS_REFUSED
-    assert result.reason == REFUSAL_REASON_NOT_VISIBLE
+    assert result.reason == REFUSAL_REASON_NOT_OBSERVED
 
 
 # ---------------------------------------------------------------------------
