@@ -415,28 +415,19 @@ def _definition_origins(
     calls = _all_calls_in(first_return.value)
     annotation = _annotation_name(node.returns)
 
-    if calls:
-        links: list[ChainLink] = []
-        for call in calls:
-            links.append(ChainLink(
-                file=file_path,
-                line=first_return.lineno,
-                symbol=_call_name(call),
-                reason="return",
-                snippet=snippet,
-                terminal_kind="Unknown",
-            ))
-        return links
+    annotation_kind = _classify_terminal(annotation or "")
+    links: list[ChainLink] = []
+    for call in calls:
+        links.append(ChainLink(
+            file=file_path,
+            line=first_return.lineno,
+            symbol=_call_name(call),
+            reason="return",
+            snippet=snippet,
+            terminal_kind=annotation_kind,
+        ))
+    return links
 
-    # No call in the return — terminal.
-    return [ChainLink(
-        file=file_path,
-        line=first_return.lineno,
-        symbol=annotation or "<unknown>",
-        reason="return",
-        snippet=snippet,
-        terminal_kind=_classify_terminal(annotation or ""),
-    )]
 
 
 def _next_trace_target(
