@@ -392,9 +392,9 @@ def _definition_origins(
     """Build origin links for a function definition.
 
     If the function has no return with a value, returns one link
-    naming the def line. Otherwise, one link per call inside the
-    first return statement's value. Multi-source returns produce
-    multiple links.
+    naming the def line. If the first return contains calls, one
+    link per call, classified by the function's return annotation.
+    Otherwise one link naming the annotation directly.
     """
     returns = [
         child for child in ast.walk(node)
@@ -414,8 +414,14 @@ def _definition_origins(
     snippet = _snippet(lines, first_return.lineno)
     calls = _all_calls_in(first_return.value)
     annotation = _annotation_name(node.returns)
+    annotation_kind = _classify_terminal(annotation or "")
 
     if calls:
+        # The function's return annotation is the stronger signal
+        # than the shape of any single return statement. A function
+        # declared `-> Optional[Order]` can return None from any
+        # path, even if the return statement we're looking at
+        # happens to return a concrete value.
         links: list[ChainLink] = []
         for call in calls:
             links.append(ChainLink(
@@ -424,19 +430,22 @@ def _definition_origins(
                 symbol=_call_name(call),
                 reason="return",
                 snippet=snippet,
-                terminal_kind="Unknown",
+                terminal_kind=annotation_kind,
             ))
         return links
 
-    # No call in the return — terminal.
+    # No call in the return — this is a terminal. The link's
+    # symbol is the annotation itself (so the rollup can classify
+    # it) and its terminal_kind is the annotation's classification.
     return [ChainLink(
         file=file_path,
         line=first_return.lineno,
         symbol=annotation or "<unknown>",
         reason="return",
         snippet=snippet,
-        terminal_kind=_classify_terminal(annotation or ""),
+        terminal_kind=annotation_kind,
     )]
+
 
 
 def _next_trace_target(
