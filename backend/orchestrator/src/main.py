@@ -133,6 +133,27 @@ async def health_check():
             "redis": "connected" if redis_status else "disconnected"
         }
     }
+    
+# CLI entry point registration. The `aegis` command is a wrapper
+# script that dispatches subcommands. Today there is one subcommand:
+# `scan`. Additional subcommands (incident list, config show, etc.)
+# land here as the CLI grows.
+def _cli_entry() -> None:
+    """Called by the `aegis` wrapper. Dispatches on sys.argv[1]."""
+    import sys
+    if len(sys.argv) < 2:
+        print("usage: aegis <subcommand> [args]", file=sys.stderr)
+        print("  scan <repo>   Run a proactive scan", file=sys.stderr)
+        raise SystemExit(1)
+
+    subcommand = sys.argv[1]
+    if subcommand == "scan":
+        from src.cli.scan import main as scan_main
+        raise SystemExit(scan_main(sys.argv[2:]))
+
+    print(f"unknown subcommand: {subcommand}", file=sys.stderr)
+    raise SystemExit(1)
+
 
 if __name__ == "__main__":
     import uvicorn

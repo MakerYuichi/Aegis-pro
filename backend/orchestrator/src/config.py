@@ -88,10 +88,6 @@ class Settings(BaseSettings):
     CURATOR_MAX_OUTCOMES: int = 3
     
     INVESTIGATOR_MODE: str = "stage"
-    INVESTIGATOR_MAX_ITERATIONS: int = 5
-    INVESTIGATOR_TIME_BUDGET_SECONDS: float = 30.0
-    
-    INVESTIGATOR_MODE: str = "stage"
     INVESTIGATOR_MAX_ITERATIONS: int = 8
     INVESTIGATOR_TIME_BUDGET_SECONDS: float = 90.0
     # Clone-once support for the Investigator agent. When the agent
@@ -109,6 +105,33 @@ class Settings(BaseSettings):
     # land somewhere inspectable, e.g. /var/lib/aegis/investigator-workdir.
     
     INVESTIGATOR_WORKDIR: str = "/verifier-workdir"
+    
+        # ------------------------------------------------------------------
+    # Scanner — v1.0 Phase 1/2
+    # ------------------------------------------------------------------
+    # manual | scheduled
+    #
+    # "manual" is the only implemented mode. Scans run only when
+    # invoked via `aegis scan <repo>` or POST /api/v1/scan.
+    #
+    # "scheduled" is a placeholder for v1.0 Phase 6 (Scheduling &
+    # Delivery). Selecting it raises NotImplementedError at the
+    # point of the mistake — same discipline as
+    # get_verifier(has_runner=True) raising instead of returning a
+    # stub. A silent scheduled mode would look like a working
+    # setting that quietly does nothing.
+    SCANNER_MODE: str = "manual"
+
+    # Top-N files to scan. Overridable per-call.
+    SCANNER_TOP_N: int = 25
+
+    # Churn window (days) for the file_selector. Overridable per-call.
+    SCANNER_SINCE_DAYS: int = 30
+
+    # Hard cap on candidates scored in one scan. Protects against a
+    # pathological repo where every file fires every pattern.
+    SCANNER_MAX_CANDIDATES: int = 100
+    
     # Kubernetes (optional)
     K8S_API_URL: Optional[str] = None
     K8S_TOKEN: Optional[str] = None
