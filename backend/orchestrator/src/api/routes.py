@@ -82,6 +82,39 @@ async def declare_incident(
     )
     return result
 
+class ScanRequest(BaseModel):
+    repo_path: str
+    service_name: Optional[str] = None
+    top_n: Optional[int] = None
+    since_days: Optional[int] = None
+
+
+@router.post("/scan")
+async def scan_repo(
+    request: ScanRequest,
+    req: Request,
+    claims: dict = Depends(require_auth),
+):
+    """Run a proactive scan against a local repo path.
+
+    The path must be readable by the orchestrator container. In a
+    production deployment, this endpoint is only reachable by admins
+    (the require_auth dependency gates it, but a finer-grained admin
+    check is a follow-up). The CLI does not use this endpoint — it
+    calls IncidentService.scan_repo() directly.
+    """
+    service = req.app.state.incident_service
+    try:
+        return await service.scan_repo(
+            repo_path=request.repo_path,
+            service_name=request.service_name,
+            top_n=request.top_n,
+            since_days=request.since_days,
+        )
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+
+
 @router.get("/incident/{incident_id}")
 async def get_incident(incident_id: str, req: Request):
     service = req.app.state.incident_service
