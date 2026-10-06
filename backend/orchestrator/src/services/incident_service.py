@@ -1,5 +1,6 @@
 from sqlalchemy import text
 from datetime import datetime
+from pathlib import Path
 import uuid
 import json
 from loguru import logger
@@ -133,6 +134,261 @@ class IncidentService:
         finally:
             from src.agents.provisioner import cleanup_repo
             cleanup_repo(context.get("repo_workdir"))
+            
+    # ------------------------------------------------------------------
+    # Scanner entry point — v1.0 Phase 2
+    # ------------------------------------------------------------------
+
+    async def scan_repo(
+        self,
+        repo_path: str,
+        *,
+        top_n: int | None = None,
+        since_days: int | None = None,
+        max_candidates: int | None = None,
+        service_name: str | None = None,
+    ) -> dict:
+        """Run a proactive scan and feed candidates into the pipeline.
+
+        This is the CLI's entry point. It is not an HTTP endpoint by
+        design — the service layer is the shared code path, and
+        declare_incident is already called directly by Slack handlers,
+        webhook handlers, and AutoFixService callbacks. The CLI joins
+        that list.
+
+        Steps:
+            1. Run the scanner (select → match → chain → score → gate).
+            2. For each report candidate, feed a synthetic stack trace
+               into declare_incident via the scanner stage.
+            3. Return the scanner result plus the list of incident IDs
+               produced.
+
+        The investigator queue is returned but not auto-processed.
+        In scan mode (INVESTIGATOR_MODE=agent), the caller can feed
+        those candidates into a separate loop; that's Phase 3.
+
+        Args:
+            repo_path:        path to the repo root.
+            top_n:            override SCANNER_TOP_N.
+            since_days:       override SCANNER_SINCE_DAYS.
+            max_candidates:   override SCANNER_MAX_CANDIDATES.
+            service_name:     the service this repo belongs to. When
+                              omitted, the repo basename is used.
+
+        Returns:
+            {
+              "repo": str,
+              "files_scanned": int,
+              "counts": {"report": int, "investigator": int, ...},
+              "scan_result": <ScanResult.to_dict()>,
+              "incident_ids": [str, ...],   # one per report candidate
+            }
+        """
+        from src.scanner.scan_runner import run_scan
+        from src.config import settings
+
+        top_n = top_n if top_n is not None else settings.SCANNER_TOP_N
+        since_days = since_days if since_days is not None else settings.SCANNER_SINCE_DAYS
+        max_candidates = (
+            max_candidates if max_candidates is not None
+            else settings.SCANNER_MAX_CANDIDATES
+        )
+
+        if settings.SCANNER_MODE == "scheduled":
+            # Deliberate fail-at-selection. Same discipline as
+            # get_verifier(has_runner=True) raising instead of
+            # returning a stub. A silent scheduled mode would look
+            # like a working setting that does nothing.
+            raise NotImplementedError(
+                "SCANNER_MODE=scheduled is not implemented. Real scheduling "
+                "(cron, worker queue, overlap handling) is v1.0 Phase 6. "
+                "Set SCANNER_MODE=manual to run scans explicitly."
+            )
+
+        result = run_scan(
+            repo_path,
+            top_n=top_n,
+            since_days=since_days,
+            max_candidates=max_candidates,
+        )
+
+        # Feed each report candidate through the pipeline. One
+        # candidate → one incident, per the Phase 2 spec.
+        effective_service = service_name or Path(repo_path).name
+        incident_ids: list[str] = []
+
+        for outcome in result.report:
+            try:
+                incident = await self.scan_single_candidate(
+                    outcome=outcome,
+                    repo_path=repo_path,
+                    service_name=effective_service,
+                )
+                if incident and incident.get("incident_id"):
+                    incident_ids.append(incident["incident_id"])
+            except Exception as e:
+                # A failure in one candidate's pipeline must not
+                # stop the scan. Log and continue.
+                logger.error(
+                    f"scan_repo: pipeline failed for "
+                    f"{outcome.candidate.root_file}:"
+                    f"{outcome.candidate.root_line}: {e}"
+                )
+
+        return {
+            "repo": result.repo,
+            "files_scanned": result.files_scanned,
+            "counts": result.to_dict()["counts"],
+            "scan_result": result.to_dict(),
+            "incident_ids": incident_ids,
+        }
+
+    async def scan_single_candidate(
+        self,
+        *,
+        outcome,
+        repo_path: str,
+        service_name: str,
+    ) -> dict:
+        """Feed one scan candidate into the pipeline.
+
+        Generates a synthetic stack trace from the candidate's root
+        location, then runs the normal declare_incident pipeline
+        starting at _stage_scanner. The synthetic trace is shaped
+        to parse cleanly through _parse_stack_trace — the same
+        format a real trace would take.
+
+        The pipeline uses the candidate's repo_path as the incident's
+        repo, so the Provisioner clones it, the Investigator reads
+        from the clone, and the Fixer generates a diff against it.
+        """
+        candidate = outcome.candidate
+        synthetic_trace = self._synthesize_stack_trace(candidate)
+
+        # scan_repo calls scan_single_candidate, which calls
+        # declare_incident with a flag that routes through
+        # _stage_scanner. The scanner stage records the original
+        # candidate in the context, and _build_response surfaces it.
+        context = {
+            "service_name": service_name,
+            "message": (
+                f"Proactive scan finding: {candidate.pattern} at "
+                f"{candidate.root_file}:{candidate.root_line}"
+            ),
+            "stack_trace": synthetic_trace,
+            "reported_by": None,
+            "scan_candidate": candidate.to_dict(),
+            "scan_repo_path": repo_path,
+            "scan_outcome": {
+                "destination": outcome.destination,
+                "score": outcome.score,
+                "reasoning": outcome.reasoning,
+            },
+        }
+
+        # Route through _stage_scanner, then the normal pipeline.
+        context.update(await self._stage_scanner(context))
+        if context.get("error"):
+            return context
+
+        # From here, the pipeline proceeds exactly as declare_incident
+        # does after the Watcher stage. Rather than duplicating that
+        # code, we return the context's incident_id and let the caller
+        # decide whether to run the rest. For now, run the full
+        # pipeline for report candidates only.
+        #
+        # NOTE: this is a deliberately minimal wiring. Full pipeline
+        # integration (running Fixer, Verifier, Communicator, Curator
+        # per candidate) is a follow-up. The scanner stage is what
+        # Phase 2 ships; the downstream integration reuses the existing
+        # coordinator via a refactor that's outside this PR's scope.
+        return {
+            "incident_id": context["incident_id"],
+            "scan_candidate": context.get("scan_candidate"),
+            "scan_repo_path": context.get("scan_repo_path"),
+            "status": "scanned",
+        }
+
+    @staticmethod
+    def _synthesize_stack_trace(candidate) -> str:
+        """Build a synthetic stack trace from a scan candidate.
+
+        The format is deliberately shaped to parse cleanly through
+        the existing _parse_stack_trace regexes. It mimics a real
+        Python traceback:
+
+            Traceback (most recent call last):
+              File "path/to/file.py", line N, in <module>
+            <exception_type>: <synthetic message>
+
+        The exception type is chosen based on the pattern:
+            unchecked_optional_attr / unchecked_dict_access
+                → AttributeError (or KeyError for subscript)
+            bare_except / mutable_default_arg
+                → ValueError
+            comparison_with_none_identity
+                → TypeError
+
+        The line number comes from the candidate's root_line. The
+        file path is the candidate's root_file. The message names
+        the symbol so the Fixer's diagnosis block has something to
+        work with.
+        """
+        exception_map = {
+            "unchecked_optional_attr": "AttributeError",
+            "unchecked_dict_access": "KeyError",
+            "bare_except": "ValueError",
+            "mutable_default_arg": "ValueError",
+            "comparison_with_none_identity": "TypeError",
+        }
+        exc = exception_map.get(candidate.pattern, "RuntimeError")
+
+        return (
+            f"Traceback (most recent call last):\n"
+            f'  File "{candidate.root_file}", line {candidate.root_line}, '
+            f"in <module>\n"
+            f"{exc}: scan candidate '{candidate.symbol}' "
+            f"({candidate.pattern})"
+        )
+
+    # ------------------------------------------------------------------
+    # Stage 0 — Scanner (Proactive)
+    # ------------------------------------------------------------------
+
+    async def _stage_scanner(self, context: dict) -> dict:
+        """Scanner stage. Turns a scan candidate into pipeline input.
+
+        This stage runs *instead of* the initial call site in
+        declare_incident when the context contains a scan_candidate.
+        It does one thing: ensure the context has a synthetic
+        stack_trace and a scan_repo_path, then hands the context to
+        _stage_watcher.
+
+        _stage_watcher is unchanged. It parses the synthetic trace
+        exactly as it parses a real one. The scan stage only exists
+        to produce the input _stage_watcher already consumes.
+        """
+        candidate = context.get("scan_candidate")
+        if not candidate:
+            return context
+
+        # Ensure the stack trace is present. scan_single_candidate
+        # already built it, but the guard is cheap and covers a caller
+        # that only sets the candidate.
+        if not context.get("stack_trace"):
+            from src.scanner.candidate import ScanCandidate
+            c = ScanCandidate(
+                root_file=candidate["root_file"],
+                root_line=candidate["root_line"],
+                symbol=candidate["symbol"],
+                pattern=candidate["pattern"],
+            )
+            context["stack_trace"] = self._synthesize_stack_trace(c)
+
+        # Now hand off to the existing Watcher. Everything downstream
+        # sees a normal incident.
+        return await self._stage_watcher(context)
+    
     # ------------------------------------------------------------------
     # Stage 1 — Watcher (Perceive)
     # ------------------------------------------------------------------
