@@ -83,7 +83,7 @@ async def declare_incident(
     return result
 
 class ScanRequest(BaseModel):
-    repo_path: str
+    repo_input: str
     service_name: Optional[str] = None
     top_n: Optional[int] = None
     since_days: Optional[int] = None
@@ -95,24 +95,25 @@ async def scan_repo(
     req: Request,
     claims: dict = Depends(require_auth),
 ):
-    """Run a proactive scan against a local repo path.
+    """Run a proactive scan against a GitHub repo.
 
-    The path must be readable by the orchestrator container. In a
-    production deployment, this endpoint is only reachable by admins
-    (the require_auth dependency gates it, but a finer-grained admin
-    check is a follow-up). The CLI does not use this endpoint — it
-    calls IncidentService.scan_repo() directly.
+    `repo_input` accepts any shape parse_repo_input understands:
+    "owner/repo", a full URL, or an SSH URL. The scan clones the
+    repo, runs the Phase 1 scanner, and feeds report candidates
+    through the incident pipeline.
     """
     service = req.app.state.incident_service
     try:
         return await service.scan_repo(
-            repo_path=request.repo_path,
+            repo_input=request.repo_input,
             service_name=request.service_name,
             top_n=request.top_n,
             since_days=request.since_days,
         )
     except NotImplementedError as e:
         raise HTTPException(status_code=501, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/incident/{incident_id}")
@@ -189,7 +190,7 @@ async def create_service(
         raise HTTPException(status_code=400, detail=str(e))
     
 # ── Delete service ──────────────────────────────────────────
-@router.delete("/services/{name}")
+@router.delete("/services/{name:path}")
 async def delete_service(
     name: str,
     req: Request,

@@ -48,6 +48,16 @@ class IncidentService:
         stack_trace: str = None,
         reported_by: str = None,
     ) -> dict:
+        """Declare an incident from a stack trace or alert.
+
+        Runs the Watcher, then hands the context to
+        _run_pipeline_from_watcher, which owns the rest of the
+        pipeline (Provisioner through Curator).
+
+        Splitting the coordinator this way lets scan_repo feed a
+        synthetic stack trace into the same pipeline without
+        duplicating the post-Watcher body.
+        """
         context = {
             "service_name": service_name,
             "message": message,
@@ -60,14 +70,41 @@ class IncidentService:
         if context.get("error"):
             return context
 
+        return await self._run_pipeline_from_watcher(context)
+
+    async def _run_pipeline_from_watcher(self, context: dict) -> dict:
+        """Run the incident pipeline from the Provisioner onward.
+
+        Owns stages 2 through 6:
+
+            Provisioner  → clone the repo
+            Investigator → reason about the incident
+            (persist)
+            Fixer        → generate a diff
+            Verifier     → sandbox the diff
+            Communicator → report
+            Curator      → learn
+
+        Also owns the enrichment writes (github_context,
+        related_prs, investigation, code_context, auto_fix,
+        verification) and the clone cleanup.
+
+        The caller is responsible for running the Watcher and for
+        guaranteeing that context contains no error. `declare_incident`
+        and `scan_single_candidate` both satisfy this — the Watcher
+        runs first, and its error check happens before this method
+        is called.
+
+        Returns the public response dict from _build_response.
+        """
         # Stage 2 — Provisioner (Clone once)
         #
         # The Provisioner creates one clone per incident when the
         # incident will need filesystem access (repo_name + file_path
         # both set). Every later stage that needs the clone reads
         # context["repo_workdir"]; none of them create or remove it.
-        # The coordinator's finally below calls the Provisioner's
-        # cleanup to remove the clone after all stages are done.
+        # The finally block below calls the Provisioner's cleanup to
+        # remove the clone after all stages are done.
         context.update(await self._stage_provisioner(context))
 
         # Stage 3 — Investigator (Reason)
@@ -90,14 +127,13 @@ class IncidentService:
             await self.record_related_prs(
                 context["incident_id"], context["related_prs"]
             )
-        
+
         if context.get("investigation"):
             await self.record_investigation(
                 context["incident_id"], context["investigation"]
             )
 
-        # Stage 3 — Fixer (Act)
-                # From here on, the pipeline may hold a cloned checkout in
+        # From here on, the pipeline may hold a cloned checkout in
         # context["repo_workdir"] (populated by the Investigator agent
         # when INVESTIGATOR_MODE=agent). Cleanup is deferred so the
         # Verifier can reuse the same checkout instead of cloning
@@ -134,14 +170,13 @@ class IncidentService:
         finally:
             from src.agents.provisioner import cleanup_repo
             cleanup_repo(context.get("repo_workdir"))
-            
     # ------------------------------------------------------------------
     # Scanner entry point — v1.0 Phase 2
     # ------------------------------------------------------------------
 
     async def scan_repo(
         self,
-        repo_path: str,
+        repo_input: str,
         *,
         top_n: int | None = None,
         since_days: int | None = None,
@@ -156,36 +191,47 @@ class IncidentService:
         webhook handlers, and AutoFixService callbacks. The CLI joins
         that list.
 
-        Steps:
-            1. Run the scanner (select → match → chain → score → gate).
-            2. For each report candidate, feed a synthetic stack trace
-               into declare_incident via the scanner stage.
-            3. Return the scanner result plus the list of incident IDs
-               produced.
-
-        The investigator queue is returned but not auto-processed.
-        In scan mode (INVESTIGATOR_MODE=agent), the caller can feed
-        those candidates into a separate loop; that's Phase 3.
-
         Args:
-            repo_path:        path to the repo root.
-            top_n:            override SCANNER_TOP_N.
-            since_days:       override SCANNER_SINCE_DAYS.
-            max_candidates:   override SCANNER_MAX_CANDIDATES.
-            service_name:     the service this repo belongs to. When
-                              omitted, the repo basename is used.
+            repo_input:    a GitHub repo identifier. Accepts any
+                           shape parse_repo_input understands:
+                           "owner/repo", "https://github.com/owner/repo",
+                           "git@github.com:owner/repo.git", etc.
+                           Normalized to "owner/repo" internally.
+            top_n:         override SCANNER_TOP_N.
+            since_days:    override SCANNER_SINCE_DAYS.
+            max_candidates: override SCANNER_MAX_CANDIDATES.
+            service_name:  explicit service name. When omitted,
+                           resolved via resolve_scan_service —
+                           existing services that already map to
+                           this repo are reused; otherwise a new
+                           service named "owner/repo" is created.
 
         Returns:
             {
-              "repo": str,
+              "repo": str,                 "owner/repo"
               "files_scanned": int,
               "counts": {"report": int, "investigator": int, ...},
               "scan_result": <ScanResult.to_dict()>,
-              "incident_ids": [str, ...],   # one per report candidate
+              "incident_ids": [str, ...],
             }
         """
         from src.scanner.scan_runner import run_scan
         from src.config import settings
+        from src.demo.repo_parser import parse_repo_input
+
+        # Normalize the input. parse_repo_input is the single
+        # source of truth for what a valid repo identifier is —
+        # the demo path uses it, the scanner now uses it, and any
+        # future caller should too. Writing a second parser would
+        # drift from this one.
+        parsed = parse_repo_input(repo_input)
+        if not parsed.ok:
+            raise ValueError(
+                f"Unparseable repo input: {parsed.reason} — "
+                f"{parsed.detail}. Supported formats include "
+                f"'owner/repo' and 'https://github.com/owner/repo'."
+            )
+        owner_repo = f"{parsed.org}/{parsed.repo}"
 
         top_n = top_n if top_n is not None else settings.SCANNER_TOP_N
         since_days = since_days if since_days is not None else settings.SCANNER_SINCE_DAYS
@@ -205,43 +251,72 @@ class IncidentService:
                 "Set SCANNER_MODE=manual to run scans explicitly."
             )
 
-        result = run_scan(
-            repo_path,
-            top_n=top_n,
-            since_days=since_days,
-            max_candidates=max_candidates,
+        # Resolve the service before scanning. This is what makes
+        # _stage_watcher's lookup succeed: by the time the pipeline
+        # runs, the service exists in the DB (either it already did,
+        # or resolve_scan_service just created it).
+        effective_service = service_name or await self.resolve_scan_service(
+            owner_repo
         )
 
-        # Feed each report candidate through the pipeline. One
-        # candidate → one incident, per the Phase 2 spec.
-        effective_service = service_name or Path(repo_path).name
-        incident_ids: list[str] = []
+        # Clone the repo locally so the scanner has a working tree.
+        # The scanner reads from a filesystem path; the Provisioner
+        # (inside the pipeline, once per candidate) does its own
+        # clone. This first clone is for the scan itself — pattern
+        # matching, chain building — before any candidate becomes
+        # an incident.
+        from src.agents.repo_clone import clone_repo, cleanup_repo
 
-        for outcome in result.report:
-            try:
-                incident = await self.scan_single_candidate(
-                    outcome=outcome,
-                    repo_path=repo_path,
-                    service_name=effective_service,
-                )
-                if incident and incident.get("incident_id"):
-                    incident_ids.append(incident["incident_id"])
-            except Exception as e:
-                # A failure in one candidate's pipeline must not
-                # stop the scan. Log and continue.
-                logger.error(
-                    f"scan_repo: pipeline failed for "
-                    f"{outcome.candidate.root_file}:"
-                    f"{outcome.candidate.root_line}: {e}"
-                )
+        scan_workdir, clone_error = await clone_repo(owner_repo)
+        if not scan_workdir:
+            raise RuntimeError(
+                f"Could not clone {owner_repo} for scanning: {clone_error}"
+            )
 
-        return {
-            "repo": result.repo,
-            "files_scanned": result.files_scanned,
-            "counts": result.to_dict()["counts"],
-            "scan_result": result.to_dict(),
-            "incident_ids": incident_ids,
-        }
+        try:
+            result = run_scan(
+                scan_workdir,
+                top_n=top_n,
+                since_days=since_days,
+                max_candidates=max_candidates,
+            )
+
+            # Feed each report candidate through the pipeline. One
+            # candidate → one incident, per the Phase 2 spec. The
+            # synthetic stack trace carries the candidate's file
+            # path *as it exists in the clone* (e.g.
+            # backend/orchestrator/src/services/foo.py), which is
+            # what the downstream Provisioner and Investigator
+            # resolve against.
+            incident_ids: list[str] = []
+
+            for outcome in result.report:
+                try:
+                    incident = await self.scan_single_candidate(
+                        outcome=outcome,
+                        repo_path=scan_workdir,
+                        service_name=effective_service,
+                    )
+                    if incident and incident.get("incident_id"):
+                        incident_ids.append(incident["incident_id"])
+                except Exception as e:
+                    # A failure in one candidate's pipeline must
+                    # not stop the scan. Log and continue.
+                    logger.error(
+                        f"scan_repo: pipeline failed for "
+                        f"{outcome.candidate.root_file}:"
+                        f"{outcome.candidate.root_line}: {e}"
+                    )
+
+            return {
+                "repo": owner_repo,
+                "files_scanned": result.files_scanned,
+                "counts": result.to_dict()["counts"],
+                "scan_result": result.to_dict(),
+                "incident_ids": incident_ids,
+            }
+        finally:
+            cleanup_repo(scan_workdir)
 
     async def scan_single_candidate(
         self,
@@ -286,28 +361,23 @@ class IncidentService:
             },
         }
 
-        # Route through _stage_scanner, then the normal pipeline.
+        # Route through _stage_scanner, then the full pipeline.
+        #
+        # _stage_scanner calls _stage_watcher, which does service
+        # lookup, stack-trace parsing, blast-radius computation, and
+        # incident ID assignment — exactly as it does for a real
+        # stack trace. Once _stage_scanner returns, the context has
+        # the same shape declare_incident's context has after its
+        # Watcher stage, so the same _run_pipeline_from_watcher runs
+        # the rest.
         context.update(await self._stage_scanner(context))
         if context.get("error"):
             return context
 
-        # From here, the pipeline proceeds exactly as declare_incident
-        # does after the Watcher stage. Rather than duplicating that
-        # code, we return the context's incident_id and let the caller
-        # decide whether to run the rest. For now, run the full
-        # pipeline for report candidates only.
-        #
-        # NOTE: this is a deliberately minimal wiring. Full pipeline
-        # integration (running Fixer, Verifier, Communicator, Curator
-        # per candidate) is a follow-up. The scanner stage is what
-        # Phase 2 ships; the downstream integration reuses the existing
-        # coordinator via a refactor that's outside this PR's scope.
-        return {
-            "incident_id": context["incident_id"],
-            "scan_candidate": context.get("scan_candidate"),
-            "scan_repo_path": context.get("scan_repo_path"),
-            "status": "scanned",
-        }
+        # Run the rest of the pipeline: Provisioner → Investigator →
+        # Fixer → Verifier → Communicator → Curator.
+        return await self._run_pipeline_from_watcher(context)
+
 
     @staticmethod
     def _synthesize_stack_trace(candidate) -> str:
@@ -1718,6 +1788,63 @@ class IncidentService:
             )
             await session.commit()
             return {"status": "created", "name": service["name"]}
+    
+    
+    async def resolve_scan_service(self, owner_repo: str) -> str:
+        """Return the service name to use for a scan of `owner_repo`.
+
+        Resolution order:
+
+          1. If one or more services already have this repo_name,
+             reuse an existing service name. Never create a new
+             service for a repo that already has one. When more than
+             one service shares the repo (a monorepo or an alias),
+             pick the lexicographically smallest name — deterministic,
+             stable across runs and query plans, and overridable by
+             passing service_name explicitly to scan_repo.
+
+          2. Otherwise, insert a service named `owner_repo`, tagged
+             source='scan'. The INSERT uses ON CONFLICT (name) DO
+             NOTHING — never DO UPDATE — so an existing manual
+             service with that name keeps its on-call, dependencies,
+             and configuration.
+
+        The service name doubles as the repo identifier: services.name
+        is UNIQUE, and repo_name is set to the same value. That's
+        what makes this safe for the Provisioner (which requires
+        owner/repo, not a bare basename) and for the Curator (which
+        scopes few-shot retrieval by service_name — owner/repo keeps
+        tenants separate).
+
+        Returns the service name to use.
+        """
+        async with get_db_session() as session:
+            result = await session.execute(
+                text("""
+                    SELECT name FROM services
+                    WHERE repo_name = :repo
+                    ORDER BY name ASC
+                """),
+                {"repo": owner_repo},
+            )
+            rows = result.fetchall()
+            if rows:
+                # At least one service already maps to this repo.
+                # Reuse it — do not create a duplicate identity.
+                return rows[0][0]
+
+            # No service maps to this repo. Create one scoped to
+            # scans, so future scans of the same repo reuse it.
+            await session.execute(
+                text("""
+                    INSERT INTO services (name, repo_name, source)
+                    VALUES (:name, :repo, 'scan')
+                    ON CONFLICT (name) DO NOTHING
+                """),
+                {"name": owner_repo, "repo": owner_repo},
+            )
+            await session.commit()
+            return owner_repo
 
     async def delete_service(self, name: str) -> dict:
         async with get_db_session() as session:

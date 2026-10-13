@@ -36,7 +36,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "repo",
         type=str,
-        help="Path to the repo root.",
+        help=(
+            "GitHub repo identifier. Accepts 'owner/repo', "
+            "'https://github.com/owner/repo', or "
+            "'git@github.com:owner/repo.git'."
+        ),
     )
     parser.add_argument(
         "--service-name",
@@ -67,15 +71,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 async def _run(args: argparse.Namespace) -> int:
     from src.services.incident_service import IncidentService
 
-    repo = Path(args.repo).resolve()
-    if not repo.is_dir():
-        print(f"error: not a directory: {repo}", file=sys.stderr)
-        return 1
-
     service = IncidentService()
     try:
         result = await service.scan_repo(
-            repo_path=str(repo),
+            repo_input=args.repo,
             service_name=args.service_name,
             top_n=args.top_n,
             since_days=args.since_days,
