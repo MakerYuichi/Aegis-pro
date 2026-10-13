@@ -1,35 +1,17 @@
 """
 Dataclasses for the Investigator agent.
 
-Three types:
+Two modes, one shared loop:
 
-    InvestigatorContext  — the input bundle the pipeline hands in. A
-                           normalized view over the loose context dict
-                           that declare_incident accumulates. Has
-                           .to_prompt() so the decision prompt is
-                           rendered in one place.
+    incident  — the classic case. A stack trace identifies a crash.
+                The agent diagnoses the null source.
+    scan      — a proactive finding. A pattern matcher flagged a
+                shape. The agent decides whether it is a real defect.
 
-    InvestigatorAction   — the parsed output of one LLM turn. Either a
-                           tool call (read_file / read_symbol /
-                           search_codebase) or a terminal action
-                           (diagnose / refuse).
-
-    InvestigationResult  — the agent's terminal output. Five possible
-                           statuses; only "diagnosed" carries a
-                           null_source.
-
-Design notes:
-
-- InvestigatorAction.args is always a dict, even for single-argument
-  tools. One shape, one parser.
-
-- InvestigationResult.status has five values, and every one is honest:
-  diagnosed / refused / timeout / decision_failed / iteration_limit.
-  Only "diagnosed" is a success. The other four go to the Fixer as
-  "skip auto-fix, report to human."
-
-- InvestigatorContext.to_prompt() renders the input in a fixed order
-  so the prompt is reproducible and diffable in tests.
+The mode is a field on the run context, set at the entry point and
+copied through by the pipeline. It is never inferred from data
+shape — a scan run has both a stack_trace and a chain, so shape
+alone cannot distinguish the two.
 """
 from __future__ import annotations
 
@@ -37,9 +19,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-# The five terminal statuses. Exported so callers don't string-compare
-# against typos.
+# ---------------------------------------------------------------------------
+# Statuses
+# ---------------------------------------------------------------------------
+
+# Incident mode
 STATUS_DIAGNOSED = "diagnosed"
+# Scan mode
+STATUS_CONFIRMED = "confirmed"
+# Shared
 STATUS_REFUSED = "refused"
 STATUS_TIMEOUT = "timeout"
 STATUS_DECISION_FAILED = "decision_failed"
@@ -47,6 +35,7 @@ STATUS_ITERATION_LIMIT = "iteration_limit"
 
 ALL_STATUSES = (
     STATUS_DIAGNOSED,
+    STATUS_CONFIRMED,
     STATUS_REFUSED,
     STATUS_TIMEOUT,
     STATUS_DECISION_FAILED,
@@ -54,98 +43,175 @@ ALL_STATUSES = (
 )
 
 
-# The three tool actions, plus the two terminals. Anything else is an
-# invalid action and the parser rejects it.
-TOOL_ACTIONS = frozenset({"read_file", "read_symbol", "search_codebase"})
-TERMINAL_ACTIONS = frozenset({"diagnose", "refuse"})
-VALID_ACTIONS = TOOL_ACTIONS | TERMINAL_ACTIONS
+# ---------------------------------------------------------------------------
+# Modes
+# ---------------------------------------------------------------------------
 
+MODE_INCIDENT = "incident"
+MODE_SCAN = "scan"
+
+ALL_MODES = (MODE_INCIDENT, MODE_SCAN)
+
+
+# ---------------------------------------------------------------------------
+# Action vocabulary, split per mode
+# ---------------------------------------------------------------------------
+
+_TOOLS_BASE = frozenset({"read_file", "read_symbol", "search_codebase"})
+
+# Incident mode
+INCIDENT_TOOL_ACTIONS = _TOOLS_BASE
+INCIDENT_END_ACTIONS = frozenset({"diagnose", "refuse"})
+
+# Scan mode
+SCAN_TOOL_ACTIONS = _TOOLS_BASE | frozenset({"read_chain", "probe"})
+SCAN_END_ACTIONS = frozenset({"confirm", "refuse"})
+
+# Back-compat aliases for imports that haven't migrated yet.
+TOOL_ACTIONS = INCIDENT_TOOL_ACTIONS
+END_ACTIONS = INCIDENT_END_ACTIONS
+TERMINAL_ACTIONS = END_ACTIONS  # deprecated name; use END_ACTIONS
+VALID_ACTIONS = INCIDENT_TOOL_ACTIONS | INCIDENT_END_ACTIONS
+
+
+def valid_actions(mode: str) -> frozenset:
+    """The full action vocabulary for a mode. Used by the parser."""
+    if mode == MODE_SCAN:
+        return SCAN_TOOL_ACTIONS | SCAN_END_ACTIONS
+    return INCIDENT_TOOL_ACTIONS | INCIDENT_END_ACTIONS
+
+
+def end_actions(mode: str) -> frozenset:
+    """The terminal actions for a mode."""
+    if mode == MODE_SCAN:
+        return SCAN_END_ACTIONS
+    return INCIDENT_END_ACTIONS
+
+
+def tool_actions(mode: str) -> frozenset:
+    """The tool actions for a mode."""
+    if mode == MODE_SCAN:
+        return SCAN_TOOL_ACTIONS
+    return INCIDENT_TOOL_ACTIONS
+
+
+# ---------------------------------------------------------------------------
+# Refuse reasons — enumerated
+# ---------------------------------------------------------------------------
+
+REFUSE_FALSE_POSITIVE = "false_positive"
+REFUSE_COULD_NOT_DETERMINE = "could_not_determine"
+
+ALL_REFUSE_REASONS = (REFUSE_FALSE_POSITIVE, REFUSE_COULD_NOT_DETERMINE)
+
+
+# ---------------------------------------------------------------------------
+# Confirmation — how the finding was verified
+# ---------------------------------------------------------------------------
+
+CONFIRMATION_PROBE_REPRODUCED = "probe_reproduced"
+CONFIRMATION_REASONED_ONLY = "reasoned_only"
+
+ALL_CONFIRMATIONS = (
+    CONFIRMATION_PROBE_REPRODUCED,
+    CONFIRMATION_REASONED_ONLY,
+)
+
+
+# ---------------------------------------------------------------------------
+# Context
+# ---------------------------------------------------------------------------
 
 @dataclass
 class InvestigatorContext:
     """
     Everything the agent knows before its first turn.
 
-    Constructed by the pipeline (`_stage_investigator`) from the loose
-    context dict. The agent never sees the raw dict — only this. That
-    decoupling means the pipeline can add or rename context keys
-    without touching the agent, as long as the translation in
-    _stage_investigator keeps producing a valid InvestigatorContext.
+    Constructed by the pipeline from the loose context dict. The
+    agent never sees the raw dict — only this. That decoupling means
+    the pipeline can add or rename context keys without touching
+    the agent, as long as the translation keeps producing a valid
+    InvestigatorContext.
 
-    Fields:
-        service_name       — "payment-api"
-        message            — the alert text or incident description
-        repo               — "owner/repo" or an absolute path. The
-                             agent passes this verbatim to the tools.
-        stack_trace        — the raw stack trace string, or None
-        exception_type     — "AttributeError", "NullPointerException", ...
-        file_path          — the file named in the stack trace
-        line_number        — the line number named in the stack trace
-        code_window        — {start_line, end_line, snippet} — the
-                             pre-fetched code around the failing line
-        blame              — {author, message, commit_hash, ...} or {}
-        related_prs        — list of {number, title, url, reason, ...}
-        rag_context        — pre-rendered string from RAGService
-        fix_outcomes       — pre-rendered string from Curator few-shot
-        blast_radius       — {root, affected, count, severity}
+    Fields shared by both modes:
+        mode, service_name, message, repo, blame, related_prs,
+        rag_context, fix_outcomes, blast_radius
+
+    Incident-mode fields:
+        stack_trace, exception_type, file_path, line_number
+
+    Scan-mode fields:
+        chain — list of {file, line, symbol, reason, terminal_kind,
+                branch_id, snippet}, one per ChainLink in DFS order.
+                The agent reads the whole chain before deciding.
     """
+    # Run mode — set at the entry point, never inferred
+    mode: str
     service_name: str
     message: str
     repo: str
-    stack_trace: str | None = None
-    exception_type: str | None = None
-    file_path: str | None = None
-    line_number: int | None = None
-    code_window: dict[str, Any] = field(default_factory=dict)
+
+    # Shared optional context
     blame: dict[str, Any] = field(default_factory=dict)
     related_prs: list[dict[str, Any]] = field(default_factory=list)
     rag_context: str = ""
     fix_outcomes: str = ""
     blast_radius: dict[str, Any] = field(default_factory=dict)
 
+    # Incident-mode
+    stack_trace: str | None = None
+    exception_type: str | None = None
+    file_path: str | None = None
+    line_number: int | None = None
+
+    # Scan-mode
+    chain: list[dict[str, Any]] = field(default_factory=list)
+
     def to_prompt(self) -> str:
         """
-        Render the context in a fixed order. Every section is present
-        even when empty, so the prompt shape is stable across
-        incidents and diffable in tests.
-
-        Sections, in order:
-            1. Service + message
-            2. Stack trace (exception_type / file / line)
-            3. Code window (numbered, around the failing line)
-            4. Blame
-            5. Related PRs (numbered)
-            6. Blast radius
-            7. RAG context (pre-rendered)
-            8. Fix outcomes (pre-rendered)
+        Render the context in a fixed order. The chain section is
+        present only in scan mode; the stack-trace section only in
+        incident mode. Everything else is present in both.
         """
         parts: list[str] = []
 
+        parts.append(f"Mode: {self.mode}")
         parts.append(f"Service: {self.service_name}")
         parts.append(f"Message: {self.message}")
 
-        parts.append("")
-        parts.append("## Stack trace")
-        if self.stack_trace:
-            parts.append(f"Exception: {self.exception_type or 'Unknown'}")
-            parts.append(f"File: {self.file_path or 'unknown'}")
-            parts.append(f"Line: {self.line_number or 'unknown'}")
-            parts.append("Raw:")
-            parts.append(self.stack_trace)
-        else:
-            parts.append("(no stack trace provided)")
+        if self.mode == MODE_SCAN:
+            parts.append("")
+            parts.append("## Chain")
+            if self.chain:
+                for i, link in enumerate(self.chain):
+                    branch = link.get("branch_id", 0)
+                    branch_note = (
+                        "pre-branch" if branch == 0
+                        else f"branch {branch}"
+                    )
+                    parts.append(
+                        f"[{i}] {link.get('file', '?')}:{link.get('line', '?')}  "
+                        f"symbol={link.get('symbol', '?')!r}  "
+                        f"reason={link.get('reason', '?')}  "
+                        f"terminal_kind={link.get('terminal_kind', 'Unknown')}  "
+                        f"({branch_note})"
+                    )
+                    if link.get("snippet"):
+                        parts.append(f"    {link['snippet'][:200]}")
+            else:
+                parts.append("(no chain provided)")
 
-        parts.append("")
-        parts.append("## Code around the failing line")
-        if self.code_window:
-            start = self.code_window.get("start_line")
-            end = self.code_window.get("end_line")
-            snippet = self.code_window.get("snippet") or ""
-            if start and end:
-                parts.append(f"Lines {start}–{end}:")
-            parts.append(snippet or "(empty)")
-        else:
-            parts.append("(no code window available)")
+        if self.mode == MODE_INCIDENT:
+            parts.append("")
+            parts.append("## Stack trace")
+            if self.stack_trace:
+                parts.append(f"Exception: {self.exception_type or 'Unknown'}")
+                parts.append(f"File: {self.file_path or 'unknown'}")
+                parts.append(f"Line: {self.line_number or 'unknown'}")
+                parts.append("Raw:")
+                parts.append(self.stack_trace)
+            else:
+                parts.append("(no stack trace provided)")
 
         parts.append("")
         parts.append("## Blame")
@@ -202,57 +268,82 @@ class InvestigatorAction:
     """
     One parsed turn from the LLM.
 
-    Always carries `thought`. Carries `args` (a dict) for tool actions.
-    For terminals, `args` carries the terminal's fields (null_source,
-    evidence, confidence for diagnose; reason, candidates_considered
-    for refuse).
+    For tool actions, `args` carries the tool's parameters.
+    For end actions:
+        diagnose  → null_source, evidence, confidence
+        confirm   → failure_mode, fix_location, evidence, confidence,
+                    confirmation
+        refuse    → reason (false_positive|could_not_determine),
+                    candidates_considered
 
     The parser guarantees:
-        - action in VALID_ACTIONS
-        - thought truncated to 200 characters
-        - args is a dict (never a bare value)
-        - for diagnose: confidence defaults to 0.7 if missing
+        - action in valid_actions(mode)
+        - thought truncated to THOUGHT_MAX_CHARS
+        - args is a dict
+        - confidence clamped to [0, 1]
     """
     action: str
     thought: str
     args: dict[str, Any] = field(default_factory=dict)
+    mode: str = MODE_INCIDENT
 
     @property
-    def is_terminal(self) -> bool:
-        return self.action in TERMINAL_ACTIONS
+    def is_end(self) -> bool:
+        return self.action in end_actions(self.mode)
 
     @property
     def is_tool(self) -> bool:
-        return self.action in TOOL_ACTIONS
+        return self.action in tool_actions(self.mode)
+
+    # Back-compat for callers using the old name.
+    @property
+    def is_terminal(self) -> bool:
+        return self.is_end
 
 
 @dataclass
 class InvestigationResult:
     """
-    The agent's terminal output.
+    The agent's end output.
 
-    `status` is one of the five STATUS_* constants. Only "diagnosed"
-    produces a fix; the other four are honest declarations of what the
-    agent could not do.
+    `status` is one of the STATUS_* constants. Incident mode produces
+    "diagnosed"; scan mode produces "confirmed". The rest are honest
+    declarations of what the agent could not do.
 
-    Fields only populated for the relevant status:
-        diagnosed     → null_source, evidence, confidence
-        refused       → reason, candidates_considered
-        timeout       → (history only)
-        decision_failed → (history only)
-        iteration_limit → (history only)
+    Fields, by status:
 
-    `history` is the list of tool observations, in order. It is always
-    populated, regardless of status. It is the raw record of what the
-    agent looked at, and it is what the admin panel displays in
-    session replay.
+      diagnosed (incident):
+          null_source, evidence, confidence
+
+      confirmed (scan):
+          failure_mode, fix_location, evidence, confidence,
+          confirmation
+
+      refused:
+          reason (enumerated), candidates_considered
+
+      timeout / decision_failed / iteration_limit:
+          (history only)
+
+    `history` is the tool observations in order. Always populated.
     """
     status: str
+
+    # Incident mode
     null_source: str | None = None
+
+    # Scan mode
+    failure_mode: str | None = None
+    fix_location: str | None = None
+    confirmation: str | None = None
+
+    # Shared
     evidence: str = ""
     confidence: float = 0.0
     reason: str | None = None
     candidates_considered: list[str] = field(default_factory=list)
+
+    # Meta
     thought: str = ""
     iterations: int = 0
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -262,6 +353,9 @@ class InvestigationResult:
         return {
             "status": self.status,
             "null_source": self.null_source,
+            "failure_mode": self.failure_mode,
+            "fix_location": self.fix_location,
+            "confirmation": self.confirmation,
             "evidence": self.evidence,
             "confidence": self.confidence,
             "reason": self.reason,
@@ -273,4 +367,4 @@ class InvestigationResult:
 
     @property
     def is_success(self) -> bool:
-        return self.status == STATUS_DIAGNOSED
+        return self.status in (STATUS_DIAGNOSED, STATUS_CONFIRMED)
