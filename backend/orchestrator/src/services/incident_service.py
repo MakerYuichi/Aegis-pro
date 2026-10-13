@@ -34,6 +34,27 @@ def merge_incident_metadata(existing_json, key: str, value) -> str:
     metadata[key] = value
     return json.dumps(metadata)
 
+def _chain_links_to_dicts(chain_result) -> list[dict]:
+    """Convert a ChainResult's links to the agent's dict shape.
+
+    None-safe: a None chain_result (e.g. an outcome without a chain)
+    returns an empty list. The agent handles an empty chain honestly.
+    """
+    if chain_result is None:
+        return []
+    links = getattr(chain_result, "chain", None) or []
+    return [
+        {
+            "file": link.file,
+            "line": link.line,
+            "symbol": link.symbol,
+            "reason": link.reason,
+            "terminal_kind": getattr(link, "terminal_kind", "Unknown"),
+            "branch_id": getattr(link, "branch_id", 0),
+            "snippet": getattr(link, "snippet", ""),
+        }
+        for link in links
+    ]
 
 class IncidentService:
     def __init__(self):
@@ -59,6 +80,7 @@ class IncidentService:
         duplicating the post-Watcher body.
         """
         context = {
+            "mode": "incident",
             "service_name": service_name,
             "message": message,
             "stack_trace": stack_trace,
@@ -345,6 +367,7 @@ class IncidentService:
         # _stage_scanner. The scanner stage records the original
         # candidate in the context, and _build_response surfaces it.
         context = {
+            "mode": "scan",
             "service_name": service_name,
             "message": (
                 f"Proactive scan finding: {candidate.pattern} at "
@@ -359,6 +382,7 @@ class IncidentService:
                 "score": outcome.score,
                 "reasoning": outcome.reasoning,
             },
+            "chain": _chain_links_to_dicts(getattr(outcome, "chain", None)),
         }
 
         # Route through _stage_scanner, then the full pipeline.
@@ -685,6 +709,8 @@ class IncidentService:
                 rag_context=rag_context,
                 fix_outcomes=fix_outcomes_context,
                 blast_radius=blast_radius,
+                mode=context.get("mode", "incident"),
+                chain=context.get("chain"),
             )
 
             result["investigation"] = investigation.to_dict()
@@ -697,12 +723,23 @@ class IncidentService:
                     f"(confidence {investigation.confidence:.2f}, "
                     f"{investigation.iterations} iterations)"
                 )
+            elif investigation.status == "confirmed":
+                result["fix_location"] = investigation.fix_location
+                result["failure_mode"] = investigation.failure_mode
+                logger.info(
+                    f"🔬 Investigator confirmed finding: "
+                    f"{investigation.failure_mode} "
+                    f"(fix_location={investigation.fix_location}, "
+                    f"confirmation={investigation.confirmation}, "
+                    f"confidence {investigation.confidence:.2f})"
+                )
             else:
                 result["auto_fix_skipped_reason"] = investigation.status
                 logger.info(
                     f"🔬 Investigator returned {investigation.status}; "
                     f"auto-fix will be skipped"
                 )
+
 
         return result
         
@@ -720,6 +757,8 @@ class IncidentService:
         rag_context: str,
         fix_outcomes: str,
         blast_radius: dict,
+        mode: str = "incident",
+        chain: list[dict] | None = None,
     ):
         """
         Build an InvestigatorContext, run the agent, return the
@@ -749,6 +788,7 @@ class IncidentService:
             repo_workdir = context.get("repo_workdir")
 
             ctx = build_investigator_context(
+                mode=mode,
                 service_name=service_name,
                 message=message,
                 repo=repo,
@@ -759,6 +799,7 @@ class IncidentService:
                 rag_context=rag_context,
                 fix_outcomes=fix_outcomes,
                 blast_radius=blast_radius,
+                chain=chain,
             )
             agent = InvestigatorAgent(
                 llm_service=self.llm,
