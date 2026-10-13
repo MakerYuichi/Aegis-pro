@@ -111,6 +111,13 @@ async def _run(args: argparse.Namespace) -> int:
             c = o["candidate"]
             print(f"  {o['score']:.3f}  {c['root_file']}:{c['root_line']}  "
                   f"{c['pattern']}  {c['symbol']!r}")
+            
+    incident_ids = result.get("incident_ids", [])
+    if incident_ids:
+        print()
+        print(f"=== Incidents ({len(incident_ids)}) ===")
+        for iid in incident_ids:
+            print(f"  {iid}")
 
     return 0
 
