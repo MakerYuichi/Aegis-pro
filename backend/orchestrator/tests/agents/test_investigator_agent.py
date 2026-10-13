@@ -50,6 +50,7 @@ def repo() -> str:
 def context(repo) -> InvestigatorContext:
     """The #105 case A shape: null source is identifiable."""
     return InvestigatorContext(
+        mode="incident",
         service_name="incident-service",
         message="AttributeError: NoneType has no attribute 'search_similar_outcomes'",
         repo=repo,
@@ -61,18 +62,6 @@ def context(repo) -> InvestigatorContext:
         exception_type="AttributeError",
         file_path="incident_service.py",
         line_number=34,
-                code_window={
-            "start_line": 30,
-            "end_line": 35,
-            "snippet": (
-                "   30          self.rag = get_rag_service()\n"
-                "   31          self.timeout = 30\n"
-                "   32  \n"
-                "   33      async def declare_incident(self, service_name: str, message: str):\n"
-                "   34          outcome = await self.rag.search_similar_outcomes(message, service_name)\n"
-                "   35          return outcome\n"
-            ),
-        },
         blame={"author": "eng@acme.com", "commit_hash": "abc1234",
                "message": "wire up rag lookup"},
         related_prs=[

@@ -9,6 +9,7 @@ from src.agents.investigator_context import build_investigator_context
 
 def _baseline(**overrides):
     base = dict(
+        mode="incident",
         service_name="payment-api",
         message="NullPointerException in charge handler",
         repo="payment-service",
@@ -59,15 +60,15 @@ def test_line_number_coerced_from_string():
     assert ctx.line_number == 42
 
 
-def test_code_window_is_always_empty():
-    """
-    Load-bearing: the agent gets an empty window so its first turn is
-    a tool call that reads what it decides it needs. If this test
-    ever starts failing because someone added a window, that's the
-    anchoring bug coming back.
-    """
-    ctx = build_investigator_context(**_baseline())
-    assert ctx.code_window == {}
+# test_code_window_is_always_empty was removed in the scan-mode PR.
+#
+# InvestigatorContext no longer has a code_window field. The
+# "the agent doesn't get a pre-fetched window" invariant used to be
+# checked at runtime — a test asserting the field was always empty.
+# It's now enforced by the shape: there is no field to populate, so
+# there is no way to accidentally anchor the agent to a pre-fetched
+# line. The test was checking a property the type system now
+# guarantees, which is strictly stronger.
 
 
 def test_blame_passed_through():
@@ -88,11 +89,15 @@ def test_to_prompt_renders_all_sections():
         fix_outcomes="prior fix example",
     ))
     prompt = ctx.to_prompt()
+    assert "Mode: incident" in prompt
     assert "## Stack trace" in prompt
-    assert "## Code around the failing line" in prompt
-    assert "(no code window available)" in prompt
     assert "## Blame" in prompt
     assert "## Related PRs" in prompt
     assert "## Blast radius" in prompt
     assert "## Similar past incidents" in prompt
-    assert "## Past fix outcomes" in prompt
+    assert "## Past fix outcomes for this service" in prompt
+    # The pre-fetched code window is deliberately absent. The agent's
+    # first turn is a tool call that reads whatever it decides it
+    # needs; a pre-fetched window would anchor it to the failing line.
+    assert "## Code around the failing line" not in prompt
+    assert "no code window available" not in prompt
