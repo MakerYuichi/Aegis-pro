@@ -41,17 +41,26 @@ from loguru import logger
 
 from src.agents.investigator_models import (
     ALL_STATUSES,
+    STATUS_CONFIRMED,
     STATUS_DECISION_FAILED,
     STATUS_DIAGNOSED,
     STATUS_ITERATION_LIMIT,
     STATUS_REFUSED,
     STATUS_TIMEOUT,
-    TERMINAL_ACTIONS,
-    TOOL_ACTIONS,
-    VALID_ACTIONS,
+    CONFIRMATION_PROBE_REPRODUCED,
+    CONFIRMATION_REASONED_ONLY,
+    ALL_CONFIRMATIONS,
+    MODE_INCIDENT,
+    MODE_SCAN,
+    REFUSE_FALSE_POSITIVE,
+    REFUSE_COULD_NOT_DETERMINE,
+    ALL_REFUSE_REASONS,
     InvestigationResult,
     InvestigatorAction,
     InvestigatorContext,
+    end_actions,
+    tool_actions,
+    valid_actions,
 )
 from src.agents.tools.repo_tools import (
     ToolResult,
@@ -59,6 +68,8 @@ from src.agents.tools.repo_tools import (
     read_symbol,
     search_codebase,
 )
+from src.agents.tools.read_chain import read_chain
+from src.agents.tools.probe import probe
 
 
 # Caps. Enforced here, not requested in the prompt.
@@ -187,6 +198,62 @@ def _refuse(
         iterations=result.iterations,
         history=history,
     )
+    
+def _history_has_successful_probe(history: list[dict[str, Any]]) -> bool:
+    """True when the history contains a probe that ran and reproduced."""
+    for obs in history:
+        if obs.get("tool") != "probe" or not obs.get("ok"):
+            continue
+        meta = obs.get("metadata") or {}
+        if meta.get("ran") is True and meta.get("reproduced") is True:
+            return True
+    return False
+
+
+def _validate_scan_confirmation(
+    result: InvestigationResult,
+    history: list[dict[str, Any]],
+    *,
+    chain: list[dict[str, Any]],
+) -> InvestigationResult:
+    """Validate a scan-mode confirmation.
+
+    Two checks:
+
+    1. fix_location must be one of the chain's files. This turns the
+       multi-file claim into something checkable.
+
+    2. If confirmation == "probe_reproduced", the history must
+       contain a probe observation whose metadata.ran is True and
+       metadata.reproduced is True. A claim of reproduction without
+       the evidence is downgraded to "reasoned_only" — the finding
+       may still be true, but the claim about how it was verified
+       is not.
+    """
+    if result.status != STATUS_CONFIRMED:
+        return result
+
+    chain_files = {link.get("file") for link in chain if link.get("file")}
+    if chain_files and result.fix_location not in chain_files:
+        logger.warning(
+            f"Investigator: fix_location {result.fix_location!r} is not "
+            f"in the chain ({sorted(chain_files)}); rejecting"
+        )
+        return _refuse(
+            result, history, REFUSE_FALSE_POSITIVE,
+            [result.fix_location or "<missing>"],
+        )
+
+    if result.confirmation == CONFIRMATION_PROBE_REPRODUCED:
+        if not _history_has_successful_probe(history):
+            logger.warning(
+                "Investigator: probe_reproduced claimed without a "
+                "successful probe observation; downgrading to "
+                "reasoned_only"
+            )
+            result.confirmation = CONFIRMATION_REASONED_ONLY
+
+    return result
 
 
 def _find_observation_at_crash(
@@ -401,6 +468,7 @@ class InvestigatorAgent:
     def __init__(self, llm_service, repo_root: str):
         self.llm = llm_service
         self.repo_root = repo_root
+        self._current_chain: list[dict[str, Any]] = []
 
     async def investigate(
         self,
@@ -413,6 +481,7 @@ class InvestigatorAgent:
         Never raises for a user-facing failure — a refusal, a timeout,
         or a bad action are all valid terminal states.
         """
+        self._current_chain = list(context.chain or [])
         history: list[dict[str, Any]] = []
         start = time.monotonic()
 
@@ -438,7 +507,7 @@ class InvestigatorAgent:
                     history=history,
                 )
 
-            if action.action == "diagnose":
+            if action.action == "diagnose" and context.mode == MODE_INCIDENT:
                 diagnosed = self._diagnose_result(action, iteration, history)
                 return _validate_diagnosis(
                     diagnosed,
@@ -447,10 +516,16 @@ class InvestigatorAgent:
                     crash_line=context.line_number,
                 )
 
+            if action.action == "confirm" and context.mode == MODE_SCAN:
+                confirmed = self._confirm_result(action, iteration, history)
+                return _validate_scan_confirmation(
+                    confirmed, history, chain=context.chain,
+                )
+
             if action.action == "refuse":
                 return self._refuse_result(action, iteration, history)
 
-            if action.action not in TOOL_ACTIONS:
+            if action.action not in tool_actions(context.mode):
                 # Parser should have caught this, but belt-and-suspenders:
                 # an action that isn't a tool and isn't a terminal is
                 # a decision failure.
@@ -497,7 +572,7 @@ class InvestigatorAgent:
 
         resp = await self.llm.complete_raw_detailed(
             prompt=prompt,
-            system=self._system_prompt(),
+            system=self._system_prompt(context.mode),
             temperature=0.2,
             max_tokens=800,
             response_format="json_object",
@@ -513,13 +588,18 @@ class InvestigatorAgent:
             )
             return None
 
-        return self._parse_action(resp.content)
+        return self._parse_action(resp.content, context.mode)
 
     # ------------------------------------------------------------------
     # Prompt building
     # ------------------------------------------------------------------
 
-    def _system_prompt(self) -> str:
+    def _system_prompt(self, mode: str = MODE_INCIDENT) -> str:
+        if mode == MODE_SCAN:
+            return self._scan_system_prompt()
+        return self._incident_system_prompt()
+
+    def _incident_system_prompt(self) -> str:
         return (
             "You are an SRE investigating a production incident. Your "
             "job is to identify the exact null source for a null "
@@ -592,7 +672,98 @@ class InvestigatorAgent:
             "will be reported as refused. Diagnose only what you can "
             "show."
         )
-
+        
+    def _scan_system_prompt(self) -> str:
+        return (
+            "You are reviewing a suspicious pattern in a codebase. A "
+            "static analyzer flagged the shape at a specific (file, "
+            "line) as potentially dangerous. Your job is to decide "
+            "whether it is a real defect.\n\n"
+            "IMPORTANT — most flags are benign. The analyzer is "
+            "deliberately over-inclusive: it fires on any attribute "
+            "access on a call result, any bare except, any mutable "
+            "default argument. Refusing is a normal and correct "
+            "outcome. The precision of this system depends on your "
+            "refusal rate. Do not confirm a finding just because it "
+            "was flagged.\n\n"
+            "You MUST respond with a single JSON object. No prose "
+            "before or after. No Markdown fences. The object describes "
+            "your next step — it is NOT a function call.\n\n"
+            "Schema:\n"
+            "{\n"
+            '  "thought": "one sentence, at most 200 characters",\n'
+            '  "next_step": "read_file" | "read_symbol" | '
+            '"search_codebase" | "read_chain" | "probe" | "confirm" | '
+            '"refuse",\n'
+            '  "parameters": { ... }\n'
+            "}\n\n"
+            "Tool parameters:\n"
+            '  read_file       {"path": str, "start_line": int?, "end_line": int?}\n'
+            '  read_symbol     {"path": str, "symbol_name": str}\n'
+            '  search_codebase {"pattern": str, "file_glob": str?}\n'
+            '  read_chain      {}  — reads the full chain in one observation\n'
+            '  probe           {"code": str, "language": "Python"?}  — '
+            "runs the code in a sandbox. Use this to test your "
+            "hypothesis.\n\n"
+            "End parameters:\n"
+            '  confirm {"failure_mode": str, "fix_location": str, '
+            '"evidence": str, "confidence": float, '
+            '"confirmation": "probe_reproduced" | "reasoned_only"}\n'
+            '  refuse  {"reason": "false_positive" | "could_not_determine", '
+            '"candidates_considered": [str]}\n\n'
+            "How to read the chain:\n"
+            "The chain is a list of links. Each link has:\n"
+            "  - file, line: where this step happens\n"
+            "  - symbol: the name involved at this step\n"
+            "  - reason: why this link is in the chain "
+            "(usage, assignment, return, parameter, definition)\n"
+            "  - terminal_kind: Optional | Concrete | Unknown. "
+            "Optional means the type says it can be None. Concrete "
+            "means the type says it cannot.\n"
+            "  - branch_id: 0 means the link is before any branch. "
+            "Links sharing the same non-zero branch_id are one "
+            "branch of a multi-source assignment (order = cache() or "
+            "db()). The chain is flat; the branch structure lives in "
+            "the branch_id tags.\n"
+            "Rule for branches: if only one branch is unsafe, the "
+            "fix belongs at that outlier branch, not at the crash "
+            "site.\n\n"
+            "Rules:\n"
+            "1. Start by calling read_chain. That gives you the "
+            "whole chain in one observation. Read it before deciding.\n"
+            "2. Look at the chain's terminal: does the type or "
+            "contract say the symbol can be None (Optional) or not "
+            "(Concrete)? Only Optional terminals support a real bug.\n"
+            "3. If you suspect a concrete failure, write the smallest "
+            "test that would trigger it and run it with probe. Claim "
+            "confirmation=\"probe_reproduced\" only if the test ran "
+            "and failed as predicted. Otherwise use "
+            "confirmation=\"reasoned_only\".\n"
+            "4. State a concrete failure mode. Not \"looks wrong\" — "
+            "\"crashes when order_id doesn't exist\".\n"
+            "5. fix_location must be one of the files listed in the "
+            "chain. If the fix belongs at a branch, name that "
+            "branch's file.\n"
+            "6. Refuse when the pattern is a false positive or when "
+            "you cannot determine whether it is a real bug. "
+            "Enumerated reasons: false_positive, could_not_determine.\n"
+            "7. Do not propose a diff. Do not output a fix. The Fixer "
+            "receives fix_location and writes the diff.\n\n"
+            "Example — a real defect:\n"
+            "  Chain: order.total used at payment_service.py:234 → "
+            "order assigned from fetch_order(id) → fetch_order "
+            "returns Optional[Order] → unguarded.\n"
+            "  This is a defect. Confirm with failure_mode=\"crashes "
+            "when order is None\", fix_location=payment_service.py "
+            "(or fetch_order if the contract is the real problem), "
+            "confirmation based on whether a probe reproduced it.\n\n"
+            "Example — a false positive:\n"
+            "  Same chain, but with an early `if order is None: "
+            "return` on the path between fetch_order and order.total.\n"
+            "  Refuse with reason=\"false_positive\". The guard "
+            "prevents the crash.\n"
+        )
+    
     def _build_decision_prompt(
         self,
         context: InvestigatorContext,
@@ -654,7 +825,7 @@ class InvestigatorAgent:
     # Action parsing — where the code enforces what the prompt requests
     # ------------------------------------------------------------------
 
-    def _parse_action(self, raw: str) -> InvestigatorAction | None:
+    def _parse_action(self, raw: str, mode: str = MODE_INCIDENT) -> InvestigatorAction | None:
         """
         Parse the LLM's JSON into an InvestigatorAction.
 
@@ -674,7 +845,7 @@ class InvestigatorAgent:
             return None
 
         action = payload.get("next_step")
-        if not isinstance(action, str) or action not in VALID_ACTIONS:
+        if not isinstance(action, str) or action not in valid_actions(mode):
             logger.warning(f"Investigator: invalid action {action!r}")
             return None
 
@@ -735,7 +906,52 @@ class InvestigatorAgent:
         # own arguments and returns an error observation if they're
         # missing or wrong.
 
-        return InvestigatorAction(action=action, thought=thought, args=args)
+        elif action == "confirm":
+            failure_mode = args.get("failure_mode")
+            if not isinstance(failure_mode, str) or not failure_mode.strip():
+                logger.warning("Investigator: confirm without failure_mode")
+                return None
+            fix_location = args.get("fix_location")
+            if not isinstance(fix_location, str) or not fix_location.strip():
+                logger.warning("Investigator: confirm without fix_location")
+                return None
+            evidence = args.get("evidence", "") or ""
+            if not isinstance(evidence, str):
+                evidence = str(evidence)
+            confirmation = args.get("confirmation", CONFIRMATION_REASONED_ONLY)
+            if confirmation not in ALL_CONFIRMATIONS:
+                confirmation = CONFIRMATION_REASONED_ONLY
+            confidence = args.get("confidence", DEFAULT_CONFIDENCE)
+            try:
+                confidence = float(confidence)
+            except (TypeError, ValueError):
+                confidence = DEFAULT_CONFIDENCE
+            confidence = max(0.0, min(1.0, confidence))
+            args = {
+                "failure_mode": failure_mode.strip(),
+                "fix_location": fix_location.strip(),
+                "evidence": evidence,
+                "confidence": confidence,
+                "confirmation": confirmation,
+            }
+
+        elif action == "refuse":
+            reason = args.get("reason", REFUSE_COULD_NOT_DETERMINE)
+            if reason not in ALL_REFUSE_REASONS:
+                reason = REFUSE_COULD_NOT_DETERMINE
+            candidates = args.get("candidates_considered", [])
+            if not isinstance(candidates, list):
+                candidates = []
+            candidates = [c for c in candidates if isinstance(c, str)]
+            args = {"reason": reason, "candidates_considered": candidates}
+
+        # Tool actions: leave args as-is. The tool layer validates its
+        # own arguments and returns an error observation if they're
+        # missing or wrong.
+
+        return InvestigatorAction(
+            action=action, thought=thought, args=args, mode=mode
+        )
 
     @staticmethod
     def _extract_json(raw: str) -> dict | None:
@@ -786,6 +1002,17 @@ class InvestigatorAgent:
                 pattern=action.args.get("pattern", ""),
                 file_glob=action.args.get("file_glob"),
             )
+        elif action.action == "read_chain":
+            result = await read_chain(
+                repo=self.repo_root,
+                chain=self._current_chain,
+            )
+        elif action.action == "probe":
+            result = await probe(
+                repo=self.repo_root,
+                code=action.args.get("code", ""),
+                language=action.args.get("language", "Python"),
+            )
         else:
             # Should be unreachable — _parse_action rejects unknown
             # actions and the loop only calls _execute_tool for tool
@@ -820,6 +1047,26 @@ class InvestigatorAgent:
             iterations=iteration,
             history=history,
         )
+        
+    @staticmethod
+    def _confirm_result(
+        action: InvestigatorAction,
+        iteration: int,
+        history: list[dict[str, Any]],
+    ) -> InvestigationResult:
+        return InvestigationResult(
+            status=STATUS_CONFIRMED,
+            failure_mode=action.args.get("failure_mode"),
+            fix_location=action.args.get("fix_location"),
+            evidence=action.args.get("evidence", ""),
+            confidence=action.args.get("confidence", DEFAULT_CONFIDENCE),
+            confirmation=action.args.get(
+                "confirmation", CONFIRMATION_REASONED_ONLY
+            ),
+            thought=action.thought,
+            iterations=iteration,
+            history=history,
+        )
 
     @staticmethod
     def _refuse_result(
@@ -837,3 +1084,5 @@ class InvestigatorAgent:
             iterations=iteration,
             history=history,
         )
+        
+    
