@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     VERIFY_BEFORE_REPORT: bool = False
     VERIFY_TIMEOUT_SECONDS: int = 120
     VERIFY_MAX_ATTEMPTS: int = 2
-    VERIFY_DOCKER_IMAGE_PYTHON: str = "python:3.11-slim"
+    VERIFY_DOCKER_IMAGE_PYTHON: str = "aegis-verifier:latest"
     VERIFY_DOCKER_IMAGE_NODE: str = "node:20-slim"
     
     # Verifier work directory.
@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     
     INVESTIGATOR_MODE: str = "stage"
     INVESTIGATOR_MAX_ITERATIONS: int = 8
-    INVESTIGATOR_TIME_BUDGET_SECONDS: float = 90.0
+    INVESTIGATOR_TIME_BUDGET_SECONDS: float = 300.0
     # Clone-once support for the Investigator agent. When the agent
     # needs filesystem access, it clones the target repo here and
     # writes the path into context["repo_workdir"]. Later stages
