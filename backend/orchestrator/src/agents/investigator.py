@@ -216,20 +216,6 @@ def _validate_scan_confirmation(
     *,
     chain: list[dict[str, Any]],
 ) -> InvestigationResult:
-    """Validate a scan-mode confirmation.
-
-    Two checks:
-
-    1. fix_location must be one of the chain's files. This turns the
-       multi-file claim into something checkable.
-
-    2. If confirmation == "probe_reproduced", the history must
-       contain a probe observation whose metadata.ran is True and
-       metadata.reproduced is True. A claim of reproduction without
-       the evidence is downgraded to "reasoned_only" — the finding
-       may still be true, but the claim about how it was verified
-       is not.
-    """
     if result.status != STATUS_CONFIRMED:
         return result
 
@@ -252,6 +238,26 @@ def _validate_scan_confirmation(
                 "reasoned_only"
             )
             result.confirmation = CONFIRMATION_REASONED_ONLY
+
+    # NEW: reasoned_only confirmations must state why a probe was
+    # not attempted. A finding that names a failure_mode but offers
+    # no probe and no explanation is a guess dressed as a finding.
+    if result.confirmation == CONFIRMATION_REASONED_ONLY:
+        evidence = (result.evidence or "").lower()
+        if not any(
+            marker in evidence
+            for marker in ("probe", "sandbox", "network", "external",
+                           "cannot construct", "cannot reproduce",
+                           "environment", "time-dependent")
+        ):
+            logger.warning(
+                "Investigator: reasoned_only confirmation without a "
+                "stated reason a probe was not attempted; rejecting"
+            )
+            return _refuse(
+                result, history, REFUSE_COULD_NOT_DETERMINE,
+                [result.failure_mode or "<no failure mode>"],
+            )
 
     return result
 
@@ -711,7 +717,25 @@ class InvestigatorAgent:
             '"confirmation": "probe_reproduced" | "reasoned_only"}\n'
             '  refuse  {"reason": "false_positive" | "could_not_determine", '
             '"candidates_considered": [str]}\n\n'
-            "How to read the chain:\n"
+            "## Two kinds of findings\n"
+            "The finding you receive is one of two kinds.\n\n"
+            "**Chain-based** (unchecked_optional_attr, unchecked_dict_access):\n"
+            "The finding involves a symbol whose origin was traced. The "
+            "chain shows where the symbol came from. Read the chain to "
+            "decide whether the symbol can be None at the crash site.\n\n"
+            "**Standalone** (bare_except, mutable_default_arg, "
+            "comparison_with_none_identity):\n"
+            "The finding has NO chain. The pattern is suspicious on its "
+            "own, without needing to know where any symbol came from. "
+            "Calling read_chain on a standalone finding returns an empty "
+            "observation and wastes an iteration. For these, read the "
+            "surrounding code directly with read_file and evaluate the "
+            "pattern.\n\n"
+            "The finding's pattern name tells you which kind it is. If "
+            "the pattern is bare_except, mutable_default_arg, or "
+            "comparison_with_none_identity, it is standalone. Everything "
+            "else is chain-based.\n\n"
+            "## How to read the chain (chain-based findings only)\n"
             "The chain is a list of links. Each link has:\n"
             "  - file, line: where this step happens\n"
             "  - symbol: the name involved at this step\n"
@@ -728,40 +752,102 @@ class InvestigatorAgent:
             "Rule for branches: if only one branch is unsafe, the "
             "fix belongs at that outlier branch, not at the crash "
             "site.\n\n"
-            "Rules:\n"
+            "## Rules for chain-based findings\n"
             "1. Start by calling read_chain. That gives you the "
             "whole chain in one observation. Read it before deciding.\n"
             "2. Look at the chain's terminal: does the type or "
             "contract say the symbol can be None (Optional) or not "
             "(Concrete)? Only Optional terminals support a real bug.\n"
-            "3. If you suspect a concrete failure, write the smallest "
-            "test that would trigger it and run it with probe. Claim "
-            "confirmation=\"probe_reproduced\" only if the test ran "
-            "and failed as predicted. Otherwise use "
-            "confirmation=\"reasoned_only\".\n"
-            "4. State a concrete failure mode. Not \"looks wrong\" — "
-            "\"crashes when order_id doesn't exist\".\n"
-            "5. fix_location must be one of the files listed in the "
+            "3. fix_location must be one of the files listed in the "
             "chain. If the fix belongs at a branch, name that "
-            "branch's file.\n"
-            "6. Refuse when the pattern is a false positive or when "
-            "you cannot determine whether it is a real bug. "
-            "Enumerated reasons: false_positive, could_not_determine.\n"
-            "7. Do not propose a diff. Do not output a fix. The Fixer "
-            "receives fix_location and writes the diff.\n\n"
-            "Example — a real defect:\n"
+            "branch's file.\n\n"
+            "## Rules for standalone findings\n"
+"1. Do NOT call read_chain. There is no chain. Calling it "
+"returns an empty observation and wastes an iteration.\n"
+"2. Read the enclosing function first. Call read_symbol on "
+"the function containing the flagged line to get its full "
+"body in one observation. A bare_except inside a finally: "
+"block means something different from one in a try: body, "
+"and you cannot tell which from a 20-line window. You must "
+"see the whole function before you evaluate the pattern.\n"
+"3. For bare_except, read at least one caller. Use "
+"search_codebase with the function name to find call sites, "
+"then read_file on the first call site. You must see whether "
+"the caller checks the return value, whether the caller is "
+"itself in an error path, and whether the swallowed "
+"exception would have propagated past the caller. A "
+"swallowed exception that only affects a cleanup path is a "
+"false positive. One that hides a data-corruption failure "
+"is a real defect.\n"
+"4. Evaluate the pattern with the full function and at "
+"least one caller in view:\n"
+"   - bare_except: is the exception swallowed silently? "
+"Does the function's return value matter to its caller? "
+"A bare `except: pass` that hides a real failure and whose "
+"caller assumes success is a defect. A bare `except:` that "
+"logs the error and continues, or that is deliberate cleanup "
+"after a process kill, is not.\n"
+"   - mutable_default_arg: does the function mutate the "
+"default? A `def f(x=[])` that appends to x is a defect. "
+"One that only reads x is not. You must see the full "
+"function body to know which.\n"
+"   - comparison_with_none_identity: almost always a style "
+"issue, not a bug. Refuse with false_positive unless the "
+"surrounding code makes the choice meaningful (e.g. the "
+"object defines __eq__ with side effects).\n"
+"5. fix_location must be the file containing the flagged "
+"line. It does not need to be a chain file — there is no "
+"chain. It is the file where the fix would land.\n\n"
+"## Rules for both kinds\n"
+"6. Every confirm must attempt a probe. If you name a "
+"failure_mode, you must write a probe call that reproduces "
+"it before calling confirm. The only exception is when the "
+"failure mode requires external state you cannot construct "
+"in a sandbox (network, time, environment) — in that case, "
+"set confirmation=\"reasoned_only\" and state in evidence "
+"why a probe was not possible. A confirm with "
+"confirmation=\"reasoned_only\" and no stated reason is "
+"incomplete and will be rejected by the validator.\n"
+"7. State a concrete failure mode. Not \"looks wrong\" — "
+"\"crashes when order_id doesn't exist\". Name the input "
+"shape that triggers it, and name the observable result.\n"
+"8. Refuse when the pattern is a false positive or when "
+"you cannot determine whether it is a real bug. "
+"Enumerated reasons: false_positive, could_not_determine.\n"
+"9. Do not propose a diff. Do not output a fix. The Fixer "
+"receives fix_location and writes the diff.\n\n"
+            "## Example — a chain-based real defect\n"
             "  Chain: order.total used at payment_service.py:234 → "
             "order assigned from fetch_order(id) → fetch_order "
             "returns Optional[Order] → unguarded.\n"
             "  This is a defect. Confirm with failure_mode=\"crashes "
-            "when order is None\", fix_location=payment_service.py "
-            "(or fetch_order if the contract is the real problem), "
+            "when order is None\", fix_location=payment_service.py, "
             "confirmation based on whether a probe reproduced it.\n\n"
-            "Example — a false positive:\n"
+            "## Example — a chain-based false positive\n"
             "  Same chain, but with an early `if order is None: "
             "return` on the path between fetch_order and order.total.\n"
             "  Refuse with reason=\"false_positive\". The guard "
-            "prevents the crash.\n"
+            "prevents the crash.\n\n"
+            "## Example — a standalone real defect\n"
+            "  Finding: bare_except at incident_service.py:1633.\n"
+            "  Read the code: `except: pass` wraps a `json.loads(...)` "
+            "call on `extra_metadata`. If the JSON is malformed, the "
+            "exception is swallowed and downstream code receives a "
+            "string where it expects a dict. That crashes later, in a "
+            "place that is harder to debug.\n"
+            "  This is a defect. Confirm with failure_mode=\"malformed "
+            "extra_metadata silently becomes a string; downstream dict "
+            "access crashes\", fix_location=incident_service.py, "
+            "confirmation=\"reasoned_only\" (a probe would need to "
+            "construct the exact failing input).\n\n"
+            "## Example — a standalone false positive\n"
+            "  Finding: bare_except at verifier.py:939.\n"
+            "  Read the code: `except: pass` wraps `proc.wait()` after "
+            "a `proc.kill()`. The exception is expected (the process "
+            "may already be reaped), and swallowing it is the "
+            "deliberate cleanup pattern.\n"
+            "  Refuse with reason=\"false_positive\". The bare except "
+            "is intentional.\n"
         )
     
     def _build_decision_prompt(
