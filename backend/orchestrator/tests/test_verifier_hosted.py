@@ -48,11 +48,13 @@ def test_repo_url_expands_short_form():
 
 
 def test_image_for_language_python_default():
-    assert "python" in _image_for_language("Python").lower()
+    from src.config import settings
+    assert _image_for_language("Python") == settings.VERIFY_DOCKER_IMAGE_PYTHON
 
 
 def test_image_for_language_node():
-    assert "node" in _image_for_language("Node").lower()
+    from src.config import settings
+    assert _image_for_language("Node") == settings.VERIFY_DOCKER_IMAGE_NODE
 
 
 # ---------------------------------------------------------------------------
