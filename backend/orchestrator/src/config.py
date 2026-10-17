@@ -84,6 +84,83 @@ class Settings(BaseSettings):
     VERIFIER_MEMORY_LIMIT: str = "1g"
     VERIFIER_CPU_LIMIT: str = "1"
     
+    # --- Prefetch (Phase 3, verifier dependency install) ----------
+    #
+    # The prefetcher runs in a throwaway container with network but
+    # no secrets. It reads the repo's manifest, sanitizes it, and
+    # downloads wheels into a persistent cache. The verifier
+    # (unchanged here) will mount the cache read-only and install
+    # from it with --no-index --require-hashes.
+    #
+    # VERIFIER_PIP_CACHE_HOST_DIR is a HOST path. It must resolve
+    # on the machine running docker-compose, because the daemon
+    # bind-mounts it into the verification container. In the
+    # compose layout, the same host directory is also mounted into
+    # the orchestrator at the same path — so reads and writes from
+    # the orchestrator see the cache directly.
+    VERIFIER_PIP_CACHE_HOST_DIR: str = "/var/lib/aegis/pip-cache"
+
+    # Name of the user-defined Docker network the prefetcher runs
+    # on. The network's resolver only answers for hosts in
+    # src.agents.prefetch.policy.ALLOWED_HOSTS. See
+    # docker-compose.yml for the network definition.
+    VERIFIER_PREFETCH_NETWORK: str = "aegis-prefetch"
+
+    # Bound on the prefetcher container's wall-clock time. First
+    # run for a repo can be slow (torch wheels); warm runs are
+    # fast. 600s is generous.
+    VERIFIER_PREFETCH_TIMEOUT_SECONDS: int = 600
+
+    # Same shape as the verifier container's limits. The prefetcher
+    # downloads; it doesn't run tests, so the memory need is lower.
+    VERIFIER_PREFETCH_MEMORY_LIMIT: str = "512m"
+    VERIFIER_PREFETCH_CPU_LIMIT: str = "1"
+    
+        # --- Build (sdist-only packages, PR C1b) ----------------------
+    #
+    # The build container turns an sdist into a wheel. It runs with
+    # --network none, --read-only, --cap-drop ALL. See
+    # src/agents/mirror/build.py for the full flag list.
+
+    BUILD_CONTAINER_IMAGE: str = "aegis-builder:latest"
+    BUILD_CONTAINER_TIMEOUT_SECONDS: int = 600
+    BUILD_CONTAINER_MEMORY_LIMIT: str = "1g"
+    BUILD_CONTAINER_CPU_LIMIT: str = "2"
+
+    # Hard cap on a built wheel's size before the orchestrator will
+    # accept it. The largest legitimate wheels are ~50MB; a
+    # 200MB wheel is an indication of a bad build, not a real one.
+    BUILD_WHEEL_MAX_BYTES: int = 200 * 1024 * 1024
+
+    # The mirror directory on the host. Symmetric mount: the
+    # orchestrator sees it at /mirror (container path); the daemon
+    # sees it at the value below (host path). The two namespaces
+    # must never be confused — see src/agents/prefetch/runner.py.
+    MIRROR_HOST_DIR: str = "/var/lib/aegis/mirror"
+    MIRROR_CONTAINER_DIR: str = "/mirror"
+    
+    # --- Build resolver (sdist-only packages, PR C1a) ------------
+    #
+    # The resolver reads an sdist's [build-system].requires and
+    # resolves each entry to an exact version, bounded by the
+    # sdist's own upload date. Pure Python; no Docker. Adds a
+    # minimal set of tunables rather than a policy surface.
+
+    # HTTP timeout for the PyPI JSON API. PyPI's JSON is cached at
+    # their edge; a slow response is a signal, not a nuisance.
+    BUILD_RESOLVER_TIMEOUT_SECONDS: int = 15
+
+    # User agent sent to PyPI. Their docs ask for a descriptive one.
+    BUILD_RESOLVER_USER_AGENT: str = "aegis-pro-build-resolver/0.1"
+
+    # Hard cap on the sdist tarball's size before the reader will
+    # even try to open it. Protects against absurd inputs.
+    BUILD_RESOLVER_MAX_SDIST_BYTES: int = 200 * 1024 * 1024  # 200 MB
+
+    # Hard cap on the number of build requirements an sdist may
+    # declare. Real sdists have 1-5; a hundred is a signal.
+    BUILD_RESOLVER_MAX_REQUIREMENTS: int = 50
+    
     CURATOR_FEW_SHOT: bool = False
     CURATOR_MAX_OUTCOMES: int = 3
     
