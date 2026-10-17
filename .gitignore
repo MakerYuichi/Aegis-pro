@@ -71,3 +71,9 @@ hf-cache/
 *.tfstate.*
 .terraform/
 verifier-workdir/
+
+
+# Prefetcher and verifier artifacts
+verifier-pip-cache/
+verifier-workdir/
+verifier-receipts/

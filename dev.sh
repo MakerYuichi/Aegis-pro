@@ -30,6 +30,16 @@ if [ "${1:-}" = "up" ]; then
   fi
 fi
 
+# Ensure the prefetcher network exists. docker-compose creates it
+# on first `up`, but creating it here means the first prefetch
+# doesn't race the network creation.
+if [ "${1:-}" = "up" ]; then
+  if ! docker network inspect aegis-prefetch >/dev/null 2>&1; then
+    echo "Creating aegis-prefetch network..."
+    docker network create aegis-prefetch >/dev/null
+  fi
+fi
+
 HOST_UID="$(id -u)" \
 HOST_GID="$(id -g)" \
 VERIFIER_HOST_WORKDIR="$(pwd)/verifier-workdir" \
