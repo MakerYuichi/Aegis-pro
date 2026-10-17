@@ -1,0 +1,4 @@
+fastapi==0.115.11
+torch==2.14.0+cpu
+torchvision==0.29.0+cpu
+numpy==1.24.3
