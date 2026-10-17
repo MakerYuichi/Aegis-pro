@@ -23,15 +23,49 @@ from src.agents.prefetch.policy import (
 from src.agents.prefetch.sanitize import PackagePin
 
 
-def _pin(name, base_version="1.0", variant="", extras=()):
+def _pin(
+    name: str,
+    base_version: str = "1.0",
+    variant: str = "",
+    extras: tuple[str, ...] = (),
+) -> PackagePin:
+    """
+    Construct a pinned PackagePin. Tests that need an unpinned pin
+    use _unpinned_pin below. The two shapes differ enough that
+    keeping them separate makes each test's intent clearer.
+    """
+    specifier = f"=={base_version}"
+    if variant:
+        specifier += f"+{variant}"
     return PackagePin(
         name=name,
+        is_pinned=True,
         base_version=base_version,
         local_variant=variant,
+        raw_specifier=specifier,
         extras=extras,
         environment_marker=None,
         explicit_hashes=(),
-        raw_line=f"{name}=={base_version}",
+        raw_line=f"{name}{specifier}",
+        line_number=1,
+    )
+
+
+def _unpinned_pin(
+    name: str,
+    raw_specifier: str = "",
+    extras: tuple[str, ...] = (),
+) -> PackagePin:
+    return PackagePin(
+        name=name,
+        is_pinned=False,
+        base_version="",
+        local_variant="",
+        raw_specifier=raw_specifier,
+        extras=extras,
+        environment_marker=None,
+        explicit_hashes=(),
+        raw_line=f"{name}{raw_specifier}",
         line_number=1,
     )
 
@@ -40,6 +74,12 @@ def _pin(name, base_version="1.0", variant="", extras=()):
 
 def test_plain_package_routes_to_pypi():
     route = route_pin(_pin("fastapi", "0.115.11"))
+    assert route.index_url == DEFAULT_INDEX_URL
+    assert route.reason == "default"
+
+
+def test_unpinned_package_routes_to_pypi():
+    route = route_pin(_unpinned_pin("httpx", ">=0.28.1"))
     assert route.index_url == DEFAULT_INDEX_URL
     assert route.reason == "default"
 
@@ -77,6 +117,17 @@ def test_torch_without_variant_warns_and_routes_to_pypi():
     mismatch so the caller can log a warning naming the fix.
     """
     route = route_pin(_pin("torch", "2.14.0"))
+    assert route.index_url == DEFAULT_INDEX_URL
+    assert route.reason == "default_variant_mismatch"
+
+
+def test_torch_unpinned_also_warns():
+    """
+    An unpinned torch range also routes to the default index and
+    signals the mismatch. The policy can't assume the range's
+    resolved version will be CPU-only.
+    """
+    route = route_pin(_unpinned_pin("torch", ">=2.6.0"))
     assert route.index_url == DEFAULT_INDEX_URL
     assert route.reason == "default_variant_mismatch"
 

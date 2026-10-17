@@ -2,15 +2,17 @@
 Tests for src.agents.prefetch.sanitize.
 
 The sanitizer's contract: read a manifest, return a list of
-PackagePin, or raise SanitizeError naming the offending line. Every
-test either asserts a shape or asserts a specific rejection reason.
+PackagePin. Both exact pins and version ranges are accepted.
+Directives are stripped. Malformed lines are rejected with a
+specific reason and line number.
 
-The fixture corpus is shared with the container-side sanitizer (see
-scripts/prefetch_entrypoint.py) via an agreement test at the bottom
-of this file. If the two implementations ever drift, that test fails.
+The fixture corpus is shared with the container-side sanitizer via
+an agreement test at the bottom of this file. If the two
+implementations ever drift, that test fails.
 """
 from __future__ import annotations
 
+import importlib.util as _importlib_util
 from pathlib import Path
 
 import pytest
@@ -41,7 +43,7 @@ def test_normalize_name(raw, expected):
     assert normalize_name(raw) == expected
 
 
-# ── happy path ──────────────────────────────────────────────────
+# ── happy path: pinned ──────────────────────────────────────────
 
 def test_pinned_manifest_parses_all_pins():
     pins = sanitize_manifest(FIXTURES / "pinned_manifest.txt")
@@ -56,11 +58,12 @@ def test_pin_shape():
     pins = sanitize_manifest(FIXTURES / "pinned_manifest.txt")
     fastapi = pins[0]
     assert fastapi.name == "fastapi"
+    assert fastapi.is_pinned is True
     assert fastapi.base_version == "0.115.11"
     assert fastapi.local_variant == ""
+    assert fastapi.raw_specifier == "==0.115.11"
     assert fastapi.extras == ()
     assert fastapi.environment_marker is None
-    assert fastapi.explicit_hashes == ()
     assert fastapi.line_number == 1
 
 
@@ -70,14 +73,58 @@ def test_extras_preserved():
     assert uvicorn.extras == ("standard",)
 
 
+# ── ranges accepted (Option C) ─────────────────────────────────
+
+def test_unpinned_range_accepted():
+    """
+    Ranges are accepted, not rejected. The sanitizer records
+    is_pinned=False and preserves the raw specifier so the
+    prefetcher's pip resolver can pick an absolute version.
+    """
+    pins = sanitize_manifest(FIXTURES / "unpinned_manifest.txt")
+    names = [p.name for p in pins]
+    assert "httpx" in names
+    httpx_pin = next(p for p in pins if p.name == "httpx")
+    assert httpx_pin.is_pinned is False
+    assert httpx_pin.base_version == ""
+    assert httpx_pin.raw_specifier == ">=0.28.1"
+
+
+@pytest.mark.parametrize("line,expected_spec", [
+    ("pkg>=1.0", ">=1.0"),
+    ("pkg<=1.0", "<=1.0"),
+    ("pkg~=1.0", "~=1.0"),
+    ("pkg!=1.0", "!=1.0"),
+    ("pkg>1.0", ">1.0"),
+    ("pkg<1.0", "<1.0"),
+    ("pkg", ""),
+])
+def test_all_range_operators_accepted(tmp_path, line, expected_spec):
+    f = tmp_path / "req.txt"
+    f.write_text(line + "\n")
+    pins = sanitize_manifest(f)
+    assert len(pins) == 1
+    assert pins[0].is_pinned is False
+    assert pins[0].raw_specifier == expected_spec
+
+
+def test_bare_name_accepted(tmp_path):
+    f = tmp_path / "req.txt"
+    f.write_text("pkg\n")
+    pins = sanitize_manifest(f)
+    assert pins[0].is_pinned is False
+    assert pins[0].raw_specifier == ""
+
+
 # ── variants (Option C) ─────────────────────────────────────────
 
 def test_variant_manifest_splits_base_and_variant():
     pins = sanitize_manifest(FIXTURES / "variant_manifest.txt")
     torch = next(p for p in pins if p.name == "torch")
+    assert torch.is_pinned is True
     assert torch.base_version == "2.14.0"
     assert torch.local_variant == "cpu"
-    # The original line is preserved verbatim for error messages.
+    assert torch.raw_specifier == "==2.14.0+cpu"
     assert torch.raw_line.strip() == "torch==2.14.0+cpu"
 
 
@@ -96,34 +143,6 @@ def test_extra_index_url_stripped_not_rejected():
     pins = sanitize_manifest(FIXTURES / "directive_manifest.txt")
     assert len(pins) == 3
     assert {p.name for p in pins} == {"fastapi", "torch", "numpy"}
-
-
-# ── unpinned rejection ──────────────────────────────────────────
-
-def test_unpinned_rejects_with_reason_and_line():
-    with pytest.raises(SanitizeError) as exc_info:
-        sanitize_manifest(FIXTURES / "unpinned_manifest.txt")
-    err = exc_info.value
-    assert err.reason.startswith("unpinned_dependency")
-    assert err.line_number == 2
-    assert "httpx>=0.28.1" in err.line_content
-
-
-@pytest.mark.parametrize("line,reason_fragment", [
-    ("pkg >= 1.0", "unpinned_dependency"),
-    ("pkg <= 1.0", "unpinned_dependency"),
-    ("pkg ~= 1.0", "unpinned_dependency"),
-    ("pkg != 1.0", "unpinned_dependency"),
-    ("pkg > 1.0", "unpinned_dependency"),
-    ("pkg < 1.0", "unpinned_dependency"),
-    ("pkg", "unpinned_dependency"),
-])
-def test_all_range_operators_rejected(tmp_path, line, reason_fragment):
-    f = tmp_path / "req.txt"
-    f.write_text(line + "\n")
-    with pytest.raises(SanitizeError) as exc_info:
-        sanitize_manifest(f)
-    assert reason_fragment in exc_info.value.reason
 
 
 # ── direct URLs and editables ───────────────────────────────────
@@ -167,9 +186,7 @@ def test_malformed_pin_rejected(tmp_path):
     f.write_text("pkg==not a valid version !!!\n")
     with pytest.raises(SanitizeError) as exc_info:
         sanitize_manifest(f)
-    assert exc_info.value.reason in (
-        "malformed_pin", "unpinned_dependency",
-    )
+    assert exc_info.value.reason == "malformed_requirement"
 
 
 def test_multiline_hash_rejected(tmp_path):
@@ -186,20 +203,12 @@ def test_multiline_hash_rejected(tmp_path):
 # tests assert it agrees with the orchestrator's on the fixture
 # corpus. If they drift, one of the two has a bug.
 
-import importlib.util as _importlib_util
-
 ENTRYPOINT_PATH = (
     Path(__file__).parents[2] / "scripts" / "prefetch_entrypoint.py"
 )
 
 
 def _load_entrypoint_module():
-    """
-    Load scripts/prefetch_entrypoint.py as a module.
-
-    The entrypoint has no imports from src/ — that's the whole
-    point — so exec_module works without stubbing anything.
-    """
     spec = _importlib_util.spec_from_file_location(
         "prefetch_entrypoint", ENTRYPOINT_PATH,
     )
@@ -224,8 +233,8 @@ def test_container_sanitizer_agrees_on_pinned():
     assert [p.base_version for p in orch_pins] == [
         p["base_version"] for p in cont_pins
     ]
-    assert [p.local_variant for p in orch_pins] == [
-        p["local_variant"] for p in cont_pins
+    assert [p.is_pinned for p in orch_pins] == [
+        p["is_pinned"] for p in cont_pins
     ]
 
 
@@ -237,6 +246,7 @@ def test_container_sanitizer_agrees_on_variants():
         assert op.name == cp["name"]
         assert op.base_version == cp["base_version"]
         assert op.local_variant == cp["local_variant"]
+        assert op.is_pinned == cp["is_pinned"]
 
 
 def test_container_sanitizer_agrees_on_directives():
@@ -248,32 +258,38 @@ def test_container_sanitizer_agrees_on_directives():
     assert [p.name for p in orch_pins] == [p["name"] for p in cont_pins]
 
 
-def test_container_sanitizer_agrees_on_unpinned_rejection():
+def test_container_sanitizer_agrees_on_ranges():
+    """Both implementations accept ranges. The raw specifier is
+    preserved on both sides. This is the Option C agreement —
+    without it, the orchestrator could accept a range and the
+    container reject it, or vice versa."""
     mod = _load_entrypoint_module()
-    with pytest.raises(Exception) as orch_err:
-        sanitize_manifest(FIXTURES / "unpinned_manifest.txt")
-    with pytest.raises(Exception) as cont_err:
-        mod.sanitize(FIXTURES / "unpinned_manifest.txt")
-    assert "unpinned_dependency" in str(orch_err.value)
-    assert "unpinned_dependency" in str(cont_err.value)
+    orch_pins = sanitize_manifest(FIXTURES / "unpinned_manifest.txt")
+    cont_pins = mod.sanitize(FIXTURES / "unpinned_manifest.txt")
+    for op, cp in zip(orch_pins, cont_pins):
+        assert op.name == cp["name"]
+        assert op.is_pinned == cp["is_pinned"]
+        assert op.raw_specifier == cp["raw_specifier"]
 
 
 def test_container_sanitizer_agrees_on_variant_routing():
-    """Both implementations route torch+cpu to the CPU index. This is
-    the Option C agreement — the container's route() and the
-    orchestrator's route_pin() must produce the same URL."""
+    """Both implementations route torch+cpu to the CPU index. This
+    is the Option C agreement on routing — the container's route()
+    and the orchestrator's route_pin() must produce the same URL."""
     mod = _load_entrypoint_module()
-    torch_pin = {
+    torch_pin_dict = {
         "name": "torch",
         "base_version": "2.14.0",
         "local_variant": "cpu",
+        "is_pinned": True,
     }
-    container_route = mod.route(torch_pin)
+    container_route = mod.route(torch_pin_dict)
 
     from src.agents.prefetch.policy import route_pin
     from src.agents.prefetch.sanitize import PackagePin
     orch_pin = PackagePin(
-        name="torch", base_version="2.14.0", local_variant="cpu",
+        name="torch", is_pinned=True, base_version="2.14.0",
+        local_variant="cpu", raw_specifier="==2.14.0+cpu",
         extras=(), environment_marker=None, explicit_hashes=(),
         raw_line="torch==2.14.0+cpu", line_number=1,
     )
