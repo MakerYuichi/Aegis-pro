@@ -161,6 +161,7 @@ class Settings(BaseSettings):
     # declare. Real sdists have 1-5; a hundred is a signal.
     BUILD_RESOLVER_MAX_REQUIREMENTS: int = 50
     BUILD_RESOLVER_MAX_DECOMPRESSED_BYTES: int = 500 * 1024 * 1024
+    BUILD_SMOKE_TIMEOUT_SECONDS: int = 60
     
     CURATOR_FEW_SHOT: bool = False
     CURATOR_MAX_OUTCOMES: int = 3
