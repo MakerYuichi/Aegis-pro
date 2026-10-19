@@ -1,61 +1,5 @@
-"""
-Run the prefetcher container and return its receipt.
-
-The container is the same shape as the verifier's sandbox: an
-ephemeral docker run, mounted data, controlled argv. Differences:
-
-  - Network: yes (the prefetcher downloads wheels). The verifier
-    runs with --network none.
-  - Secrets: none. The container is started with no --env flags
-    beyond MANIFEST_PATH, CACHE_DIR, and LOCK_PATH. No LLM keys,
-    no DB URL, no GitHub token, no docker socket.
-  - Image: stock python:3.11-slim. The entrypoint script is
-    mounted read-only from a file the orchestrator stages into the
-    cache directory.
-
-Two filesystems, one function
-─────────────────────────────
-
-This module straddles two path namespaces:
-
-  * The container's. What THIS process sees. `/app/...`,
-    `/verifier-pip-cache/...`. Used by Path.read_text(),
-    shutil.copy2(), mkdir() — any Python operation running in
-    this process.
-
-  * The host's. What the Docker DAEMON sees when it resolves a
-    `-v` argument. On macOS: `/Users/.../aegis-pro/...`. On Linux
-    in the compose layout: also something like `/home/.../`. The
-    daemon resolves the string against the physical host
-    filesystem, not against this container's.
-
-The two are never interchangeable. `-v /verifier-pip-cache/...`
-fails on macOS because the Mac has no `/verifier-pip-cache` — the
-compose mount `./verifier-pip-cache:/verifier-pip-cache` maps the
-Mac path `/Users/.../verifier-pip-cache` to the container path
-`/verifier-pip-cache`, two different strings for the same bytes.
-
-Therefore this function takes BOTH paths, explicitly. The caller
-(the pipeline, or the test script) knows both:
-
-    cache_container_path = Path("/verifier-pip-cache")
-    cache_host_path      = Path(settings.VERIFIER_PIP_CACHE_HOST_DIR)
-
-Staging bridges the two namespaces. The manifest and entrypoint
-arrive as CONTAINER paths (this process can read them). They are
-copied into the CONTAINER cache directory. The `-v` arguments then
-reference the same files by their HOST paths, which the daemon can
-resolve because the cache directory itself is a symmetric mount
-in the compose file.
-
-Why not translate /app/... to a host path with an
-ORCHESTRATOR_HOST_DIR setting? Because it introduces a second
-source of truth for the same fact. The compose mount
-`./backend/orchestrator:/app` and a `${PWD}/backend/orchestrator`
-env var are not mechanically coupled; they drift. Staging costs
-one file copy per prefetch and eliminates the coupling entirely.
-"""
 from __future__ import annotations
+from typing import Optional
 
 import asyncio
 import time
@@ -72,6 +16,10 @@ from src.agents.prefetch.receipt import (
     parse_receipt,
 )
 from src.config import settings
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.agents.prefetch.receipt import PrefetchFailure
+    from src.agents.mirror.types import SdistRef
 
 
 PREFETCHER_IMAGE = "python:3.11-slim"
@@ -296,3 +244,314 @@ def _cleanup_staged(*paths: Path) -> None:
             p.unlink(missing_ok=True)
         except Exception as e:
             logger.warning(f"Prefetch: could not remove {p}: {e}")
+
+async def run_prefetch_with_build_on_miss(
+    *,
+    manifest_container_path: Path,
+    entrypoint_container_path: Path,
+    cache_container_path: Path,
+    cache_host_path: Path,
+    mirror_container_path: Path,
+    mirror_host_path: Path,
+    build_entrypoint_container_path: Path,
+    timeout_seconds: int | None = None,
+) -> PrefetchResult:
+    """
+    Run the prefetcher. On `sdist_only`, build the missing wheel
+    and retry once with --find-links pointing at the mirror.
+
+    The prefetcher's container does the actual pip download; it
+    cannot call the build pipeline itself. So this function
+    orchestrates the two:
+
+        1. Run run_prefetch. It fails with sdist_only.
+        2. Parse the failure. Fetch the sdist, build a wheel,
+           publish to the mirror.
+        3. Run run_prefetch again with EXTRA_FIND_LINKS set to the
+           published directory.
+
+    Bounded to one retry. A second sdist_only failure is a bug in
+    the build pipeline or in pip's ability to see the mirror
+    directory, and it's reported as-is rather than looping.
+    """
+    from src.agents.mirror.fetch_sdist import SdistFetchError, fetch_sdist
+    from src.agents.mirror.integrate import (
+        IntegrateError,
+        build_from_sdist_failure,
+    )
+    from src.agents.mirror.resolver import BuildResolver
+    from src.agents.mirror.types import SdistRef
+    import urllib.request
+    import json
+
+    try:
+        return await run_prefetch(
+            manifest_container_path=manifest_container_path,
+            entrypoint_container_path=entrypoint_container_path,
+            cache_container_path=cache_container_path,
+            cache_host_path=cache_host_path,
+            timeout_seconds=timeout_seconds,
+        )
+    except PrefetchError as e:
+        if e.reason != "sdist_only":
+            raise
+        # PEP 3110: `e` is deleted at the end of the except block.
+        # Copy what we need before the block exits.
+        first_failure_detail = e.detail
+
+    logger.info(
+        f"Prefetch: sdist_only on {first_failure_detail}; "
+        f"building and retrying"
+    )
+
+    failure = parse_failure_from_detail(first_failure_detail)
+    if failure is None:
+        raise PrefetchError(
+            "sdist_only_unrecoverable",
+            f"could not parse failure detail: {first_failure_detail}",
+        )
+
+    sdist_ref = await _fetch_sdist_ref(failure.package, failure.version)
+    if sdist_ref is None:
+        raise PrefetchError(
+            "sdist_ref_unresolved",
+            f"{failure.package} {failure.version}: "
+            f"no sdist URL found on PyPI",
+        )
+
+    resolver = BuildResolver()
+    python_tag = _python_tag_from_platform()
+    try:
+        wheel_dir_host = await build_from_sdist_failure(
+            failure=failure,
+            sdist_ref=sdist_ref,
+            mirror_host_dir=mirror_host_path,
+            mirror_container_dir=mirror_container_path,
+            entrypoint_container_path=build_entrypoint_container_path,
+            resolver=resolver,
+            python_tag=python_tag,
+        )
+    except IntegrateError as ex:
+        raise PrefetchError(
+            f"build_on_miss_{ex.reason}",
+            ex.detail,
+        ) from ex
+
+    # Retry the prefetcher with the mirror directory as a find-links.
+    # The wheel directory's host path is the same as its container
+    # path because the mirror mount is symmetric in compose.
+    wheel_dir_container = (
+        mirror_container_path
+        / wheel_dir_host.relative_to(mirror_host_path)
+    )
+
+    return await _retry_with_find_links(
+        manifest_container_path=manifest_container_path,
+        entrypoint_container_path=entrypoint_container_path,
+        cache_container_path=cache_container_path,
+        cache_host_path=cache_host_path,
+        find_links_container=wheel_dir_container,
+        find_links_host=wheel_dir_host,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+async def _retry_with_find_links(
+    *,
+    manifest_container_path: Path,
+    entrypoint_container_path: Path,
+    cache_container_path: Path,
+    cache_host_path: Path,
+    find_links_container: Path,
+    find_links_host: Path,
+    timeout_seconds: int | None,
+) -> PrefetchResult:
+    """
+    Run the prefetcher with EXTRA_FIND_LINKS set.
+
+    The find-links directory has to be visible to the container
+    running pip download. In compose the mirror is bind-mounted at
+    MIRROR_CONTAINER_DIR inside the orchestrator, and at
+    MIRROR_HOST_DIR on the host. But the prefetcher is a SIBLING
+    container — it doesn't share the orchestrator's mount. So we
+    mount the find-links directory explicitly, at a known path.
+    """
+    from src.agents.prefetch.receipt import parse_receipt
+
+    FIND_LINKS_IN_PREFETCHER = "/findlinks"
+
+    timeout = timeout_seconds or settings.VERIFIER_PREFETCH_TIMEOUT_SECONDS
+
+    cache_container_path.mkdir(parents=True, exist_ok=True)
+    lock_path = cache_container_path / "requirements.lock"
+
+    staged_entrypoint_container = (
+        cache_container_path / STAGED_ENTRYPOINT_NAME
+    )
+    staged_manifest_container = (
+        cache_container_path / STAGED_MANIFEST_NAME
+    )
+    shutil.copy2(entrypoint_container_path, staged_entrypoint_container)
+    shutil.copy2(manifest_container_path, staged_manifest_container)
+
+    staged_entrypoint_host = (
+        cache_host_path / STAGED_ENTRYPOINT_NAME
+    )
+    staged_manifest_host = (
+        cache_host_path / STAGED_MANIFEST_NAME
+    )
+
+    argv = [
+        "docker", "run", "--rm",
+        "--network", settings.VERIFIER_PREFETCH_NETWORK,
+        "--memory", settings.VERIFIER_PREFETCH_MEMORY_LIMIT,
+        "--cpus", settings.VERIFIER_PREFETCH_CPU_LIMIT,
+        "-v",
+        f"{staged_entrypoint_host}:{ENTRYPOINT_IN_PREFETCHER}:ro",
+        "-v",
+        f"{staged_manifest_host}:{MANIFEST_IN_PREFETCHER}:ro",
+        "-v",
+        f"{cache_host_path}:{CACHE_IN_PREFETCHER}",
+        "-v",
+        f"{find_links_host}:{FIND_LINKS_IN_PREFETCHER}:ro",
+        "-e", f"MANIFEST_PATH={MANIFEST_IN_PREFETCHER}",
+        "-e", f"CACHE_DIR={CACHE_IN_PREFETCHER}",
+        "-e", f"LOCK_PATH={CACHE_IN_PREFETCHER}/requirements.lock",
+        "-e", f"EXTRA_FIND_LINKS={FIND_LINKS_IN_PREFETCHER}",
+        PREFETCHER_IMAGE,
+        "python", ENTRYPOINT_IN_PREFETCHER,
+    ]
+
+    start = time.monotonic()
+    logger.info(f"Prefetch retry: find_links={find_links_host}")
+
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    try:
+        stdout_bytes, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        try:
+            await proc.wait()
+        except Exception:
+            pass
+        _cleanup_staged(
+            staged_entrypoint_container, staged_manifest_container,
+        )
+        raise PrefetchError("prefetch_timeout", f"exceeded {timeout}s")
+
+    duration_ms = int((time.monotonic() - start) * 1000)
+    stdout = stdout_bytes.decode("utf-8", errors="replace")
+
+    _cleanup_staged(
+        staged_entrypoint_container, staged_manifest_container,
+    )
+
+    if proc.returncode != 0:
+        failure = parse_failure(stdout)
+        if failure is not None:
+            raise PrefetchError(
+                f"retry_{failure.reason}",
+                f"package={failure.package} "
+                f"version={failure.version} "
+                f"detail={failure.detail}",
+            )
+        tail = stdout[-4000:] if len(stdout) > 4000 else stdout
+        raise PrefetchError(
+            "prefetch_retry_crashed",
+            f"exit={proc.returncode} tail={tail!r}",
+        )
+
+    try:
+        receipt = parse_receipt(stdout)
+    except ReceiptError as rx:
+        tail = stdout[-2000:] if len(stdout) > 2000 else stdout
+        raise PrefetchError(
+            "prefetch_retry_crashed",
+            f"receipt parse failed: {rx.reason}; tail={tail!r}",
+        ) from rx
+
+    logger.info(
+        f"Prefetch retry succeeded: {len(receipt.packages)} "
+        f"packages, {duration_ms}ms"
+    )
+    return PrefetchResult(
+        cache_container_path=cache_container_path,
+        cache_host_path=cache_host_path,
+        lock_path=lock_path,
+        receipt=receipt,
+    )
+
+
+def parse_failure_from_detail(detail: str) -> Optional["PrefetchFailure"]:
+    """
+    Reconstruct a PrefetchFailure from the detail string that
+    PrefetchError carries. The detail is in the form
+    'package=X version=Y detail=Z'. That's what
+    `run_prefetch` builds from `parse_failure`.
+    """
+    import re
+    from src.agents.prefetch.receipt import PrefetchFailure
+
+    m = re.search(
+        r"package=(\S+) version=(\S+) detail=(.*)",
+        detail, re.DOTALL,
+    )
+    if m is None:
+        return None
+    return PrefetchFailure(
+        reason="sdist_only",
+        detail=m.group(3),
+        package=m.group(1),
+        version=m.group(2),
+        available_wheels=[],
+        index_url="",
+    )
+
+
+async def _fetch_sdist_ref(
+    name: str, version: str,
+) -> "SdistRef | None":
+    """
+    Look up the sdist for (name, version) on PyPI and return an
+    SdistRef. Returns None if no sdist is published.
+    """
+    from src.agents.mirror.types import SdistRef
+    import urllib.request
+    import json
+
+    url = f"https://pypi.org/pypi/{name}/{version}/json"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception as ex:
+        logger.warning(
+            f"Prefetch: could not look up sdist for {name} "
+            f"{version}: {ex}"
+        )
+        return None
+
+    for f in payload.get("urls") or []:
+        if f.get("packagetype") == "sdist":
+            return SdistRef(
+                url=f["url"],
+                filename=f["filename"],
+                sha256="sha256:" + f["digests"]["sha256"],
+                upload_time=f["upload_time_iso_8601"],
+                name=name,
+                version=version,
+            )
+    return None
+
+
+def _python_tag_from_platform() -> str:
+    """Compute the pip-style python tag for the current interpreter."""
+    import platform
+    v = platform.python_version().split(".")
+    return f"cp{v[0]}{v[1]}"
