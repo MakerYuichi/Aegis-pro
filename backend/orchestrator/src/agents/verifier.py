@@ -930,14 +930,49 @@ async def _run_in_docker(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
+        # Every run gets a name so a timeout can kill it by name. The
+    # Docker CLI client we spawned is what proc.kill() SIGKILLs —
+    # SIGKILL cannot be forwarded through the client to the daemon,
+    # so the container keeps running unless we address it directly.
+    container_name = f"aegis-verify-{uuid.uuid4().hex[:12]}"
+
+    argv = [
+        "docker", "run", "--rm",
+        "--name", container_name,
+        "--network", "none",
+        "--memory", memory_limit,
+        "--cpus", cpu_limit,
+        "-v", f"{host_path}:{container_workdir}/{container_relative}",
+        "-w", container_path,
+        image,
+        "sh", "-c", command,
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
+        # Kill the client process.
         proc.kill()
         try:
             await proc.wait()
         except Exception:
             pass
+        # Kill the container by name. Best effort.
+        try:
+            kp = await asyncio.create_subprocess_exec(
+                "docker", "kill", container_name,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            await kp.wait()
+        except Exception as e:
+            logger.warning(
+                f"Verifier: docker kill {container_name} failed: {e}"
+            )
         return 124, f"verification timed out after {timeout}s"
 
     exit_code = proc.returncode if proc.returncode is not None else -1
