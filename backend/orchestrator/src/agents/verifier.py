@@ -893,14 +893,21 @@ async def _run_in_docker(
     read-write. --network none is deliberate: the sibling container
     executes unreviewed, AI-generated code and must not reach the
     network.
+
+    Every run gets a name so a timeout can kill it by name. The
+    Docker CLI client is what proc.kill() SIGKILLs — SIGKILL cannot
+    be forwarded through the client to the daemon, so the container
+    keeps running unless we address it directly.
     """
     container_relative = host_workdir.name
     host_path = f"{settings.VERIFIER_HOST_WORKDIR.rstrip('/')}/{container_relative}"
     container_path = f"{container_workdir}/{container_relative}/repo"
-    
+    container_name = f"aegis-verify-{uuid.uuid4().hex[:12]}"
+
     # Every argument in argv comes from a trusted source:
-    #   - "docker", "run", "--rm", "--network", "none", "--memory",
-    #     "--cpus", "-v", "-w", "sh", "-c"  — hardcoded
+    #   - "docker", "run", "--rm", "--name", "--network", "none",
+    #     "--memory", "--cpus", "-v", "-w", "sh", "-c"  — hardcoded
+    #   - container_name                     — generated uuid
     #   - memory_limit, cpu_limit            — settings
     #   - host_path                          — settings + uuid4().hex[:12]
     #   - container_path                     — settings + the same uuid
@@ -909,33 +916,9 @@ async def _run_in_docker(
     #   - command                            — one of the hardcoded strings
     #                                           in _detect_runner
     #
-    # No user input (repo name, diff, stack trace) flows into argv. The
-    # diff is written to a file and mounted as data; the repo URL is
-    # used by `git clone` on the host, never by `docker run`. If you add
-    # a new argument here, it must come from config or a generated
-    # value — never from customer input.
-    argv = [
-        "docker", "run", "--rm",
-        "--network", "none",
-        "--memory", memory_limit,
-        "--cpus", cpu_limit,
-        "-v", f"{host_path}:{container_workdir}/{container_relative}",
-        "-w", container_path,
-        image,
-        "sh", "-c", command,
-    ]
-
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-        # Every run gets a name so a timeout can kill it by name. The
-    # Docker CLI client we spawned is what proc.kill() SIGKILLs —
-    # SIGKILL cannot be forwarded through the client to the daemon,
-    # so the container keeps running unless we address it directly.
-    container_name = f"aegis-verify-{uuid.uuid4().hex[:12]}"
-
+    # No user input (repo name, diff, stack trace) flows into argv. If
+    # you add a new argument here, it must come from config or a
+    # generated value — never from customer input.
     argv = [
         "docker", "run", "--rm",
         "--name", container_name,
@@ -962,7 +945,9 @@ async def _run_in_docker(
             await proc.wait()
         except Exception:
             pass
-        # Kill the container by name. Best effort.
+        # Kill the container by name. proc.kill() only SIGKILLs the
+        # Docker CLI client; the daemon doesn't see it, so the
+        # container would keep running without this.
         try:
             kp = await asyncio.create_subprocess_exec(
                 "docker", "kill", container_name,
