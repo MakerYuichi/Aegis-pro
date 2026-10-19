@@ -40,6 +40,7 @@ def publish_built_wheel(
     built: BuildOutput,
     sdist_ref: SdistRef,
     requires: list[ResolvedRequirement],
+    mirror_container_dir: Path,
     mirror_host_dir: Path,
 ) -> Path:
     """
@@ -49,20 +50,24 @@ def publish_built_wheel(
     the same value the prefetcher uses with --find-links on retry.
     """
     digest = sdist_ref.sha256.replace("sha256:", "")
-    target_dir = mirror_host_dir / "wheels" / digest
+    target_dir_container = mirror_container_dir / "wheels" / digest
+    target_dir_host = mirror_host_dir / "wheels" / digest
 
-    if target_dir.is_dir():
+    if target_dir_container.is_dir():
         # Already published. Idempotent.
         logger.info(
             f"publish: {sdist_ref.name} {sdist_ref.version} "
-            f"already in mirror at {target_dir}"
+            f"already in mirror at {target_dir_container}"
         )
-        return target_dir
+        return target_dir_host
 
     # Build the temp directory adjacent to the target so that
-    # os.rename is guaranteed to be on the same filesystem.
-    mirror_host_dir.mkdir(parents=True, exist_ok=True)
-    staging_parent = mirror_host_dir / "wheels"
+    # os.rename is guaranteed to be on the same filesystem. All
+    # file operations use the CONTAINER path; the HOST path is
+    # only used for the return value (the caller passes it as a
+    # -v mount argument to Docker).
+    mirror_container_dir.mkdir(parents=True, exist_ok=True)
+    staging_parent = mirror_container_dir / "wheels"
     staging_parent.mkdir(exist_ok=True)
     staging = Path(tempfile.mkdtemp(
         prefix=".tmp-", dir=staging_parent,
@@ -118,9 +123,9 @@ def publish_built_wheel(
         )
 
         # Atomic rename into place.
-        os.rename(staging, target_dir)
-        logger.info(f"publish: published to {target_dir}")
-        return target_dir
+        os.rename(staging, target_dir_container)
+        logger.info(f"publish: published to {target_dir_container}")
+        return target_dir_host
 
     except Exception:
         # Clean up staging on any failure.
