@@ -77,3 +77,4 @@ verifier-workdir/
 verifier-pip-cache/
 verifier-workdir/
 verifier-receipts/
+mirror/
