@@ -23,10 +23,25 @@ set -euo pipefail
 if [ "${1:-}" = "up" ]; then
   if ! docker image inspect aegis-verifier:latest >/dev/null 2>&1; then
     echo "Building aegis-verifier:latest..."
-    docker build \
-      -t aegis-verifier:latest \
+    docker build -t aegis-verifier:latest \
       -f backend/orchestrator/Dockerfile.verifier \
       backend/orchestrator/
+  fi
+  if ! docker image inspect aegis-builder:latest >/dev/null 2>&1; then
+    echo "Building aegis-builder:latest..."
+    docker build -t aegis-builder:latest \
+      -f backend/orchestrator/Dockerfile.builder \
+      backend/orchestrator/
+  fi
+fi
+
+# Ensure the prefetcher network exists. docker-compose creates it
+# on first `up`, but creating it here means the first prefetch
+# doesn't race the network creation.
+if [ "${1:-}" = "up" ]; then
+  if ! docker network inspect aegis-prefetch >/dev/null 2>&1; then
+    echo "Creating aegis-prefetch network..."
+    docker network create aegis-prefetch >/dev/null
   fi
 fi
 

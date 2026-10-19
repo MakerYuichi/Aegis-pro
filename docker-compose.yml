@@ -100,6 +100,10 @@ services:
       # Talk to the Docker daemon via the socket proxy — never the
       # raw /var/run/docker.sock.
       DOCKER_HOST: tcp://docker-proxy:2375
+      VERIFIER_PIP_CACHE_HOST_DIR: ${PWD}/verifier-pip-cache
+      VERIFIER_PREFETCH_NETWORK: aegis-prefetch
+      MIRROR_HOST_DIR: ${PWD}/mirror
+      MIRROR_CONTAINER_DIR: /mirror
     depends_on:
       postgres:
         condition: service_healthy
@@ -116,8 +120,31 @@ services:
       # note in src/agents/verifier.py.
       - ./verifier-workdir:/verifier-workdir
       - ./hf-cache:/home/aegis/.cache
+      - ./verifier-pip-cache:/verifier-pip-cache
+      - ./mirror:/mirror
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
 
 volumes:
   postgres_data:
+
+networks:
+  default:
+    name: aegis-pro_default
+  # Prefetcher network: the resolver only answers for hosts in
+  # src.agents.prefetch.policy.ALLOWED_HOSTS. The default network's
+  # resolver answers for everything, which is why this is a
+  # distinct network. The prefetcher runs on this network; the
+  # orchestrator and the verifier run on the default one.
+  aegis-prefetch:
+    name: aegis-prefetch
+    driver: bridge
+    internal: false    # still needs egress to pypi.org, etc.
+    # The DNS restriction is enforced by an accompanying service
+    # that runs on the same network and answers only for the
+    # allowlist — see the aegis-prefetch-resolver service. That
+    # service is planned but not in this PR; until it lands, the
+    # prefetcher container has full network access. The sanitizer
+    # plus --only-binary=:all: plus --require-hashes are the
+    # current enforcement. See docs/ARCHITECTURE.md for the
+    # planned-enforcement gap.
