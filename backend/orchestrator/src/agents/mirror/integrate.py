@@ -26,6 +26,7 @@ from src.agents.mirror.resolver import BuildResolver, ResolverError
 from src.agents.mirror.sdist_reader import (
     SdistReaderError, read_build_system_requires,
 )
+from src.agents.mirror.smoke import SmokeError, smoke_test
 from src.agents.mirror.types import SdistRef
 from src.agents.mirror.writer import publish_built_wheel, PublishError
 from src.agents.prefetch.receipt import PrefetchFailure
@@ -179,6 +180,29 @@ async def build_from_sdist_failure(
             )
         except BuildError as e:
             raise IntegrateError(e.reason, e.detail) from e
+
+        # Smoke test the wheel before it reaches the mirror.
+        # Refuses a wheel that doesn't match the pin, whose tags
+        # aren't supported by the verifier, whose RECORD is
+        # inconsistent, or whose modules can't be found by
+        # find_spec in a container running the verifier image.
+        #
+        # The smoke test runs on newly built wheels only —
+        # publish_built_wheel's idempotent check short-circuits
+        # before this point on a cache hit, so a wheel that's
+        # already in the mirror (and was validated when it was
+        # first published) isn't re-validated on every prefetch.
+        try:
+            await smoke_test(
+                wheel_container_path=built.wheel_path,
+                wheel_host_path=workdir_host / "out" / built.wheel_path.name,
+                expected_name=sdist_ref.name,
+                expected_version=sdist_ref.version,
+            )
+        except SmokeError as e:
+            raise IntegrateError(
+                f"smoke_failed_{e.reason}", e.detail,
+            ) from e
 
         try:
             wheel_dir_host = publish_built_wheel(
