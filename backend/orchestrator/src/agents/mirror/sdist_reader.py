@@ -1,25 +1,3 @@
-"""
-Read [build-system].requires from an sdist tarball, in memory.
-
-Bounded and defensive:
-  - The tarball is read into a BytesIO, never extracted to disk.
-  - Individual members are read up to a size limit.
-  - Only one member is read: pyproject.toml at the sdist's root.
-  - The reader tolerates the common malformation of a pyproject
-    that can't be parsed, returning [] rather than raising — the
-    resolver then falls back to pip's default, same as if there
-    were no pyproject.toml at all.
-
-Design note: the reader never calls any code from the sdist. It
-reads bytes. Parsing TOML is a pure data operation. Nothing in the
-extracted content executes in this process.
-
-Why not extract the whole tarball: an sdist is untrusted input
-from a repo we don't control. Tar bombs, path traversal, symlinks
-pointing outside — every one of those is a real attack on a
-process that extracts. Reading one member by name and parsing it
-as data eliminates the class entirely.
-"""
 from __future__ import annotations
 
 import io
