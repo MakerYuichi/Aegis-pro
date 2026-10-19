@@ -102,6 +102,8 @@ services:
       DOCKER_HOST: tcp://docker-proxy:2375
       VERIFIER_PIP_CACHE_HOST_DIR: ${PWD}/verifier-pip-cache
       VERIFIER_PREFETCH_NETWORK: aegis-prefetch
+      MIRROR_HOST_DIR: ${PWD}/mirror
+      MIRROR_CONTAINER_DIR: /mirror
     depends_on:
       postgres:
         condition: service_healthy
@@ -119,6 +121,7 @@ services:
       - ./verifier-workdir:/verifier-workdir
       - ./hf-cache:/home/aegis/.cache
       - ./verifier-pip-cache:/verifier-pip-cache
+      - ./mirror:/mirror
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
 
