@@ -254,7 +254,15 @@ def run_pip_download(
     --require-hashes against the lock file the prefetcher
     produces, where every line does carry a hash. The split is:
     prefetch establishes, verify enforces.
+
+    EXTRA_FIND_LINKS: when set, pip additionally searches the
+    given directory for wheels before falling back to the index.
+    The retry path sets this to a mirror directory containing a
+    wheel the build pipeline produced for an sdist-only package.
+    Multiple paths are separated by the OS path separator.
     """
+    extra = os.environ.get("EXTRA_FIND_LINKS", "").strip()
+
     argv = [
         sys.executable, "-m", "pip", "download",
         "--no-deps",
@@ -262,12 +270,18 @@ def run_pip_download(
         "--index-url", index_url,
         "--dest", str(dest),
         "--no-cache-dir",
-        "-r", str(lockfile_path),
     ]
+    if extra:
+        for path in extra.split(os.pathsep):
+            path = path.strip()
+            if path:
+                argv.extend(["--find-links", path])
+    argv.extend(["-r", str(lockfile_path)])
+
     proc = subprocess.run(
         argv, capture_output=True, text=True, timeout=300,
     )
-    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "") 
 
 def _identify_failing_pin(
     group: list[dict],

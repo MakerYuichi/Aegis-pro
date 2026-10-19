@@ -32,7 +32,12 @@ from pathlib import Path
 
 
 SOURCE_PATH = Path("/build/source.tar.gz")
-SOURCE_DIR = Path("/build/source")
+# Extract into /tmp rather than /build/source. /build is on the
+# read-only root filesystem (the container runs --read-only), so
+# only the explicitly-mounted paths are writable. /tmp is a tmpfs
+# mount added by the orchestrator's _build_argv, so it's writable
+# and memory-backed.
+SOURCE_DIR = Path("/tmp/build/source")
 WHEELHOUSE = Path("/wheelhouse")
 OUT_DIR = Path("/build/out")
 
@@ -45,7 +50,11 @@ def main() -> int:
     if not OUT_DIR.is_dir():
         OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Extract with filter="data" — the safe filter from Python 3.12
+    # Create the extraction directory. /tmp is a tmpfs mount
+    # added by the orchestrator; /build is read-only.
+    SOURCE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Extract with filter="data"
     # (available in 3.11 via the filter argument in 3.11.4+). This
     # strips absolute paths, refuses path traversal, and rejects
     # device files. The reader has already validated the tarball's
