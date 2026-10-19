@@ -546,6 +546,7 @@ async def _fetch_sdist_ref(
                 upload_time=f["upload_time_iso_8601"],
                 name=name,
                 version=version,
+                size_bytes=f.get("size"),
             )
     return None
 
