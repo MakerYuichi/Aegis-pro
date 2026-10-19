@@ -64,6 +64,7 @@ async def build_sdist(
     wheelhouse_dir: Path,
     entrypoint_host_path: Path,
     workdir_host_path: Path,
+    workdir_container_path: Path,
     timeout_seconds: int | None = None,
 ) -> BuildOutput:
     """
@@ -95,7 +96,7 @@ async def build_sdist(
     container_name = f"aegis-build-{run_id}"
 
     out_dir_host = workdir_host_path / "out"
-    out_dir_host.mkdir(parents=True, exist_ok=True)
+    out_dir_container = workdir_container_path / "out"
 
     argv = _build_argv(
         container_name=container_name,
@@ -104,6 +105,7 @@ async def build_sdist(
         entrypoint_host=entrypoint_host_path,
         out_host=out_dir_host,
     )
+    logger.info(f"build_sdist argv: {argv}")
 
     start = time.monotonic()
     proc = await asyncio.create_subprocess_exec(
@@ -137,7 +139,7 @@ async def build_sdist(
             f"tail={tail!r}",
         )
 
-    wheel = _validate_and_copy_output(out_dir_host, workdir_host_path)
+    wheel = _validate_and_copy_output(out_dir_container, workdir_container_path)
 
     logger.info(
         f"build_sdist: {wheel.wheel_path.name} "
@@ -171,6 +173,7 @@ def _build_argv(
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
         "--pids-limit", "64",
+        "--tmpfs", "/tmp:rw,size=512m,mode=1777",
         "--user", f"{uid}:{gid}",
         "--memory", settings.BUILD_CONTAINER_MEMORY_LIMIT,
         "--cpus", settings.BUILD_CONTAINER_CPU_LIMIT,
