@@ -1,0 +1,1 @@
+"""Hostile fixtures for the smoke test and the build sandbox."""
