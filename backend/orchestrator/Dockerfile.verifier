@@ -1,23 +1,22 @@
 FROM python:3.11-slim
 
-# The Verifier runs the target repo's test command inside this
-# image with --network none. The base python:3.11-slim image ships
-# the stdlib and nothing else, so any `python -m pytest` invocation
-# fails with "No module named pytest" before any test runs.
-#
-# Pre-installing pytest here is a one-time cost that removes a
-# 30-second pip-install from every verification. The image stays
-# minimal: pytest and its dependencies, no application code.
-#
-# Version pinning: pytest 8.x is the current stable line. The pin
-# is deliberate — a floating `pytest` in a sandbox that runs
-# untrusted code is a supply-chain hazard. Bump this on purpose.
+# git is required by many test suites, including AEGIS PRO's own
+# (test_repo_clone.py, test_github_service.py, and others spawn
+# `git` subprocesses). Without it, those tests fail with
+# FileNotFoundError, which surfaces as a Python traceback in the
+# container's stdout — misreported by the orchestrator as a test
+# failure.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir \
-    packaging==24.2 \
     pytest==8.3.4 \
     pytest-asyncio==0.25.0 \
     pytest-cov==6.0.0 \
-    pytest-mock==3.14.0 
+    pytest-mock==3.14.0 \
+    httpx==0.28.1 \
+    packaging==24.2
 
 # Working directory matches the mount point the verifier uses when
 # it spawns a sibling container. `-w <container_workdir>/<uuid>/repo`

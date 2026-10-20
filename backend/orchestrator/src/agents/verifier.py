@@ -525,16 +525,53 @@ class HostedVerifier(Verifier):
             fout, _ = await fetch.communicate()
             if fetch.returncode != 0:
                 return False, fout.decode("utf-8", errors="replace")[:4000]
+        
+        # Diagnostic: confirm the clone has the expected structure.
+        repo_root = workdir / "repo"
+        fixture_path = repo_root / "backend" / "orchestrator" / "tests" / "fixtures" / "repos" / "mini_python"
+        logger.info(f"VERIFIER CLONE: repo_root exists={repo_root.is_dir()}")
+        logger.info(f"VERIFIER CLONE: fixture exists={fixture_path.is_dir()}")
+        if repo_root.is_dir():
+            bo = repo_root / "backend" / "orchestrator"
+            if bo.is_dir():
+                items = sorted(p.name for p in bo.iterdir())[:10]
+                logger.info(f"VERIFIER CLONE: backend/orchestrator contents={items}")
+            else:
+                logger.info(f"VERIFIER CLONE: backend/orchestrator missing")
+                
         return True, ""
 
     async def _apply_diff(self, workdir, diff, reset: bool = False) -> tuple[bool, str]:
         repo_dir = workdir / "repo"
         if reset:
             # Discard any previously-applied diff before retrying.
-            await asyncio.create_subprocess_exec(
-                "git", "-C", str(repo_dir), "checkout", "--", ".",
+            #
+            # Two changes from the previous version, both necessary
+            # for a retry to actually start clean:
+            #
+            # 1. await communicate(), not just create_subprocess_exec.
+            #    create_subprocess_exec returns when the process
+            #    starts, not when it exits. Without communicate(),
+            #    the reset races with the following git apply for
+            #    .git/index.lock, and the process is never reaped.
+            #
+            # 2. git reset --hard plus git clean -fd, not
+            #    checkout -- . The latter restores tracked files but
+            #    doesn't remove files that a previous diff added.
+            #    reset --hard discards tracked changes; clean -fd
+            #    removes untracked files the diff created. Both are
+            #    needed for a true reset.
+            reset_proc = await asyncio.create_subprocess_exec(
+                "git", "-C", str(repo_dir), "reset", "--hard",
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             )
+            await reset_proc.communicate()
+            clean_proc = await asyncio.create_subprocess_exec(
+                "git", "-C", str(repo_dir), "clean", "-fd",
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            await clean_proc.communicate()
+
         diff_file = workdir / "fix.diff"
         text = diff if diff.endswith("\n") else diff + "\n"
         text = _normalize_diff_paths(text)
@@ -1027,6 +1064,7 @@ async def _run_in_docker(
         "--memory", memory_limit,
         "--cpus", cpu_limit,
         "-v", f"{host_path}:{container_workdir}/{container_relative}",
+        "-v", f"{settings.VERIFIER_HOST_WORKDIR}:/work-investigator",
     ]
 
     effective_command = command
