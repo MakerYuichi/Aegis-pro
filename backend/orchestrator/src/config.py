@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     # the orchestrator at the same path — so reads and writes from
     # the orchestrator see the cache directly.
     VERIFIER_PIP_CACHE_HOST_DIR: str = "/var/lib/aegis/pip-cache"
+    VERIFIER_PIP_CACHE_CONTAINER_DIR: str = "/verifier-pip-cache"
 
     # Name of the user-defined Docker network the prefetcher runs
     # on. The network's resolver only answers for hosts in
@@ -109,7 +110,7 @@ class Settings(BaseSettings):
     # Bound on the prefetcher container's wall-clock time. First
     # run for a repo can be slow (torch wheels); warm runs are
     # fast. 600s is generous.
-    VERIFIER_PREFETCH_TIMEOUT_SECONDS: int = 600
+    VERIFIER_PREFETCH_TIMEOUT_SECONDS: int = 1800
 
     # Same shape as the verifier container's limits. The prefetcher
     # downloads; it doesn't run tests, so the memory need is lower.
@@ -162,6 +163,7 @@ class Settings(BaseSettings):
     BUILD_RESOLVER_MAX_REQUIREMENTS: int = 50
     BUILD_RESOLVER_MAX_DECOMPRESSED_BYTES: int = 500 * 1024 * 1024
     BUILD_SMOKE_TIMEOUT_SECONDS: int = 60
+    BUILD_ON_MISS_ENABLED: bool = True
     
     CURATOR_FEW_SHOT: bool = False
     CURATOR_MAX_OUTCOMES: int = 3
