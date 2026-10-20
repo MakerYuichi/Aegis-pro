@@ -82,7 +82,10 @@ async def test_no_manifest_skips_prefetch(fake_repo, tmp_path):
     ), patch(
         "src.agents.verifier.run_prefetch_with_build_on_miss",
         new=AsyncMock(),
-    ) as mock_prefetch, patch(
+    ) as mock_prefetch, patch.object(
+        HostedVerifier, "_apply_diff",
+        new=AsyncMock(return_value=(True, "")),
+    ), patch(
         "src.agents.verifier._run_in_docker",
         new=AsyncMock(return_value=(0, "1 passed")),
     ) as mock_docker:

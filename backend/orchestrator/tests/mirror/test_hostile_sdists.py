@@ -303,12 +303,29 @@ class _FixtureDir:
 
     def __init__(self):
         self.uuid = uuid.uuid4().hex[:12]
-        self.container_dir = (
-            Path(settings.VERIFIER_CONTAINER_WORKDIR) / f"hostile-{self.uuid}"
-        )
-        self.host_dir = (
-            Path(settings.VERIFIER_HOST_WORKDIR) / f"hostile-{self.uuid}"
-        )
+        base = Path(settings.VERIFIER_CONTAINER_WORKDIR)
+        host_base = Path(settings.VERIFIER_HOST_WORKDIR)
+
+        # CI (GitHub Actions) doesn't mount verifier-workdir at
+        # the container path. Fall back to a temp directory when
+        # the configured path isn't writable. Docker-required
+        # tests in CI are expected to run inside the orchestrator
+        # container (where the mount exists) or not at all; this
+        # fallback lets non-Docker tests that construct a
+        # _FixtureDir not crash on import.
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            # Verify write permission by creating a test file.
+            probe = base / f".probe-{self.uuid}"
+            probe.write_text("")
+            probe.unlink()
+        except (OSError, PermissionError):
+            import tempfile
+            base = Path(tempfile.mkdtemp(prefix="verifier-workdir-"))
+            host_base = base
+
+        self.container_dir = base / f"hostile-{self.uuid}"
+        self.host_dir = host_base / f"hostile-{self.uuid}"
 
     def __enter__(self):
         self.container_dir.mkdir(parents=True, exist_ok=True)

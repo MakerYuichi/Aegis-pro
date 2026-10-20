@@ -63,6 +63,41 @@ def pytest_collection_modifyitems(config, items):
         if "requires_docker" in item.keywords:
             item.add_marker(skip_marker)
 
+def pytest_collection_modifyitems(config, items):
+    """Skip Docker tests when the verifier workdir mount isn't
+    available. CI (GitHub Actions) doesn't mount verifier-workdir
+    at the container path, so the fixture dir can't be created
+    and every Docker test would fail at setup rather than being
+    skipped. The Docker tests are meant to run via
+    `./dev.sh exec orchestrator python -m pytest`, where the
+    mount exists."""
+    from src.config import settings
+    from pathlib import Path
+
+    workdir_available = False
+    try:
+        p = Path(settings.VERIFIER_CONTAINER_WORKDIR)
+        p.mkdir(parents=True, exist_ok=True)
+        probe = p / ".pytest-probe"
+        probe.write_text("")
+        probe.unlink()
+        workdir_available = True
+    except (OSError, PermissionError):
+        pass
+
+    if workdir_available:
+        return
+
+    skip = pytest.mark.skip(
+        reason=(
+            f"verifier workdir {settings.VERIFIER_CONTAINER_WORKDIR} "
+            f"not writable; run Docker tests via "
+            f"'./dev.sh exec orchestrator'"
+        ),
+    )
+    for item in items:
+        if "requires_docker" in item.keywords:
+            item.add_marker(skip)
 
 @pytest.fixture
 async def _assert_no_leaked_containers():
