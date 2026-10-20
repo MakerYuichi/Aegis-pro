@@ -48,6 +48,13 @@ from pathlib import Path
 from loguru import logger
 
 from src.config import settings
+from src.agents.prefetch.manifest_finder import find_manifest, ManifestRef
+from src.agents.prefetch.runner import (
+    PrefetchError,
+    PrefetchResult,
+    run_prefetch,
+    run_prefetch_with_build_on_miss,
+)
 
 @dataclass
 class RealignmentReport:
@@ -291,6 +298,85 @@ class HostedVerifier(Verifier):
                     f"{len(realignment.hunks_flagged)} flagged"
                 )
 
+            # ── Prefetch the repo's dependencies ────────────────
+            #
+            # Runs once, before the attempt loop. The cache is
+            # keyed by manifest hash, so re-running the same repo
+            # hits the cache; different repos get different
+            # caches. This is where a source-only dependency
+            # triggers a build (if BUILD_ON_MISS_ENABLED).
+            #
+            # A prefetch failure is a verification failure, not an
+            # exception. The reason string names what went wrong —
+            # from "no manifest, proceeding" to "sdist_only and
+            # build disabled" to "mirror_dir_missing".
+            manifest_ref: ManifestRef | None = find_manifest(
+                workdir / "repo", language,
+            )
+
+            cache_host_path: Path | None = None
+            manifest_relative_path: str | None = None
+
+            if manifest_ref is not None:
+                manifest_container = workdir / "repo" / manifest_ref.path
+                manifest_relative_path = manifest_ref.path.as_posix()
+
+                try:
+                    if settings.BUILD_ON_MISS_ENABLED:
+                        prefetch_result = await run_prefetch_with_build_on_miss(
+                            manifest_container_path=manifest_container,
+                            entrypoint_container_path=Path(
+                                "/app/scripts/prefetch_entrypoint.py"
+                            ),
+                            cache_container_path=Path(
+                                settings.VERIFIER_PIP_CACHE_CONTAINER_DIR
+                            ),
+                            cache_host_path=Path(
+                                settings.VERIFIER_PIP_CACHE_HOST_DIR
+                            ),
+                            mirror_container_path=Path(
+                                settings.MIRROR_CONTAINER_DIR
+                            ),
+                            mirror_host_path=Path(
+                                settings.MIRROR_HOST_DIR
+                            ),
+                            build_entrypoint_container_path=Path(
+                                "/app/scripts/build_entrypoint.py"
+                            ),
+                        )
+                    else:
+                        prefetch_result = await run_prefetch(
+                            manifest_container_path=manifest_container,
+                            entrypoint_container_path=Path(
+                                "/app/scripts/prefetch_entrypoint.py"
+                            ),
+                            cache_container_path=Path(
+                                settings.VERIFIER_PIP_CACHE_CONTAINER_DIR
+                            ),
+                            cache_host_path=Path(
+                                settings.VERIFIER_PIP_CACHE_HOST_DIR
+                            ),
+                        )
+                    cache_host_path = prefetch_result.cache_host_path
+                except PrefetchError as e:
+                    logger.warning(
+                        f"Verifier: prefetch failed for "
+                        f"{repo_name}: {e.reason}: {e.detail}"
+                    )
+                    return VerificationResult(
+                        passed=False,
+                        reason=f"prefetch_failed_{e.reason}",
+                        output=e.detail,
+                        duration_ms=self._ms_since(start),
+                        verifier="hosted",
+                        realignment=realignment,
+                    )
+            else:
+                logger.info(
+                    f"Verifier: no dependency manifest in "
+                    f"{repo_name}; skipping prefetch"
+                )
+
             attempts: list[dict] = []
             max_attempts = max(1, settings.VERIFY_MAX_ATTEMPTS)
             current_diff = diff
@@ -340,6 +426,8 @@ class HostedVerifier(Verifier):
                     timeout=settings.VERIFY_TIMEOUT_SECONDS,
                     memory_limit=settings.VERIFIER_MEMORY_LIMIT,
                     cpu_limit=settings.VERIFIER_CPU_LIMIT,
+                    cache_host_path=cache_host_path,
+                    manifest_relative_path=manifest_relative_path,
                 )
 
                 passed = exit_code == 0
@@ -887,6 +975,8 @@ async def _run_in_docker(
     timeout: int,
     memory_limit: str,
     cpu_limit: str,
+    cache_host_path: Path | None = None,
+    manifest_relative_path: str | None = None,
 ) -> tuple[int, str]:
     """
     Run `command` inside a fresh container with the repo bind-mounted
@@ -919,17 +1009,57 @@ async def _run_in_docker(
     # No user input (repo name, diff, stack trace) flows into argv. If
     # you add a new argument here, it must come from config or a
     # generated value — never from customer input.
+        # The container runs as the invoking user so files it writes
+    # to the bind-mounted workspace are owned by the orchestrator's
+    # UID — otherwise cleanup leaves root-owned residue on the
+    # host. --read-only plus non-root means pip can't write to
+    # the rootfs; PIP_NO_CACHE_DIR avoids the pip cache, and
+    # HOME points at a tmpfs-backed directory. When a cache is
+    # mounted, the install goes to /tmp/site-packages and
+    # PYTHONPATH points there for the test command.
     argv = [
         "docker", "run", "--rm",
         "--name", container_name,
         "--network", "none",
+        "--user", f"{os.getuid()}:{os.getgid()}",
+        "-e", "HOME=/tmp/aegis-home",
+        "-e", "PIP_NO_CACHE_DIR=1",
         "--memory", memory_limit,
         "--cpus", cpu_limit,
         "-v", f"{host_path}:{container_workdir}/{container_relative}",
+    ]
+
+    effective_command = command
+    if cache_host_path is not None and manifest_relative_path is not None:
+        argv.extend([
+            "-v", f"{cache_host_path}:/cache:ro",
+            "-e", "PYTHONPATH=/tmp/site-packages",
+        ])
+        # --no-deps was removed. The prefetcher's cache contains
+        # the full transitive closure — every wheel any direct
+        # dependency needs. The manifest only names the direct
+        # deps. With --no-deps, pip installs only what the
+        # manifest names and skips the transitives; pytest then
+        # fails at import time on the first missing plugin
+        # (pygments, iniconfig, pluggy, packaging, …).
+        # Removing --no-deps lets pip resolve against the cache.
+        # --no-index still prevents network access; the install
+        # is entirely local.
+        install_cmd = (
+            "mkdir -p /tmp/aegis-home /tmp/site-packages && "
+            "pip install --no-index --find-links /cache "
+            "--quiet "
+            "--target /tmp/site-packages "
+            f"-r {manifest_relative_path} "
+            "&& "
+        )
+        effective_command = install_cmd + command
+
+    argv.extend([
         "-w", container_path,
         image,
-        "sh", "-c", command,
-    ]
+        "sh", "-c", effective_command,
+    ])
 
     proc = await asyncio.create_subprocess_exec(
         *argv,
