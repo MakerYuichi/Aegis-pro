@@ -118,9 +118,20 @@ def sanitize(path: Path) -> list[dict]:
         if line.startswith("-"):
             token = line.split()[0]
             if token in _REJECTED_DIRECTIVES:
+                # Allow `-e .` (editable install of the repo itself).
+                # The repo's own code is what the tests will import;
+                # installing it editable adds no attack surface beyond
+                # what the tests already do. Reject every other form
+                # of editable install — `-e git+https://...`,
+                # `-e /path/to/something`, `-e <pkg-name>` — those
+                # fetch code from outside the repo.
+                parts = line.split()
+                if len(parts) == 2 and parts[1] in (".", "./"):
+                    continue  # silently strip; pip install will handle it
                 raise EntryError(
                     f"rejected_directive: {token} at line {lineno}"
                 )
+
             if token in _STRIPPED_DIRECTIVES:
                 continue
             raise EntryError(
@@ -265,7 +276,6 @@ def run_pip_download(
 
     argv = [
         sys.executable, "-m", "pip", "download",
-        "--no-deps",
         "--only-binary=:all:",
         "--index-url", index_url,
         "--dest", str(dest),
@@ -279,7 +289,7 @@ def run_pip_download(
     argv.extend(["-r", str(lockfile_path)])
 
     proc = subprocess.run(
-        argv, capture_output=True, text=True, timeout=300,
+        argv, capture_output=True, text=True, timeout=900,
     )
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "") 
 
