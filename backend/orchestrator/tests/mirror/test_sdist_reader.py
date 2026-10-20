@@ -141,13 +141,35 @@ def test_not_a_tarball_raises():
     assert exc_info.value.reason == "not_a_tarball"
 
 
-def test_symlinked_pyproject_ignored():
-    """A symlink in place of a real pyproject is skipped. Reading
-    through symlinks would let a hostile sdist point at any file on
-    the orchestrator's filesystem."""
+def test_absolute_symlinked_pyproject_refused():
+    """A symlink pointing outside the package is refused outright.
+
+    validate_member_names runs before the pyproject lookup, so an
+    absolute symlink anywhere in the tarball — even one that isn't
+    the pyproject — gets the whole tarball refused. That's stricter
+    than skipping the pyproject; it's correct, because a tarball
+    that carries an absolute symlink is hostile.
+    """
     data = _make_tarball_with_symlink(
         target="/etc/passwd",
         link_name="pkg-1.0/pyproject.toml",
+    )
+    with pytest.raises(SdistReaderError) as exc_info:
+        read_build_system_requires(data)
+    assert exc_info.value.reason == "unsafe_tar_member"
+    assert "/etc/passwd" in exc_info.value.detail
+
+
+def test_relative_symlinked_pyproject_ignored():
+    """A symlink with a relative target inside the package is
+    allowed by validate_member_names. The reader skips it because
+    member.isfile() is False for symlinks — reading through would
+    follow the link to the target file, and a symlinked
+    pyproject.toml is not the sdist's real pyproject."""
+    data = _make_tarball_with_symlink(
+        target="real_setup.py",
+        link_name="pkg-1.0/pyproject.toml",
+        extra={"pkg-1.0/real_setup.py": b"# real setup"},
     )
     assert read_build_system_requires(data) == []
 

@@ -30,7 +30,7 @@ from dataclasses import dataclass
 # Cap on how much of stdout we parse. pip can emit hundreds of
 # kilobytes on a slow network. We only need the last line; anything
 # longer than this and we assume the container is broken.
-MAX_RECEIPT_LINE_BYTES = 16 * 1024
+MAX_RECEIPT_LINE_BYTES = 256 * 1024
 
 
 class ReceiptError(Exception):

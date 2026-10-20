@@ -6,6 +6,7 @@ import time
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+import os
 
 from loguru import logger
 
@@ -417,7 +418,10 @@ async def _retry_with_find_links(
         "-e", f"MANIFEST_PATH={MANIFEST_IN_PREFETCHER}",
         "-e", f"CACHE_DIR={CACHE_IN_PREFETCHER}",
         "-e", f"LOCK_PATH={CACHE_IN_PREFETCHER}/requirements.lock",
-        "-e", f"EXTRA_FIND_LINKS={FIND_LINKS_IN_PREFETCHER}",
+        "-e", (
+            f"EXTRA_FIND_LINKS="
+            f"{FIND_LINKS_IN_PREFETCHER}{os.pathsep}{CACHE_IN_PREFETCHER}"
+        ),
         PREFETCHER_IMAGE,
         "python", ENTRYPOINT_IN_PREFETCHER,
     ]
@@ -546,6 +550,7 @@ async def _fetch_sdist_ref(
                 upload_time=f["upload_time_iso_8601"],
                 name=name,
                 version=version,
+                size_bytes=f.get("size"),
             )
     return None
 

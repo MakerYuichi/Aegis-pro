@@ -175,6 +175,7 @@ def _build_argv(
         "--pids-limit", "64",
         "--tmpfs", "/tmp:rw,size=512m,mode=1777",
         "--user", f"{uid}:{gid}",
+        "--add-host", "host.docker.internal:host-gateway",
         "--memory", settings.BUILD_CONTAINER_MEMORY_LIMIT,
         "--cpus", settings.BUILD_CONTAINER_CPU_LIMIT,
         "-v", f"{sdist_host}:/build/source.tar.gz:ro",

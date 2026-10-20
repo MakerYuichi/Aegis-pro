@@ -104,20 +104,10 @@ class ResolutionOutcome:
 
 @dataclass(frozen=True)
 class SdistRef:
-    """
-    A reference to an sdist, as returned by PyPI's JSON API.
-
-    url:             the download URL on files.pythonhosted.org.
-    filename:        e.g. "sentence-transformers-2.2.2.tar.gz".
-    sha256:          the sdist's digest, from PyPI.
-    upload_time:     ISO 8601, used as the date bound for build-
-                     requirement resolution.
-    name:            normalized package name.
-    version:         exact version.
-    """
     url: str
     filename: str
     sha256: str
     upload_time: str
     name: str
     version: str
+    size_bytes: int | None = None

@@ -1,3 +1,26 @@
+"""
+Read [build-system].requires from an sdist tarball, in memory.
+
+Bounded and defensive:
+  - The tarball is read via safe_tar, which caps decompressed
+    bytes and refuses malicious member names.
+  - Individual members are read up to a size limit.
+  - Only one member is read: pyproject.toml at the sdist's root.
+  - The reader tolerates the common malformation of a pyproject
+    that can't be parsed, returning [] rather than raising — the
+    resolver then falls back to pip's default, same as if there
+    were no pyproject.toml at all.
+
+Design note: the reader never calls any code from the sdist. It
+reads bytes. Parsing TOML is a pure data operation. Nothing in the
+extracted content executes in this process.
+
+Why not extract the whole tarball: an sdist is untrusted input
+from a repo we don't control. Tar bombs, path traversal, symlinks
+pointing outside — every one of those is a real attack on a
+process that extracts. Reading one member by name and parsing it
+as data eliminates the class entirely.
+"""
 from __future__ import annotations
 
 import io
@@ -7,6 +30,12 @@ from typing import Optional
 
 from loguru import logger
 
+from src.agents.mirror.safe_tar import (
+    SafeTarError,
+    open_safe_tar,
+    scan_member_count,
+    validate_member_names,
+)
 from src.agents.mirror.types import BuildRequirement
 from src.agents.prefetch.sanitize import normalize_name
 
@@ -16,8 +45,7 @@ from src.agents.prefetch.sanitize import normalize_name
 MAX_MEMBER_BYTES = 64 * 1024
 
 # Cap on the number of members we're willing to iterate while
-# searching for pyproject.toml. A hostile tarball could contain
-# a million empty members to burn CPU during the scan.
+# searching for pyproject.toml.
 MAX_MEMBERS_TO_SCAN = 10_000
 
 
@@ -43,37 +71,66 @@ def read_build_system_requires(
       - the pyproject.toml can't be parsed
       - the [build-system].requires key is missing
 
-    In all of those cases the caller falls back to pip's default
-    (`setuptools>=40.8.0`). That matches how pip itself handles a
-    legacy setup.py-only sdist.
-
-    Raises SdistReaderError only when the tarball isn't a valid tar
-    or is malformed beyond reading. A reader error is an
-    infrastructure failure; the caller reports
-    `sdist_malformed` rather than the pip-default fallback.
+    Raises SdistReaderError on infrastructure failure:
+      - the tarball is malformed (`not_a_tarball`, `corrupt_tarball`)
+      - decompression exceeds the cap (`decompressed_too_large`)
+      - the tarball has too many members (`too_many_members`)
+      - a member name is unsafe (`unsafe_tar_member`)
+      - the pyproject member is too large (`pyproject_too_large`)
     """
-    try:
-        tf = tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:*")
-    except tarfile.TarError as e:
-        raise SdistReaderError(
-            "not_a_tarball", f"{type(e).__name__}: {e}"
-        ) from e
+    # tarfile has no rewind. Each pass needs a fresh TarFile over
+    # the same decompressed bytes. Three passes:
+    #   1. member count bound
+    #   2. member name validation
+    #   3. pyproject lookup and read
+    # The decompression is bounded by open_safe_tar's cap, so the
+    # total cost is three times a bounded amount.
 
-    with tf:
+    # ── Pass 1: member count ────────────────────────────────────
+    try:
+        tf1, counter = open_safe_tar(tarball_bytes)
+    except SafeTarError as e:
+        raise SdistReaderError(e.reason, e.detail) from e
+
+    try:
+        with tf1:
+            scan_member_count(tf1, max_members=MAX_MEMBERS_TO_SCAN)
+    except SafeTarError as e:
+        raise SdistReaderError(e.reason, e.detail) from e
+
+    # ── Pass 2: member name validation ──────────────────────────
+    # Absolute paths, path traversal, absolute symlinks, and
+    # traversal symlinks are refused here. This is where the
+    # `test_absolute_symlinked_pyproject_refused` test expects
+    # `unsafe_tar_member` to fire.
+    try:
+        tf2, _ = open_safe_tar(tarball_bytes)
+    except SafeTarError as e:
+        raise SdistReaderError(e.reason, e.detail) from e
+
+    try:
+        with tf2:
+            validate_member_names(tf2)
+    except SafeTarError as e:
+        raise SdistReaderError(e.reason, e.detail) from e
+
+    # ── Pass 3: pyproject lookup and read ───────────────────────
+    try:
+        tf3, _ = open_safe_tar(tarball_bytes)
+    except SafeTarError as e:
+        raise SdistReaderError(e.reason, e.detail) from e
+
+    text_bytes: Optional[bytes] = None
+    try:
         pyproject_member: Optional[tarfile.TarInfo] = None
         scanned = 0
-        for member in tf:
+        for member in tf3:
             scanned += 1
             if scanned > MAX_MEMBERS_TO_SCAN:
                 raise SdistReaderError(
                     "too_many_members",
-                    f"scanned {MAX_MEMBERS_TO_SCAN}, "
-                    f"still no pyproject.toml",
+                    f"scanned {MAX_MEMBERS_TO_SCAN}",
                 )
-            # Only accept a regular file at depth 2 whose name ends
-            # in /pyproject.toml. Sdists place pyproject at
-            # `<root>/pyproject.toml` where `<root>` is
-            # `<name>-<version>`.
             if not member.isfile():
                 continue
             parts = member.name.split("/")
@@ -98,12 +155,19 @@ def read_build_system_requires(
                 f"> {MAX_MEMBER_BYTES}",
             )
 
-        raw = tf.extractfile(pyproject_member)
+        raw = tf3.extractfile(pyproject_member)
         if raw is None:
             raise SdistReaderError(
                 "pyproject_unreadable", pyproject_member.name,
             )
         text_bytes = raw.read(MAX_MEMBER_BYTES)
+    finally:
+        tf3.close()
+
+    if text_bytes is None:
+        # Defensive — the return [] on the "no pyproject" path
+        # short-circuits before this is reachable.
+        return []
 
     try:
         data = tomllib.loads(text_bytes.decode("utf-8"))
@@ -132,10 +196,6 @@ def read_build_system_requires(
     return parsed
 
 
-# A permissive split of `name[extras]specifier`. Extras are dropped
-# here — build requirements rarely carry them, and pip treats them
-# as part of the name for resolution. The resolver adds extras back
-# when the requirement string contains them.
 _REQ_RE = None  # lazy import to avoid a module-level import cycle
 
 
@@ -154,9 +214,7 @@ def _parse_requirement(
     not to condition on the environment.
 
     Returns None when the requirement is unparseable. That's a
-    warning, not an error: a bad requirement string in a
-    pyproject.toml gets skipped, and the resolver proceeds with the
-    ones it understands.
+    warning, not an error.
     """
     import re
     global _REQ_RE

@@ -13,11 +13,11 @@ FROM python:3.11-slim
 # is deliberate — a floating `pytest` in a sandbox that runs
 # untrusted code is a supply-chain hazard. Bump this on purpose.
 RUN pip install --no-cache-dir \
+    packaging==24.2 \
     pytest==8.3.4 \
     pytest-asyncio==0.25.0 \
     pytest-cov==6.0.0 \
-    pytest-mock==3.14.0 \
-    httpx==0.28.1
+    pytest-mock==3.14.0 
 
 # Working directory matches the mount point the verifier uses when
 # it spawns a sibling container. `-w <container_workdir>/<uuid>/repo`
