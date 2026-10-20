@@ -118,7 +118,8 @@ services:
       # on the host. The daemon interprets -v paths against the host,
       # not against this container — see the Docker-out-of-Docker
       # note in src/agents/verifier.py.
-      - ./verifier-workdir:/verifier-workdir
+      - ./verifier-workdir:/work
+      - ./verifier-workdir:/work-investigator
       - ./hf-cache:/home/aegis/.cache
       - ./verifier-pip-cache:/verifier-pip-cache
       - ./mirror:/mirror
