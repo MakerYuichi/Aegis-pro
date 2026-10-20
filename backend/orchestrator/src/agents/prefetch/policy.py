@@ -80,16 +80,37 @@ class IndexRoute:
     reason: str
 
 
+# Torch-family packages always route to the CPU wheel index,
+# regardless of whether the pin names a variant. On aarch64 and
+# x86_64, PyPI's default torch wheel pulls the entire CUDA stack
+# (nvidia-cudnn, nvidia-cublas, nvidia-nccl, triton, ...) — 3GB
+# of libraries that are useless on a machine without an NVIDIA
+# GPU, and that the verifier never uses. The CPU wheel is ~180MB
+# and has no CUDA dependencies.
+#
+# This overrides the manifest. If a customer's manifest says
+# torch==2.6.0 and they expect the GPU wheel, the policy wins.
+# The verifier is a CPU-only environment by design; the GPU
+# stack has no place in a test sandbox.
+_TORCH_FAMILY = frozenset({"torch", "torchvision", "torchaudio"})
+_TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+
+
 def route_pin(pin: PackagePin) -> IndexRoute:
     """
     Return the IndexRoute for this pin.
 
-    Raises PolicyError when the pin names a local variant we don't
-    have an override for. Guessing would be worse than failing:
-    a `torch==2.14.0+rocm` pin routed to PyPI would fetch a wheel
-    that doesn't exist, and routed to a random mirror could fetch
-    a build we haven't vetted.
+    Torch-family packages route to the CPU wheel index
+    unconditionally. Other packages route by variant override,
+    base-name override, or default.
     """
+    # Torch-family override, applied unconditionally.
+    if pin.name in _TORCH_FAMILY:
+        return IndexRoute(
+            index_url=_TORCH_CPU_INDEX,
+            reason="torch_family_cpu",
+        )
+
     if pin.local_variant:
         key = (pin.name, pin.local_variant)
         if key in VARIANT_INDEX_OVERRIDES:
@@ -107,14 +128,5 @@ def route_pin(pin: PackagePin) -> IndexRoute:
             index_url=BASE_INDEX_OVERRIDES[pin.name],
             reason="base_name_override",
         )
-
-    # Warn if a variant-only override exists for this name and the
-    # pin didn't specify it. This is the torch-no-variant case.
-    for (name, _variant) in VARIANT_INDEX_OVERRIDES:
-        if name == pin.name:
-            return IndexRoute(
-                index_url=DEFAULT_INDEX_URL,
-                reason="default_variant_mismatch",
-            )
 
     return IndexRoute(index_url=DEFAULT_INDEX_URL, reason="default")

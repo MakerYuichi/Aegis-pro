@@ -196,8 +196,18 @@ def sanitize(path: Path) -> list[dict]:
     return pins
 
 
+_TORCH_FAMILY = frozenset({"torch", "torchvision", "torchaudio"})
+_TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+
+
 def route(pin: dict) -> str:
     """Return the index URL for this pin. Mirrors policy.route_pin."""
+    # Torch-family override, applied unconditionally. On every
+    # architecture, PyPI's default torch wheel pulls the CUDA
+    # stack; the CPU wheel doesn't.
+    if pin["name"] in _TORCH_FAMILY:
+        return _TORCH_CPU_INDEX
+
     if pin["local_variant"]:
         key = (pin["name"], pin["local_variant"])
         if key in VARIANT_INDEX_OVERRIDES:
@@ -504,64 +514,91 @@ def main() -> int:
     lockfile_text = build_lockfile(pins)
     lock_path.write_text(lockfile_text, encoding="utf-8")
 
-    # 2. Group pins by index. One pip invocation per distinct index.
+    # 2. Group pins by index.
     groups: dict[str, list[dict]] = {}
     for pin in pins:
         idx = route(pin)
         groups.setdefault(idx, []).append(pin)
 
-    # 3. Download each group.
+    # 3. Download each group. If a package is sdist-only,
+    #    remove it from the group and retry with the rest.
+    #    Packages removed this way are reported in the
+    #    failure payload so the orchestrator can build them.
     all_output: list[str] = []
+    sdist_only_packages: list[dict] = []
+
     for index_url, group in groups.items():
-        group_lines = build_lockfile(group)
-        group_file = cache_dir / "_group_requirements.txt"
-        group_file.write_text(group_lines, encoding="utf-8")
-        rc, out = run_pip_download(
-            group_file, index_url, cache_dir,
-        )
-        all_output.append(f"# index: {index_url}\n{out}")
-        group_file.unlink(missing_ok=True)
-        if rc != 0:
-            print("\n".join(all_output))
+        current_group = list(group)
+        while current_group:
+            group_file = cache_dir / "_group_requirements.txt"
+            group_file.write_text(
+                build_lockfile(current_group), encoding="utf-8",
+            )
+            rc, out = run_pip_download(group_file, index_url, cache_dir)
+            all_output.append(f"# index: {index_url}\n{out}")
+            group_file.unlink(missing_ok=True)
 
-            # pip reported a fetch failure. Before declaring
-            # index_fetch_failed, find out why. Query PyPI for the
-            # specific reason and surface that instead of pip's
-            # misleading summary.
-            failing_pin = _identify_failing_pin(group, out)
+            if rc == 0:
+                break  # all remaining packages in this group downloaded
 
-            if failing_pin is not None:
-                diag = diagnose_missing_version(
-                    failing_pin,
-                    platform.python_version(),
-                    platform_tag(),
-                )
-                # Print the diagnosis as the last stdout line so
-                # the runner parses it as the failure receipt.
-                print(json.dumps({
-                    "error": diag["reason"],
-                    "detail": diag["detail"],
-                    "package": failing_pin["name"],
-                    "version": failing_pin.get("base_version", ""),
-                    "available_wheels": diag["available_wheels"],
-                    "index_url": index_url,
-                }, separators=(",", ":")))
+            failing_pin = _identify_failing_pin(current_group, out)
+            if failing_pin is None:
+                # Can't identify, fail this group.
+                print("\n".join(all_output))
+                print(f"index_fetch_failed: {index_url}", file=sys.stderr)
                 return 3
 
-            # Couldn't identify which pin failed. Fall back to the
-            # old message.
-            print(f"index_fetch_failed: {index_url}", file=sys.stderr)
+            diag = diagnose_missing_version(
+                failing_pin,
+                platform.python_version(),
+                platform_tag(),
+            )
+            if diag["reason"] == "sdist_only":
+                # Not fatal — the orchestrator will build this
+                # package via build-on-miss. Remove it from the
+                # group and retry the rest.
+                sdist_only_packages.append(failing_pin)
+                current_group = [
+                    p for p in current_group
+                    if p["name"] != failing_pin["name"]
+                ]
+                continue
+
+            # Non-sdist_only failure. Fail loudly.
+            print("\n".join(all_output))
+            print(json.dumps({
+                "error": diag["reason"],
+                "detail": diag["detail"],
+                "package": failing_pin["name"],
+                "version": failing_pin.get("base_version", ""),
+                "available_wheels": diag["available_wheels"],
+                "index_url": index_url,
+            }, separators=(",", ":")))
             return 3
 
-    # 4. Enumerate what landed. For each artifact in the cache,
-    #    parse its package name out of the filename and match it
-    #    against the manifest's package list. Transitive
-    #    dependencies are recorded too — the receipt is the full
-    #    resolved tree, not just top-level pins.
+    # 4. If any package needed building, report it after
+    #    downloading everything else. The orchestrator will
+    #    build the wheel and retry with EXTRA_FIND_LINKS.
+    if sdist_only_packages:
+        print("\n".join(all_output))
+        first = sdist_only_packages[0]
+        print(json.dumps({
+            "error": "sdist_only",
+            "detail": (
+                f"Packages requiring build: "
+                f"{', '.join(p['name'] for p in sdist_only_packages)}"
+            ),
+            "package": first["name"],
+            "version": first.get("base_version", ""),
+            "available_wheels": [],
+            "index_url": "https://pypi.org/simple/",
+            "packages_downloaded": len(list(cache_dir.glob("*.whl"))),
+        }, separators=(",", ":")))
+        return 3
+
+    # 5. Enumerate what landed.
     def _normalize_for_match(name: str) -> str:
         return re.sub(r"[-_.]+", "-", name).lower()
-
-    manifest_names = {_normalize_for_match(p["name"]) for p in pins}
 
     packages: list[dict] = []
     seen: set[str] = set()
@@ -569,7 +606,6 @@ def main() -> int:
     for artifact in sorted(cache_dir.iterdir()):
         if not artifact.is_file():
             continue
-        # Skip the lockfile and staged files.
         if artifact.name.startswith("_"):
             continue
         if artifact.name == "requirements.lock":
@@ -577,37 +613,28 @@ def main() -> int:
         if not (artifact.name.endswith(".whl")
                 or artifact.name.endswith(".tar.gz")):
             continue
-
         fname = artifact.name
         if fname.endswith(".whl"):
             stem = fname[:-4]
         else:
-            stem = fname[:-7]  # strip .tar.gz
-
-        # Wheel filenames are `{name}-{version}(-build)?-py-abi-platform.whl`.
-        # sdist filenames are `{name}-{version}.tar.gz`. In both cases
-        # the package name is `parts[0]` and the version is `parts[1]`.
+            stem = fname[:-7]
         parts = stem.split("-")
         if len(parts) < 2:
             continue
         pkg_name = _normalize_for_match(parts[0])
-
         if pkg_name in seen:
             continue
         seen.add(pkg_name)
-
         version_component = parts[1]
         if "+" in version_component:
             base_version, local_variant = version_component.split("+", 1)
         else:
             base_version, local_variant = version_component, ""
-
         matching_pin = next(
             (p for p in pins
              if _normalize_for_match(p["name"]) == pkg_name),
             None,
         )
-
         packages.append({
             "name": pkg_name,
             "base_version": base_version,
@@ -618,8 +645,7 @@ def main() -> int:
                 if matching_pin else None
             ),
             "hashes": [
-                "sha256:"
-                + hashlib.sha256(artifact.read_bytes()).hexdigest()
+                "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
             ],
             "source_index": (
                 route(matching_pin) if matching_pin else ""
@@ -628,9 +654,7 @@ def main() -> int:
             "dependencies": [],
         })
 
-    # 5. Print pip output, then the receipt as the last line.
     print("\n".join(all_output))
-
     receipt = {
         "manifest_path": manifest_path.name,
         "manifest_hash": sha256_of(lockfile_text),
