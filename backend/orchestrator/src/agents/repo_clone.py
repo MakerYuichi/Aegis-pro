@@ -137,6 +137,23 @@ async def clone_repo(
                 shutil.rmtree(target, ignore_errors=True)
                 return None, f"fetch_failed: {ferr}"
 
+        sentinel = target / ".aegis-clone-sentinel"
+        try:
+            sentinel.write_text(
+                f"aegis-pro clone sentinel\n"
+                f"repo={repo}\n"
+                f"created_by=clone_repo\n",
+                encoding="utf-8",
+            )
+        except OSError as e:
+            # If we can't write the sentinel, cleanup_repo will
+            # refuse to remove the clone. That's a disk-space leak,
+            # not a correctness bug. Log and continue.
+            logger.warning(
+                f"clone_repo: could not write sentinel in "
+                f"{target}: {e}"
+            )
+
         logger.info(f"✅ Clone ready at {target}")
         return str(target), None
 
@@ -212,6 +229,26 @@ def cleanup_repo(path: str | None) -> None:
 
     if not target.exists():
         logger.debug(f"cleanup_repo: {target} already gone")
+        return
+
+    # Require the sentinel that clone_repo writes. The path-prefix
+    # check above is necessary but not sufficient: a repo whose own
+    # tests call cleanup_repo can pass a legitimate fixture path
+    # that happens to be under our base, and we'd delete a file we
+    # never created. The sentinel proves we created this directory.
+    #
+    # Legacy clones (created before this sentinel was added) lack
+    # the file. Refusing them means a disk-space leak on the first
+    # run after the upgrade; the alternative is deleting things we
+    # can't prove we own. The leak is the correct trade.
+    sentinel = target / ".aegis-clone-sentinel"
+    if not sentinel.is_file():
+        logger.warning(
+            f"cleanup_repo: {path} has no sentinel; refusing to "
+            f"delete. This path was either not created by "
+            f"clone_repo, or was created before the sentinel was "
+            f"added. Inspect and remove manually if appropriate."
+        )
         return
 
     try:
