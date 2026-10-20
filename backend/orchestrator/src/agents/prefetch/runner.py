@@ -7,6 +7,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import sys
 
 from loguru import logger
 
@@ -429,17 +430,52 @@ async def _retry_with_find_links(
     start = time.monotonic()
     logger.info(f"Prefetch retry: find_links={find_links_host}")
 
+    # Stream the container's output to the orchestrator's own
+    # stderr as it arrives, but keep a buffer for the receipt.
+    #
+    # Two things this solves:
+    #
+    # 1. Docker Desktop on macOS kills containers that produce no
+    #    output for ~10 minutes with exit=125 and "unexpected EOF".
+    #    Buffered output means the container is silent for the
+    #    full duration of pip download. Streaming echoes each line
+    #    as it arrives, keeping the CLI connection alive.
+    #
+    # 2. A human watching the log can see what's happening
+    #    instead of staring at silence for 10 minutes.
+    #
+    # The buffer is what parse_receipt reads after the process
+    # exits. Everything pip writes is echoed AND captured.
+    buf = bytearray()
+
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
 
+    async def _echo():
+        """Read from the pipe, echo each line, buffer it."""
+        assert proc.stdout is not None
+        while True:
+            chunk = await proc.stdout.read(4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            # Echo to the orchestrator's stderr, line by line.
+            try:
+                sys.stderr.write(chunk.decode("utf-8", errors="replace"))
+                sys.stderr.flush()
+            except Exception:
+                pass
+
     try:
-        stdout_bytes, _ = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
+        await asyncio.wait_for(
+            asyncio.gather(_echo(), proc.wait()),
+            timeout=timeout,
         )
     except asyncio.TimeoutError:
+
         proc.kill()
         try:
             await proc.wait()
@@ -451,7 +487,7 @@ async def _retry_with_find_links(
         raise PrefetchError("prefetch_timeout", f"exceeded {timeout}s")
 
     duration_ms = int((time.monotonic() - start) * 1000)
-    stdout = stdout_bytes.decode("utf-8", errors="replace")
+    stdout = bytes(buf).decode("utf-8", errors="replace")
 
     _cleanup_staged(
         staged_entrypoint_container, staged_manifest_container,
