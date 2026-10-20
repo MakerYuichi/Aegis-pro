@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     # Default is a Linux path that works in the standard compose layout.
     # Override in .env for Docker Desktop (Mac/Windows) or a custom layout.
     VERIFIER_HOST_WORKDIR: str = "/var/lib/aegis/verifier-workdir"
-    VERIFIER_CONTAINER_WORKDIR: str = "/verifier-workdir"
+    VERIFIER_CONTAINER_WORKDIR: str = "/work"
     VERIFIER_MEMORY_LIMIT: str = "1g"
     VERIFIER_CPU_LIMIT: str = "1"
     
@@ -185,7 +185,7 @@ class Settings(BaseSettings):
     # the system temp root". Set explicitly when you want clones to
     # land somewhere inspectable, e.g. /var/lib/aegis/investigator-workdir.
     
-    INVESTIGATOR_WORKDIR: str = "/verifier-workdir"
+    INVESTIGATOR_WORKDIR: str = "/work-investigator"
     
     # ------------------------------------------------------------------
     # Scanner — v1.0 Phase 1/2
