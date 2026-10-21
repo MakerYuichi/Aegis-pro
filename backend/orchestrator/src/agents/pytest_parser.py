@@ -39,18 +39,12 @@ import re
 # The reason part after " - " is optional (some pytest versions
 # omit it under --tb=no).
 _FAILED_LINE_RE = re.compile(
-    r"^FAILED\s+(?P<test_id>[^\s]+(?:::[^\s]+)*)"
+    r"^FAILED\s+(?P<test_id>[^\s:]+(?:::[^\s:]+)*)"
     r"(?:\s+-\s+.*)?$",
 )
 
-# "tests/test_foo.py::test_bar FAILED"
-# The status can be "FAILED", "ERROR", "XPASS". The verifier
-# only treats FAILED as a test failure — ERROR usually means a
-# fixture or collection problem, and XPASS is a passed test that
-# was marked xfail. Including those in the baseline would hide
-# real regressions.
 _STATUS_TRAILING_RE = re.compile(
-    r"^(?P<test_id>[^\s]+(?:::[^\s]+)*)\s+FAILED\s*$",
+    r"^(?P<test_id>[^\s:]+(?:::[^\s:]+)*)\s+FAILED\s*$",
 )
 
 # pytest's short summary includes lines like:
