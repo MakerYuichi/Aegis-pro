@@ -1327,6 +1327,16 @@ async def _attempt_repair(
         f"{previous_diff}\n\n"
         "Failure output:\n"
         f"{failed_output}\n\n"
+        "IMPORTANT: the previous diff has been reverted. `git checkout -- .` "
+        "runs before your diff is applied, restoring the repo to its "
+        "original state. Your diff applies to the ORIGINAL repo. Do not "
+        "produce a diff that tries to undo the previous diff — those "
+        "changes are already gone. Produce a diff that, starting from the "
+        "original repo, results in the fix.\n\n"
+        "Keep the diff small and focused. Fix only the failing tests. Do "
+        "not refactor unrelated code, do not add tests, do not rename "
+        "anything. The minimum diff that makes the failing tests pass is "
+        "the correct diff.\n\n"
         f"{instruction}"
     )
 

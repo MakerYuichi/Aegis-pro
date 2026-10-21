@@ -350,8 +350,25 @@ async def test_verify_retry_succeeds(monkeypatch, tmp_path):
             return _fake_proc(returncode=0)
         if argv[0] == "docker":
             docker_calls["n"] += 1
+                # Call 1: baseline run (no diff applied). Clean.
+                # Call 2: first with-diff attempt. One real
+                #         failure.
+                # Call 3: second with-diff attempt after repair.
+                #         Clean.
             if docker_calls["n"] == 1:
-                return _fake_proc(returncode=1, stdout=b"1 failed\n")
+                return _fake_proc(
+                    returncode=0,
+                    stdout=b"3 passed\n",
+                )
+            if docker_calls["n"] == 2:
+                return _fake_proc(
+                    returncode=1,
+                    stdout=(
+                        b"FAILED tests/test_app.py::test_x - "
+                        b"AssertionError: boom\n"
+                        b"1 failed, 2 passed\n"
+                    ),
+                )
             return _fake_proc(returncode=0, stdout=b"3 passed\n")
         return _fake_proc(returncode=0)
 
