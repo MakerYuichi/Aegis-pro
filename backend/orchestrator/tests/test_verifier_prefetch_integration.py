@@ -98,10 +98,12 @@ async def test_no_manifest_skips_prefetch(fake_repo, tmp_path):
             context={"repo_workdir": str(tmp_path)},
         )
         mock_prefetch.assert_not_called()
-        # The docker call happens with no cache mount.
-        assert mock_docker.await_count == 1
-        call_kwargs = mock_docker.await_args.kwargs
-        assert call_kwargs["cache_host_path"] is None
+            # Two docker calls now: baseline + with-diff. Both
+            # run without a cache mount because there was no
+            # manifest to prefetch.
+        assert mock_docker.await_count == 2
+        for call in mock_docker.await_args_list:
+            assert call.kwargs["cache_host_path"] is None
 
 
 @pytest.mark.asyncio

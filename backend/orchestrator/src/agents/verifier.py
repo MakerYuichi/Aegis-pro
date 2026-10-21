@@ -55,6 +55,7 @@ from src.agents.prefetch.runner import (
     run_prefetch,
     run_prefetch_with_build_on_miss,
 )
+from src.agents.pytest_parser import parse_failed_tests, new_failures
 
 @dataclass
 class RealignmentReport:
@@ -97,12 +98,19 @@ class VerificationResult:
         passed:       did the verification succeed?
         reason:       machine-readable reason for the outcome.
                       One of: "tests_passed", "tests_failed",
+                      "tests_passed_pre_existing_failures",
                       "linter_passed", "linter_failed",
                       "typecheck_passed", "typecheck_failed",
                       "syntax_ok", "syntax_failed",
                       "no_verification_surface", "diff_does_not_apply",
                       "timeout", "disabled", "no_diff",
                       "verifier_exception".
+                      "tests_passed_pre_existing_failures" means
+                      the test command exited nonzero but every
+                      failing test was already failing in the
+                      baseline (no-diff) run. The diff didn't
+                      break anything; the repo's tests were
+                      already failing in the sandbox environment.
         output:       truncated stdout/stderr from the run. Empty when
                       the reason is structural ("disabled", "no_diff").
         duration_ms:  wall-clock duration of the verification, in ms.
@@ -377,6 +385,32 @@ class HostedVerifier(Verifier):
                     f"{repo_name}; skipping prefetch"
                 )
 
+            baseline_failures: set[str] = set()
+            baseline_output = ""
+            try:
+                baseline_exit, baseline_full_output = await _run_in_docker(
+                    image=_image_for_language(language),
+                    host_workdir=workdir,
+                    container_workdir=settings.VERIFIER_CONTAINER_WORKDIR,
+                    command=command,
+                    timeout=settings.VERIFY_TIMEOUT_SECONDS,
+                    memory_limit=settings.VERIFIER_MEMORY_LIMIT,
+                    cpu_limit=settings.VERIFIER_CPU_LIMIT,
+                    cache_host_path=cache_host_path,
+                    manifest_relative_path=manifest_relative_path,
+                )
+                baseline_output = baseline_full_output[:8000]
+                baseline_failures = parse_failed_tests(baseline_full_output)
+                logger.info(
+                    f"Verifier: baseline run exit={baseline_exit}, "
+                    f"{len(baseline_failures)} pre-existing failures"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Verifier: baseline run failed, "
+                    f"treating all failures as new: {e}"
+                )
+
             attempts: list[dict] = []
             max_attempts = max(1, settings.VERIFY_MAX_ATTEMPTS)
             current_diff = diff
@@ -439,7 +473,7 @@ class HostedVerifier(Verifier):
                     else:
                         break
 
-                exit_code, output = await _run_in_docker(
+                exit_code, full_output = await _run_in_docker(
                     image=_image_for_language(language),
                     host_workdir=workdir,
                     container_workdir=settings.VERIFIER_CONTAINER_WORKDIR,
@@ -450,12 +484,20 @@ class HostedVerifier(Verifier):
                     cache_host_path=cache_host_path,
                     manifest_relative_path=manifest_relative_path,
                 )
+                output = full_output[:8000]
+
+                # Compare this attempt's failures against the
+                current_failed = parse_failed_tests(full_output)
+                new = current_failed - baseline_failures
+                pre_existing = current_failed & baseline_failures
 
                 passed = exit_code == 0
                 attempts.append({
                     "attempt": attempt_num,
                     "passed": passed,
                     "output": output,
+                    "new_failures": sorted(new),
+                    "pre_existing_failures": sorted(pre_existing),
                 })
 
                 if passed:
@@ -470,19 +512,53 @@ class HostedVerifier(Verifier):
                         realignment=realignment,
                     )
 
+                # Exit code was nonzero but no new failures.
+                # The diff didn't break anything; the failures
+                # are all pre-existing. Report the diff as clean
+                # with an honest label.
+                if not new and pre_existing:
+                    logger.info(
+                        f"Verifier: attempt {attempt_num} failed "
+                        f"but all {len(pre_existing)} failures are "
+                        f"pre-existing; treating as passed"
+                    )
+                    return VerificationResult(
+                        passed=True,
+                        reason=f"{reason_prefix}_passed_pre_existing_failures",
+                        output=output,
+                        duration_ms=self._ms_since(start),
+                        attempts=attempts,
+                        verifier="hosted",
+                        realignment=realignment,
+                    )
+
+                # Nonzero exit but no parsed failures at all. This
+                # usually means a collection error or a crash
+                # before pytest could report test IDs. Treat as a
+                # failure and let the repair loop see the raw
+                # output — the LLM may be able to diagnose from
+                # the traceback even without test IDs.
+                if not new and not pre_existing:
+                    logger.warning(
+                        f"Verifier: attempt {attempt_num} failed "
+                        f"with nonzero exit but zero parsed "
+                        f"failures; letting repair loop fire"
+                    )
+                    # fall through to repair
+
                 if attempt_num < max_attempts:
                     repaired = await _attempt_repair(
                         original_context=context or {},
-                        failed_output=output,
+                        failed_output=full_output[-8000:],
                         previous_diff=current_diff,
                     )
                     if not repaired:
                         logger.info(
-                                f"Verifier: repair failed on "
-                                f"attempt {attempt_num}; "
-                                f"breaking with {len(attempts)} "
-                                f"attempts recorded"
-                            )
+                            f"Verifier: repair failed on "
+                            f"attempt {attempt_num}; "
+                            f"breaking with {len(attempts)} "
+                            f"attempts recorded"
+                        )
                         break
                     # Same realignment as the apply-failure
                     # branch. Test failures can also produce a
@@ -500,14 +576,33 @@ class HostedVerifier(Verifier):
             # output tells the reader what happened — either a test
             # failure or an apply failure.
             last_output = attempts[-1]["output"] if attempts else ""
-            last_reason = (
-                "diff_does_not_apply"
-                if attempts and "git apply failed" in attempts[-1]["output"]
-                else f"{reason_prefix}_failed"
-            )
+            if attempts and "git apply failed" in attempts[-1]["output"]:
+                return VerificationResult(
+                    passed=False,
+                    reason="diff_does_not_apply",
+                    output=last_output,
+                    duration_ms=self._ms_since(start),
+                    attempts=attempts,
+                    verifier="hosted",
+                    realignment=realignment,
+                )
+
+            last_new = set(attempts[-1].get("new_failures", []))
+            last_pre = set(attempts[-1].get("pre_existing_failures", []))
+            if not last_new and last_pre:
+                return VerificationResult(
+                    passed=True,
+                    reason=f"{reason_prefix}_passed_pre_existing_failures",
+                    output=last_output,
+                    duration_ms=self._ms_since(start),
+                    attempts=attempts,
+                    verifier="hosted",
+                    realignment=realignment,
+                )
+
             return VerificationResult(
                 passed=False,
-                reason=last_reason,
+                reason=f"{reason_prefix}_failed",
                 output=last_output,
                 duration_ms=self._ms_since(start),
                 attempts=attempts,
@@ -1166,7 +1261,11 @@ async def _run_in_docker(
         return 124, f"verification timed out after {timeout}s"
 
     exit_code = proc.returncode if proc.returncode is not None else -1
-    return exit_code, out.decode("utf-8", errors="replace")[:8000]
+    # Return the full output. Callers that display it truncate at
+    # display time. The parser needs the full string — pytest's
+    # FAILED summary is at the end of the output, past the
+    # 8000-byte point where truncation used to occur.
+    return exit_code, out.decode("utf-8", errors="replace")
 
 
 async def _attempt_repair(
@@ -1228,6 +1327,16 @@ async def _attempt_repair(
         f"{previous_diff}\n\n"
         "Failure output:\n"
         f"{failed_output}\n\n"
+        "IMPORTANT: the previous diff has been reverted. `git checkout -- .` "
+        "runs before your diff is applied, restoring the repo to its "
+        "original state. Your diff applies to the ORIGINAL repo. Do not "
+        "produce a diff that tries to undo the previous diff — those "
+        "changes are already gone. Produce a diff that, starting from the "
+        "original repo, results in the fix.\n\n"
+        "Keep the diff small and focused. Fix only the failing tests. Do "
+        "not refactor unrelated code, do not add tests, do not rename "
+        "anything. The minimum diff that makes the failing tests pass is "
+        "the correct diff.\n\n"
         f"{instruction}"
     )
 
@@ -1248,16 +1357,37 @@ async def _attempt_repair(
         f"Repair response: {len(resp.content)} chars, "
         f"finish_reason={resp.finish_reason!r}"
     )
+    
     if resp.finish_reason in ("length", "MAX_TOKENS", "max_tokens"):
         logger.warning("Repair response was truncated by token limit.")
         return None
 
     from src.services.autofix_service import AutoFixService
     extracted = AutoFixService._extract_diff(resp.content)
-    extracted = AutoFixService._trim_trailing_noise(extracted)
-    if not AutoFixService._diff_looks_valid(extracted):
+    if not extracted:
+        logger.warning(
+            "Repair: _extract_diff returned empty. Response head: "
+            f"{resp.content[:200]!r}"
+        )
         return None
-    return extracted
+
+    trimmed = AutoFixService._trim_trailing_noise(extracted)
+    if not trimmed:
+        logger.warning(
+            "Repair: _trim_trailing_noise returned empty. Extracted: "
+            f"{extracted[:200]!r}"
+        )
+        return None
+
+    if not AutoFixService._diff_looks_valid(trimmed):
+        logger.warning(
+            "Repair: _diff_looks_valid rejected the diff. Head: "
+            f"{trimmed[:300]!r}"
+        )
+        return None
+
+    return trimmed
+
 
 def get_verifier(*, has_runner: bool = False) -> Verifier:
     """
