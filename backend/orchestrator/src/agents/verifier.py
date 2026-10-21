@@ -1357,6 +1357,12 @@ async def _attempt_repair(
         f"Repair response: {len(resp.content)} chars, "
         f"finish_reason={resp.finish_reason!r}"
     )
+    logger.info(f"Repair response head: {resp.content[:400]!r}")
+    _repair_headers = [
+        line for line in resp.content.splitlines()
+        if line.startswith("--- ") or line.startswith("+++ ")
+    ]
+    logger.info(f"Repair response diff headers: {_repair_headers[:6]}")
     if resp.finish_reason in ("length", "MAX_TOKENS", "max_tokens"):
         logger.warning("Repair response was truncated by token limit.")
         return None
