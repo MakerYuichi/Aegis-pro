@@ -790,6 +790,13 @@ async def test_provisioner_clones_and_investigator_uses_it(
     clone_dir.mkdir(parents=True, exist_ok=True)
     (clone_dir / "repo").mkdir()
     (clone_dir / "marker.txt").write_text("clone")
+    # cleanup_repo requires the sentinel that clone_repo writes.
+    # The test fakes the clone directly instead of calling
+    # clone_repo, so it has to write the sentinel itself. Same
+    # filename as the source (line 140 in repo_clone.py).
+    (clone_dir / ".aegis-clone-sentinel").write_text(
+        "aegis-pro clone sentinel\ntest fixture\n"
+    )
 
     # --- Fakes: define BEFORE any monkeypatch references them ---
     captured: dict = {}

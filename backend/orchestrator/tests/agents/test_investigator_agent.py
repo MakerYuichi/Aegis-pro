@@ -452,15 +452,40 @@ async def test_history_carries_tool_calls_in_order(agent, context):
     assert iterations == [1, 2, 3]
 
 @pytest.mark.asyncio
-async def test_cleanup_repo_removes_path_under_base_dir():
-    """A path under _base_dir() is ours to delete."""
+async def test_cleanup_repo_removes_path_with_sentinel():
+    """A path under _base_dir() with the sentinel is ours to delete."""
     from src.agents.repo_clone import _base_dir, cleanup_repo
 
     target = _base_dir() / "inv-test-cleanup"
     target.mkdir(parents=True, exist_ok=True)
-    (target / "file.txt").write_text("x")
-    assert target.exists()
+    (target / ".aegis-clone-sentinel").write_text(
+        "aegis-pro clone sentinel\ntest fixture\n"
+    )
 
     cleanup_repo(str(target))
-
     assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_repo_refuses_path_without_sentinel():
+    """A path under _base_dir() without the sentinel is refused.
+
+    The sentinel proves clone_repo created the directory. A
+    fixture created by a test, or by anything else, has no
+    sentinel — cleanup_repo leaves it alone.
+    """
+    from src.agents.repo_clone import _base_dir, cleanup_repo
+
+    target = _base_dir() / "inv-test-no-sentinel"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "marker.txt").write_text("no sentinel\n")
+
+    try:
+        cleanup_repo(str(target))
+        assert target.exists(), (
+            "cleanup_repo deleted a directory without a sentinel. "
+            "The sentinel guard is not working."
+        )
+    finally:
+        import shutil
+        shutil.rmtree(target, ignore_errors=True)
