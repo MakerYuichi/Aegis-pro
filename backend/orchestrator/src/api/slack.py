@@ -235,6 +235,27 @@ def build_incident_blocks(result: dict) -> list:
             }
         })
         
+    unverified = result.get('unverified_finding')
+    if unverified:
+        failure_mode = unverified.get('failure_mode') or 'unspecified pattern'
+        fix_location = unverified.get('fix_location') or 'unknown location'
+        confidence = unverified.get('confidence')
+        conf_text = f" (confidence {confidence:.2f})" if confidence else ""
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*⚠️ Unverified Finding{conf_text}:*\n"
+                    f"{failure_mode}\n"
+                    f"_Location:_ `{fix_location}`\n"
+                    f"_No fix generated — the Investigator could not "
+                    f"reproduce this pattern with a probe. Recommend "
+                    f"human review._"
+                )
+            }
+        })
+        
     verification = result.get('verification')
     if verification:
         passed = verification.get('passed')
