@@ -1357,22 +1357,37 @@ async def _attempt_repair(
         f"Repair response: {len(resp.content)} chars, "
         f"finish_reason={resp.finish_reason!r}"
     )
-    logger.info(f"Repair response head: {resp.content[:400]!r}")
-    _repair_headers = [
-        line for line in resp.content.splitlines()
-        if line.startswith("--- ") or line.startswith("+++ ")
-    ]
-    logger.info(f"Repair response diff headers: {_repair_headers[:6]}")
+    
     if resp.finish_reason in ("length", "MAX_TOKENS", "max_tokens"):
         logger.warning("Repair response was truncated by token limit.")
         return None
 
     from src.services.autofix_service import AutoFixService
     extracted = AutoFixService._extract_diff(resp.content)
-    extracted = AutoFixService._trim_trailing_noise(extracted)
-    if not AutoFixService._diff_looks_valid(extracted):
+    if not extracted:
+        logger.warning(
+            "Repair: _extract_diff returned empty. Response head: "
+            f"{resp.content[:200]!r}"
+        )
         return None
-    return extracted
+
+    trimmed = AutoFixService._trim_trailing_noise(extracted)
+    if not trimmed:
+        logger.warning(
+            "Repair: _trim_trailing_noise returned empty. Extracted: "
+            f"{extracted[:200]!r}"
+        )
+        return None
+
+    if not AutoFixService._diff_looks_valid(trimmed):
+        logger.warning(
+            "Repair: _diff_looks_valid rejected the diff. Head: "
+            f"{trimmed[:300]!r}"
+        )
+        return None
+
+    return trimmed
+
 
 def get_verifier(*, has_runner: bool = False) -> Verifier:
     """
