@@ -3,21 +3,16 @@ Tests for the clone-once helper. All tests run without network —
 they either clone a local fixture path or assert on the failure
 paths.
 """
-from pathlib import Path
+from __future__ import annotations
+
 import shutil
 import uuid
-
-from src.agents.repo_clone import (
-    _base_dir,
-    cleanup_repo,
-    clone_repo,
-    is_local_path,
-    repo_url,
-)
+from pathlib import Path
 
 import pytest
 
 from src.agents.repo_clone import (
+    _base_dir,
     cleanup_repo,
     clone_repo,
     is_local_path,
@@ -95,17 +90,21 @@ def test_cleanup_repo_local_path_not_deleted():
     cleanup_repo(str(FIXTURE_REPO))
     assert FIXTURE_REPO.is_dir()
 
-def test_cleanup_repo_removes_path_under_base_dir():
-    """A path under _base_dir() is ours to delete."""
-    target = _base_dir() / f"inv-test-{uuid.uuid4().hex[:12]}"
-    target.mkdir(parents=True, exist_ok=True)
-    (target / "marker.txt").write_text("clone")
+@pytest.mark.asyncio
+async def test_cleanup_repo_removes_path_under_base_dir():
+    """A path under _base_dir() with the sentinel is ours to delete."""
+    from src.agents.repo_clone import _base_dir, cleanup_repo
+    from uuid import uuid4
 
-    assert target.exists()
+    target = _base_dir() / f"inv-test-{uuid4().hex[:12]}"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / ".aegis-clone-sentinel").write_text("test\n")
+    (target / "marker.txt").write_text("marker\n")
+
     cleanup_repo(str(target))
     assert not target.exists(), (
-        f"cleanup_repo did not remove {target}. Contents: "
-        f"{list(target.iterdir()) if target.exists() else 'N/A'}"
+        f"cleanup_repo did not remove {target}. "
+        f"Contents: {list(target.iterdir()) if target.exists() else []}"
     )
 
 

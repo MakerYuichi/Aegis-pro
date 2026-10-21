@@ -412,7 +412,28 @@ class HostedVerifier(Verifier):
                             previous_diff=current_diff,
                         )
                         if not repaired:
+                            logger.info(
+                                f"Verifier: repair failed on "
+                                f"attempt {attempt_num}; "
+                                f"breaking with {len(attempts)} "
+                                f"attempts recorded"
+                            )
                             break
+                        # The repair LLM doesn't know about
+                        # monorepo layout. Its hunk headers use the
+                        # conceptual path from the stack trace
+                        # (src/agents/repo_clone.py), not the
+                        # resolved repo path
+                        # (backend/orchestrator/src/agents/
+                        # repo_clone.py). Rewrite the headers the
+                        # same way the initial diff was rewritten,
+                        # so the next git apply targets a file that
+                        # exists.
+                        if file_lines:
+                            repaired, _ = _realign_diff(
+                                repaired, file_lines,
+                                repo_relative_path,
+                            )
                         current_diff = repaired
                         continue
                     else:
@@ -456,7 +477,23 @@ class HostedVerifier(Verifier):
                         previous_diff=current_diff,
                     )
                     if not repaired:
+                        logger.info(
+                                f"Verifier: repair failed on "
+                                f"attempt {attempt_num}; "
+                                f"breaking with {len(attempts)} "
+                                f"attempts recorded"
+                            )
                         break
+                    # Same realignment as the apply-failure
+                    # branch. Test failures can also produce a
+                    # repaired diff that names the wrong path in a
+                    # monorepo — the LLM reasons from the stack
+                    # trace's path, not from the resolved one.
+                    if file_lines:
+                        repaired, _ = _realign_diff(
+                            repaired, file_lines,
+                            repo_relative_path,
+                        )
                     current_diff = repaired
 
             # If we got here, all attempts failed. The last attempt's

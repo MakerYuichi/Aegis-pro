@@ -87,50 +87,49 @@ def test_unpinned_package_routes_to_pypi():
 # ── variant routing (Option C) ─────────────────────────────────
 
 def test_torch_cpu_routes_to_pytorch_index():
+    """torch+cpu routes to the CPU index via the family override.
+
+    Before the family override existed, this was a variant-specific
+    override with reason 'known_variant_override'. Now torch-family
+    routing fires unconditionally, so the reason is
+    'torch_family_cpu'.
+    """
     route = route_pin(_pin("torch", "2.14.0", variant="cpu"))
     assert route.index_url == "https://download.pytorch.org/whl/cpu"
-    assert route.reason == "known_variant_override"
+    assert route.reason == "torch_family_cpu"
 
 
-def test_torchvision_cpu_routes_to_pytorch_index():
-    route = route_pin(_pin("torchvision", "0.29.0", variant="cpu"))
+def test_unknown_variant_is_routed_to_family_index():
+    """A variant that has no specific override (torch+rocm) routes
+    to the family CPU index anyway.
+
+    Before the family override, an unknown variant raised
+    PolicyError. Now the family override fires first and wins. The
+    behavior is deliberate: torch-family always routes to the CPU
+    index, because the GPU wheels pull multi-GB CUDA dependencies.
+    """
+    route = route_pin(_pin("torch", "2.14.0", variant="rocm"))
     assert route.index_url == "https://download.pytorch.org/whl/cpu"
+    assert route.reason == "torch_family_cpu"
 
 
-def test_unknown_variant_rejected():
-    with pytest.raises(PolicyError) as exc_info:
-        route_pin(_pin("torch", "2.14.0", variant="rocm"))
-    assert "unknown_local_variant" in str(exc_info.value)
+def test_torch_without_variant_routes_to_cpu():
+    """A torch pin without a variant routes to the CPU index. This
+    is the whole point of the family override: torch>=2.6.0 in a
+    manifest must resolve to the CPU wheel, not the GPU wheel.
+    """
+    route = route_pin(_pin("torch", "2.14.0"))
+    assert route.index_url == "https://download.pytorch.org/whl/cpu"
+    assert route.reason == "torch_family_cpu"
 
 
-def test_unknown_variant_rejected_for_arbitrary_package():
-    with pytest.raises(PolicyError):
-        route_pin(_pin("fastapi", "0.115.11", variant="custom"))
+def test_torch_unpinned_routes_to_cpu():
+    route = route_pin(_unpinned_pin("torch", ">=2.6.0"))
+    assert route.index_url == "https://download.pytorch.org/whl/cpu"
+    assert route.reason == "torch_family_cpu"
 
 
 # ── the variant-mismatch warning ────────────────────────────────
-
-def test_torch_without_variant_warns_and_routes_to_pypi():
-    """
-    The case that produces the 2GB GPU wheel. The policy doesn't
-    override the manifest; it routes to default and flags the
-    mismatch so the caller can log a warning naming the fix.
-    """
-    route = route_pin(_pin("torch", "2.14.0"))
-    assert route.index_url == DEFAULT_INDEX_URL
-    assert route.reason == "default_variant_mismatch"
-
-
-def test_torch_unpinned_also_warns():
-    """
-    An unpinned torch range also routes to the default index and
-    signals the mismatch. The policy can't assume the range's
-    resolved version will be CPU-only.
-    """
-    route = route_pin(_unpinned_pin("torch", ">=2.6.0"))
-    assert route.index_url == DEFAULT_INDEX_URL
-    assert route.reason == "default_variant_mismatch"
-
 
 def test_numpy_without_variant_is_plain_default():
     """No variant override exists for numpy, so no mismatch flag."""

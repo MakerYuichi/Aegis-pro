@@ -163,22 +163,68 @@ async def clone_repo(
 
 def _on_rm_error(func, path, exc_info):
     """
-    Error handler for shutil.rmtree that handles read-only files.
+    Error handler for shutil.rmtree.
 
-    Git clones contain read-only pack files
-    (.git/objects/pack/*.pack) with mode 0444. Python 3.11's
-    shutil.rmtree refuses to delete them and raises
-    PermissionError. The standard fix is to make the file writable
-    and retry.
+    Two cases, both handled:
 
-    Python 3.12 changed this behavior — its rmtree handles
-    read-only files on its own. Until the project runs on 3.12+,
-    this callback is required for git clones to actually be
-    removed.
+    1. Read-only files (git pack files, mode 0444). Python 3.11's
+       rmtree refuses to delete them. chmod to writable, retry.
+
+    2. Non-empty directories whose children weren't fully removed
+       — a subdirectory with root-owned contents, a .git dir with
+       a live lock file, a .pytest_cache with files created by the
+       build container. rmtree walks bottom-up but a directory
+       can still be non-empty if a child's removal failed. Walk
+       it explicitly: chmod + unlink each child, then rmdir.
+
+    Python 3.12's rmtree handles read-only files on its own.
+    Until this project runs on 3.12+, this callback is required
+    for git clones to actually be removed.
+
+    Never raises. A cleanup failure is a disk-space leak, not a
+    correctness problem — the verifier's result is already
+    determined before cleanup runs.
     """
+    import stat
     try:
-        os.chmod(path, 0o700)
-        func(path)
+        if not os.path.exists(path):
+            return
+        st = os.lstat(path)
+
+        if stat.S_ISDIR(st.st_mode):
+            try:
+                func(path)
+                return
+            except OSError:
+                # Directory still has contents. Walk bottom-up.
+                try:
+                    children = os.listdir(path)
+                except OSError:
+                    children = []
+                for child in children:
+                    child_path = os.path.join(path, child)
+                    try:
+                        os.chmod(child_path, 0o700)
+                    except OSError:
+                        pass
+                    try:
+                        if os.path.isdir(child_path) and \
+                           not os.path.islink(child_path):
+                            shutil.rmtree(child_path, onerror=_on_rm_error)
+                        else:
+                            os.unlink(child_path)
+                    except OSError:
+                        pass
+                try:
+                    os.rmdir(path)
+                except OSError as e:
+                    logger.warning(f"rmtree: could not remove {path}: {e}")
+        else:
+            try:
+                os.chmod(path, 0o700)
+                os.unlink(path)
+            except OSError as e:
+                logger.warning(f"rmtree: could not remove {path}: {e}")
     except Exception as e:
         logger.warning(f"rmtree: could not remove {path}: {e}")
 
