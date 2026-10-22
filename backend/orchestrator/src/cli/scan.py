@@ -1,4 +1,4 @@
-"""AEGIS PRO CLI — `aegis scan <repo>`.
+"""AEGIS PRO CLI — `aegis scan`.
 
 Runs a proactive scan against a local repo path and prints the
 gated findings. Does not call the HTTP API — constructs

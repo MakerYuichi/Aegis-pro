@@ -317,23 +317,36 @@ class IncidentService:
             # resolve against.
             incident_ids: list[str] = []
 
-            for outcome in result.report:
-                try:
-                    incident = await self.scan_single_candidate(
-                        outcome=outcome,
-                        repo_path=scan_workdir,
-                        service_name=effective_service,
-                    )
-                    if incident and incident.get("incident_id"):
-                        incident_ids.append(incident["incident_id"])
-                except Exception as e:
-                    # A failure in one candidate's pipeline must
-                    # not stop the scan. Log and continue.
-                    logger.error(
-                        f"scan_repo: pipeline failed for "
-                        f"{outcome.candidate.root_file}:"
-                        f"{outcome.candidate.root_line}: {e}"
-                    )
+            budget = getattr(settings, "SCANNER_MAX_INCIDENTS", 10)
+            processed = 0
+            tiers = [("report", result.report),
+                     ("queue", result.investigator_queue or [])]
+
+            for tier_name, tier_candidates in tiers:
+                for outcome in tier_candidates:
+                    if processed >= budget:
+                        logger.info(
+                            f"scan_repo: reached SCANNER_MAX_INCIDENTS="
+                            f"{budget}; {len(tier_candidates) - processed} "
+                            f"candidates left unprocessed"
+                        )
+                        break
+                    try:
+                        incident = await self.scan_single_candidate(
+                            outcome=outcome,
+                            repo_path=scan_workdir,
+                            service_name=effective_service,
+                        )
+                        if incident and incident.get("incident_id"):
+                            incident_ids.append(incident["incident_id"])
+                            processed += 1
+                    except Exception as e:
+                        logger.error(
+                            f"scan_repo: pipeline failed for "
+                            f"{outcome.candidate.root_file}:"
+                            f"{outcome.candidate.root_line} "
+                            f"(tier={tier_name}): {e}"
+                        )
 
             return {
                 "repo": owner_repo,
