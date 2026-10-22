@@ -174,6 +174,11 @@ class IncidentService:
                     context["incident_id"], context["auto_fix"]
                 )
 
+            if context.get("unverified_finding"):
+                await self.record_unverified_finding(
+                    context["incident_id"], context["unverified_finding"]
+                )
+
             # Stage 4 — Verifier (Verify). Gated by VERIFY_BEFORE_REPORT.
             context.update(await self._stage_verifier(context))
 
@@ -312,23 +317,36 @@ class IncidentService:
             # resolve against.
             incident_ids: list[str] = []
 
-            for outcome in result.report:
-                try:
-                    incident = await self.scan_single_candidate(
-                        outcome=outcome,
-                        repo_path=scan_workdir,
-                        service_name=effective_service,
-                    )
-                    if incident and incident.get("incident_id"):
-                        incident_ids.append(incident["incident_id"])
-                except Exception as e:
-                    # A failure in one candidate's pipeline must
-                    # not stop the scan. Log and continue.
-                    logger.error(
-                        f"scan_repo: pipeline failed for "
-                        f"{outcome.candidate.root_file}:"
-                        f"{outcome.candidate.root_line}: {e}"
-                    )
+            budget = getattr(settings, "SCANNER_MAX_INCIDENTS", 10)
+            processed = 0
+            tiers = [("report", result.report),
+                     ("queue", result.investigator_queue or [])]
+
+            for tier_name, tier_candidates in tiers:
+                for outcome in tier_candidates:
+                    if processed >= budget:
+                        logger.info(
+                            f"scan_repo: reached SCANNER_MAX_INCIDENTS="
+                            f"{budget}; {len(tier_candidates) - processed} "
+                            f"candidates left unprocessed"
+                        )
+                        break
+                    try:
+                        incident = await self.scan_single_candidate(
+                            outcome=outcome,
+                            repo_path=scan_workdir,
+                            service_name=effective_service,
+                        )
+                        if incident and incident.get("incident_id"):
+                            incident_ids.append(incident["incident_id"])
+                            processed += 1
+                    except Exception as e:
+                        logger.error(
+                            f"scan_repo: pipeline failed for "
+                            f"{outcome.candidate.root_file}:"
+                            f"{outcome.candidate.root_line} "
+                            f"(tier={tier_name}): {e}"
+                        )
 
             return {
                 "repo": owner_repo,
@@ -964,7 +982,7 @@ class IncidentService:
         incident_id = context["incident_id"]
 
         result = {}
-        
+
         skip_reason = context.get("auto_fix_skipped_reason")
         if skip_reason:
             logger.info(
@@ -972,6 +990,71 @@ class IncidentService:
                 f"investigator returned {skip_reason}"
             )
             return result
+
+        # Confirmation gate. The Investigator produces findings at
+        # three levels of certainty:
+        #
+        #   refused              — determined not a bug. Skip silently.
+        #   confirmed+probe      — proven by a reproducing probe.
+        #                          Generate a fix.
+        #   confirmed+reasoned   — suspicious but unproven. Do NOT
+        #                          generate a fix; surface as an
+        #                          unverified finding for human review.
+        #
+        # Before this gate existed, the pipeline generated diffs for
+        # "reasoned_only" findings, which the Verifier could not
+        # distinguish from real fixes. See incident INC-20261021-2445CA
+        # for the acceptance case that motivated this change.
+        investigation = context.get("investigation") or {}
+        inv_status = investigation.get("status")
+        inv_confirmation = investigation.get("confirmation")
+
+        if inv_status == "confirmed" and inv_confirmation not in (
+            "probe_reproduced", "probe_reproduced_realigned",
+        ):
+            logger.info(
+                f"⏭️  Skipping auto-fix for {incident_id}: "
+                f"investigator confirmed but unverified "
+                f"(confirmation={inv_confirmation!r})"
+            )
+            return {
+                "auto_fix_skipped_reason": "investigator_unverified",
+                "unverified_finding": {
+                    "status": inv_status,
+                    "confirmation": inv_confirmation,
+                    "failure_mode": investigation.get("failure_mode"),
+                    "fix_location": investigation.get("fix_location"),
+                    "confidence": investigation.get("confidence"),
+                    "reason": (
+                        "Investigator confirmed this pattern but could "
+                        "not reproduce it with a probe. No fix was "
+                        "generated. Recommend human review."
+                    ),
+                },
+            }
+
+        if inv_status == "confirmed" and inv_confirmation is None:
+            # Defensive: this shouldn't happen. If it does, it's a bug
+            # in the Investigator's output contract. Treat as
+            # unverified rather than silently fixing.
+            logger.error(
+                f"Fixer: confirmed investigation for {incident_id} has "
+                f"no confirmation field. Refusing to generate a fix."
+            )
+            return {
+                "auto_fix_skipped_reason": "invalid_confirmation",
+                "unverified_finding": {
+                    "status": inv_status,
+                    "confirmation": None,
+                    "failure_mode": investigation.get("failure_mode"),
+                    "fix_location": investigation.get("fix_location"),
+                    "reason": (
+                        "Investigator returned confirmed without a "
+                        "confirmation field. This is an Investigator "
+                        "output contract violation."
+                    ),
+                },
+            }
 
         if not (stack_analysis and stack_analysis.get("file_path")):
             return result
@@ -1380,7 +1463,11 @@ class IncidentService:
         skip_reason = context.get("auto_fix_skipped_reason")
         if skip_reason:
             response["auto_fix_skipped_reason"] = skip_reason
-        
+
+        unverified = context.get("unverified_finding")
+        if unverified:
+            response["unverified_finding"] = unverified
+
         return response
 
 
@@ -1539,6 +1626,30 @@ class IncidentService:
                 return
 
             merged = merge_incident_metadata(existing, "verification", verification)
+            await session.execute(
+                text("UPDATE incidents SET extra_metadata = CAST(:m AS jsonb) WHERE incident_id = :id"),
+                {"m": merged, "id": incident_id}
+            )
+            await session.commit()
+            
+    async def record_unverified_finding(self, incident_id: str, finding: dict):
+        """
+        Merge the unverified-finding block into
+        extra_metadata.unverified_finding.
+
+        Same shape as record_verification — merge-not-overwrite, via
+        merge_incident_metadata. Separate from auto_fix because the
+        finding has no diff; it's a report entry, not a fix.
+        """
+        async with get_db_session() as session:
+            existing, found = await self._load_extra_metadata(session, incident_id)
+            if not found:
+                logger.warning(
+                    f"record_unverified_finding: incident {incident_id} not found"
+                )
+                return
+
+            merged = merge_incident_metadata(existing, "unverified_finding", finding)
             await session.execute(
                 text("UPDATE incidents SET extra_metadata = CAST(:m AS jsonb) WHERE incident_id = :id"),
                 {"m": merged, "id": incident_id}
