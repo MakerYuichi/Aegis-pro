@@ -74,7 +74,7 @@ async def test_scan_repo_processes_report_and_queue(monkeypatch):
         svc = IncidentService()
         call_count = {"n": 0}
 
-        async def fake_scan_single(*, outcome, repo_path, service_name):
+        async def fake_scan_single(self, *, outcome, repo_path, service_name):
             call_count["n"] += 1
             return {"incident_id": f"INC-{call_count['n']}"}
 
@@ -131,7 +131,7 @@ async def test_scan_repo_budget_caps_total_processing(monkeypatch):
         svc = IncidentService()
         call_count = {"n": 0}
 
-        async def fake_scan_single(*, outcome, repo_path, service_name):
+        async def fake_scan_single(self, *, outcome, repo_path, service_name):
             call_count["n"] += 1
             return {"incident_id": f"INC-{call_count['n']}"}
 
