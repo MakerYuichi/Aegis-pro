@@ -27,6 +27,13 @@ from typing import Any
 STATUS_DIAGNOSED = "diagnosed"
 # Scan mode
 STATUS_CONFIRMED = "confirmed"
+# Scan mode — the Investigator looked, couldn't decide, and is
+# saying so honestly. Distinct from STATUS_REFUSED (which means
+# "I looked and it's not a bug"). Downstream treats both as "no
+# auto-fix", but they surface in different report sections: an
+# unverified finding belongs under "Needs Review", a refused one
+# under "Refused (not bugs)".
+STATUS_UNVERIFIED = "unverified"
 # Shared
 STATUS_REFUSED = "refused"
 STATUS_TIMEOUT = "timeout"
@@ -36,12 +43,12 @@ STATUS_ITERATION_LIMIT = "iteration_limit"
 ALL_STATUSES = (
     STATUS_DIAGNOSED,
     STATUS_CONFIRMED,
+    STATUS_UNVERIFIED,
     STATUS_REFUSED,
     STATUS_TIMEOUT,
     STATUS_DECISION_FAILED,
     STATUS_ITERATION_LIMIT,
 )
-
 
 # ---------------------------------------------------------------------------
 # Modes
