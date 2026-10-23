@@ -286,19 +286,58 @@ class IncidentService:
             owner_repo
         )
 
-        # Clone the repo locally so the scanner has a working tree.
-        # The scanner reads from a filesystem path; the Provisioner
-        # (inside the pipeline, once per candidate) does its own
-        # clone. This first clone is for the scan itself — pattern
-        # matching, chain building — before any candidate becomes
-        # an incident.
+        # Determine the working tree. Two paths:
+        #
+        #   (a) repo_input is a directory on disk. Scan it in
+        #       place — no clone. This is the CI / acceptance-test
+        #       path: the caller already has a checkout, they just
+        #       want to scan it.
+        #
+        #   (b) repo_input is a repo identifier (owner/repo,
+        #       https://..., git@...). Clone it, scan the clone,
+        #       clean up the clone after.
+        #
+        # The check is `Path(repo_input).is_dir()` after parse,
+        # because parse_repo_input accepts anything that looks
+        # like owner/repo — including `work-investigator/requests-buggy`,
+        # which is a valid repo shape but also happens to be a
+        # directory path. Prefer the directory interpretation
+        # when it exists, since the alternative is a spurious
+        # clone of a repo that doesn't exist on GitHub.
+        from pathlib import Path
         from src.agents.repo_clone import clone_repo, cleanup_repo
 
-        scan_workdir, clone_error = await clone_repo(owner_repo)
-        if not scan_workdir:
-            raise RuntimeError(
-                f"Could not clone {owner_repo} for scanning: {clone_error}"
+        local_candidate = Path(repo_input).resolve()
+        if local_candidate.is_dir():
+            scan_workdir = str(local_candidate)
+            needs_cleanup = False
+            if service_name is None:
+                # Use the directory name as the service name. The
+                # operator can override with --service-name if the
+                # directory name isn't a valid service identifier.
+                effective_service = local_candidate.name
+                # Ensure the service exists in the DB. The remote
+                # path calls resolve_scan_service before the
+                # local-vs-remote branch; the local path skipped
+                # that step, so _stage_watcher's get_service call
+                # returned None and every candidate failed with
+                # "Service not found".
+                #
+                # resolve_scan_service inserts a service row keyed
+                # by name (ON CONFLICT DO NOTHING), so repeated
+                # local scans of the same directory are idempotent.
+                await self.resolve_scan_service(effective_service)
+            logger.info(
+                f"scan_repo: scanning local path {scan_workdir} "
+                f"(service={effective_service})"
             )
+        else:
+            scan_workdir, clone_error = await clone_repo(owner_repo)
+            if not scan_workdir:
+                raise RuntimeError(
+                    f"Could not clone {owner_repo} for scanning: {clone_error}"
+                )
+            needs_cleanup = True
 
         try:
             result = run_scan(
@@ -356,7 +395,8 @@ class IncidentService:
                 "incident_ids": incident_ids,
             }
         finally:
-            cleanup_repo(scan_workdir)
+            if needs_cleanup:
+                cleanup_repo(scan_workdir)
 
     async def scan_single_candidate(
         self,
@@ -553,10 +593,25 @@ class IncidentService:
         context["repo_workdir"] when the incident will need filesystem
         access.
 
-        The Provisioner is the sole owner of the clone's lifecycle.
-        It creates the clone here and it defines the cleanup that the
-        coordinator calls in its finally block. No other stage
-        creates, reads the process of creating, or removes the clone.
+        Two paths:
+
+        1. Local-path scan (context["scan_repo_path"] is set and
+           points at a directory). The working tree is already on
+           disk. There is nothing to clone. Set repo_workdir to the
+           scan path directly. The cleanup is a no-op — the path
+           belongs to the caller.
+
+        2. Remote repo (no scan_repo_path, or it's not a directory).
+           Clone via the Provisioner as before.
+
+        The distinction matters because scan_repo for local paths
+        sets service_name to the directory basename (e.g.
+        "requests-buggy"), which is not a valid GitHub repo name.
+        Without this branch, provision_clone tries to clone it as a
+        GitHub URL, fails with invalid_repo_name, and every
+        downstream stage that needs filesystem access degrades —
+        including the Investigator, whose read_file tool falls back
+        to basename search and reads the wrong file entirely.
 
         Returns:
             {"repo_workdir": "<path>"} on success.
@@ -565,6 +620,21 @@ class IncidentService:
             error — downstream stages detect the missing clone and
             degrade honestly.
         """
+        from pathlib import Path
+
+        # Local-path scan: reuse the working tree the caller
+        # already handed us.
+        scan_path = context.get("scan_repo_path")
+        if scan_path:
+            resolved = Path(scan_path)
+            if resolved.is_dir():
+                logger.info(
+                    f"📦 Provisioner: using local scan path "
+                    f"{resolved} (no clone)"
+                )
+                return {"repo_workdir": str(resolved)}
+
+        # Remote repo: clone as before.
         from src.agents.provisioner import provision_clone
 
         return await provision_clone(context)
