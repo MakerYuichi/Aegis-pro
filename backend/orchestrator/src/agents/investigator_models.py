@@ -166,6 +166,15 @@ class InvestigatorContext:
 
     # Scan-mode
     chain: list[dict[str, Any]] = field(default_factory=list)
+    # The symbol the pattern involves, as extracted by the source
+    # that produced the finding. For Pyright findings this is the
+    # real identifier (`__doc__`, `self.headers`) not the placeholder
+    # `<expression>`. Empty when unknown.
+    symbol: str = ""
+    # For Pyright findings, the diagnostic message. Rendered in the
+    # prompt so the Investigator can see exactly what the type
+    # checker said. Empty for pattern-matcher findings.
+    pyright_message: str = ""
 
     def to_prompt(self) -> str:
         """
@@ -180,6 +189,14 @@ class InvestigatorContext:
         parts.append(f"Message: {self.message}")
 
         if self.mode == MODE_SCAN:
+            if self.symbol:
+                parts.append("")
+                parts.append(f"## Symbol: {self.symbol}")
+            if self.pyright_message:
+                parts.append("")
+                parts.append(f"## Static analyzer message")
+                parts.append(self.pyright_message)
+
             parts.append("")
             parts.append("## Chain")
             if self.chain:

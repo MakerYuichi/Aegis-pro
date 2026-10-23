@@ -770,6 +770,23 @@ class IncidentService:
         }
         
         if settings.INVESTIGATOR_MODE == "agent":
+            # Pull the scan candidate's symbol and Pyright message
+            # out of the pipeline context, if present. In incident
+            # mode these are absent (empty defaults). In scan mode
+            # the pipeline sets context["scan_candidate"] with the
+            # candidate dict, and the top-level context carries the
+            # chain.
+            scan_candidate = context.get("scan_candidate") or {}
+            symbol = scan_candidate.get("symbol") or ""
+            pyright_message = ""
+            # The PatternMatch metadata lives on the ScanCandidate
+            # the scanner produced. For Pyright findings this carries
+            # the analyzer message. Fetch it defensively — older
+            # candidates may not have metadata.
+            scan_meta = scan_candidate.get("metadata") or {}
+            if isinstance(scan_meta, dict):
+                pyright_message = scan_meta.get("pyright_message") or ""
+
             investigation = await self._run_investigator_agent(
                 context=context,
                 service_name=service_name,
@@ -784,6 +801,8 @@ class IncidentService:
                 blast_radius=blast_radius,
                 mode=context.get("mode", "incident"),
                 chain=context.get("chain"),
+                symbol=symbol,
+                pyright_message=pyright_message,
             )
 
             result["investigation"] = investigation.to_dict()
@@ -832,6 +851,8 @@ class IncidentService:
         blast_radius: dict,
         mode: str = "incident",
         chain: list[dict] | None = None,
+        symbol: str = "",
+        pyright_message: str = "",
     ):
         """
         Build an InvestigatorContext, run the agent, return the
@@ -873,6 +894,8 @@ class IncidentService:
                 fix_outcomes=fix_outcomes,
                 blast_radius=blast_radius,
                 chain=chain,
+                symbol=symbol,
+                pyright_message=pyright_message,
             )
             agent = InvestigatorAgent(
                 llm_service=self.llm,

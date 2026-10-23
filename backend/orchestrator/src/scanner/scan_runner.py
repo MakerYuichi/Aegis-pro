@@ -382,6 +382,19 @@ def _as_candidate(
     reasoning: str,
 ) -> ScanCandidate:
     """Build a ScanCandidate from a match and (optionally) a chain."""
+    metadata: dict = {
+        "confidence": match.confidence,
+        "terminal_kind": chain.terminal_kind if chain else None,
+        "branch_count": chain.branch_count if chain else 0,
+    }
+    # Pass through the source's metadata so downstream stages (the
+    # Investigator, in particular) can consult the Pyright message
+    # and the analyzer-specific context.
+    if match.metadata:
+        for k in ("pyright_rule", "pyright_message", "pyright_severity"):
+            v = match.metadata.get(k)
+            if v is not None:
+                metadata[k] = v
     return ScanCandidate(
         root_file=match.file,
         root_line=match.line,
@@ -392,9 +405,5 @@ def _as_candidate(
         chain_depth=chain.depth if chain else 0,
         score=score,
         reasoning=reasoning,
-        metadata={
-            "confidence": match.confidence,
-            "terminal_kind": chain.terminal_kind if chain else None,
-            "branch_count": chain.branch_count if chain else 0,
-        },
+        metadata=metadata,
     )
