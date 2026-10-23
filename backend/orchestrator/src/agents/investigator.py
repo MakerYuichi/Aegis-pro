@@ -191,9 +191,21 @@ def _refuse(
     reason: str,
     candidates: list[str],
 ) -> InvestigationResult:
-    """Build a refusal that preserves the agent's audit trail."""
+    """Build a refusal that preserves the agent's audit trail.
+
+    Applies the same reason→status mapping as _refuse_result: a
+    refusal with reason=could_not_determine is not a verdict of
+    "not a bug", it's an admission of undecidedness. Route it to
+    STATUS_UNVERIFIED so downstream stages surface it under
+    "Needs Review" rather than "Refused".
+    """
+    status = (
+        STATUS_UNVERIFIED
+        if reason == REFUSE_COULD_NOT_DETERMINE
+        else STATUS_REFUSED
+    )
     return InvestigationResult(
-        status=STATUS_REFUSED,
+        status=status,
         reason=reason,
         candidates_considered=candidates,
         thought=result.thought,

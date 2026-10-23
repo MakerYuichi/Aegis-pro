@@ -91,3 +91,28 @@ def test_unverified_is_not_a_success():
         reason=REFUSE_COULD_NOT_DETERMINE,
     )
     assert result.is_success is False
+
+def test_validate_scan_confirmation_could_not_determine_maps_to_unverified():
+    """The _refuse helper used by _validate_scan_confirmation must
+    also apply the mapping. A refusal with reason=could_not_determine
+    that comes from post-hoc validation should still produce
+    status=unverified."""
+    from src.agents.investigator import _refuse
+    from src.agents.investigator_models import (
+        InvestigationResult, STATUS_CONFIRMED, STATUS_UNVERIFIED,
+        REFUSE_COULD_NOT_DETERMINE,
+    )
+    
+    confirmed = InvestigationResult(
+        status=STATUS_CONFIRMED,
+        failure_mode="some mode",
+        fix_location="src/foo.py",
+        confirmation="reasoned_only",
+        evidence="",  # no probe stated — the case that triggers downgrade
+    )
+    refused = _refuse(
+        confirmed, history=[], reason=REFUSE_COULD_NOT_DETERMINE,
+        candidates=["some mode"],
+    )
+    assert refused.status == STATUS_UNVERIFIED
+    assert refused.reason == REFUSE_COULD_NOT_DETERMINE
