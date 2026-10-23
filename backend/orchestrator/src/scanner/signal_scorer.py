@@ -80,6 +80,7 @@ from src.scanner.candidate import (
 # ---------------------------------------------------------------------------
 
 _CONFIDENCE_BASE: dict[str, float] = {
+    "proven": 0.85,
     "high": 0.8,
     "medium": 0.5,
     "low": 0.2,
