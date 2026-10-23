@@ -278,32 +278,21 @@ class IncidentService:
                 "Set SCANNER_MODE=manual to run scans explicitly."
             )
 
-        # Resolve the service before scanning. This is what makes
-        # _stage_watcher's lookup succeed: by the time the pipeline
-        # runs, the service exists in the DB (either it already did,
-        # or resolve_scan_service just created it).
-        effective_service = service_name or await self.resolve_scan_service(
-            owner_repo
-        )
-
         # Determine the working tree. Two paths:
         #
-        #   (a) repo_input is a directory on disk. Scan it in
-        #       place — no clone. This is the CI / acceptance-test
-        #       path: the caller already has a checkout, they just
-        #       want to scan it.
+        #   (a) repo_input is a directory on disk. Scan it in place.
+        #       Service name defaults to the directory basename.
         #
-        #   (b) repo_input is a repo identifier (owner/repo,
-        #       https://..., git@...). Clone it, scan the clone,
-        #       clean up the clone after.
+        #   (b) repo_input is a repo identifier. Clone it, scan the
+        #       clone, clean up after. Service name defaults to
+        #       owner/repo.
         #
-        # The check is `Path(repo_input).is_dir()` after parse,
-        # because parse_repo_input accepts anything that looks
-        # like owner/repo — including `work-investigator/requests-buggy`,
-        # which is a valid repo shape but also happens to be a
-        # directory path. Prefer the directory interpretation
-        # when it exists, since the alternative is a spurious
-        # clone of a repo that doesn't exist on GitHub.
+        # The service resolution is inside each branch, not before
+        # the branch. Before this fix, a local-path scan called
+        # resolve_scan_service twice: once with the parsed
+        # 'owner/repo' form of the path, once with the directory
+        # basename. Two DB lookups, two service rows, one of them
+        # named after the pytest tmpdir.
         from pathlib import Path
         from src.agents.repo_clone import clone_repo, cleanup_repo
 
@@ -312,32 +301,28 @@ class IncidentService:
             scan_workdir = str(local_candidate)
             needs_cleanup = False
             if service_name is None:
-                # Use the directory name as the service name. The
-                # operator can override with --service-name if the
-                # directory name isn't a valid service identifier.
                 effective_service = local_candidate.name
-                # Ensure the service exists in the DB. The remote
-                # path calls resolve_scan_service before the
-                # local-vs-remote branch; the local path skipped
-                # that step, so _stage_watcher's get_service call
-                # returned None and every candidate failed with
-                # "Service not found".
-                #
-                # resolve_scan_service inserts a service row keyed
-                # by name (ON CONFLICT DO NOTHING), so repeated
-                # local scans of the same directory are idempotent.
                 await self.resolve_scan_service(effective_service)
+            else:
+                effective_service = service_name
             logger.info(
                 f"scan_repo: scanning local path {scan_workdir} "
                 f"(service={effective_service})"
             )
         else:
+            if service_name is None:
+                effective_service = await self.resolve_scan_service(
+                    owner_repo
+                )
+            else:
+                effective_service = service_name
             scan_workdir, clone_error = await clone_repo(owner_repo)
             if not scan_workdir:
                 raise RuntimeError(
                     f"Could not clone {owner_repo} for scanning: {clone_error}"
                 )
             needs_cleanup = True
+
 
         try:
             result = run_scan(
