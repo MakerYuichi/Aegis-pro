@@ -70,6 +70,7 @@ from src.agents.tools.repo_tools import (
 )
 from src.agents.tools.read_chain import read_chain
 from src.agents.tools.probe import probe
+from src.agents.cpython_builtins import format_note
 
 
 # Caps. Enforced here, not requested in the prompt.
@@ -578,7 +579,7 @@ class InvestigatorAgent:
 
         resp = await self.llm.complete_raw_detailed(
             prompt=prompt,
-            system=self._system_prompt(context.mode),
+            system=self._system_prompt(context.mode, context=context),
             temperature=0.2,
             max_tokens=800,
             response_format="json_object",
@@ -600,9 +601,31 @@ class InvestigatorAgent:
     # Prompt building
     # ------------------------------------------------------------------
 
-    def _system_prompt(self, mode: str = MODE_INCIDENT) -> str:
+    def _system_prompt(
+        self,
+        mode: str = MODE_INCIDENT,
+        context: InvestigatorContext | None = None,
+    ) -> str:
         if mode == MODE_SCAN:
-            return self._scan_system_prompt()
+            base = self._scan_system_prompt()
+            # Append a builtin-specific note when the finding's
+            # symbol is a CPython module builtin with Optional type.
+            # The note tells the Investigator exactly why the symbol
+            # can be None (e.g. -OO mode strips __doc__), so it
+            # doesn't have to guess at interpreter semantics.
+            #
+            # Only appended for scan mode. Incident mode diagnoses a
+            # null source from a stack trace; the builtin table isn't
+            # relevant there.
+            if context is not None and context.symbol:
+                note = format_note(context.symbol)
+                if note:
+                    logger.debug(
+                        f"Investigator: injected builtin note for "
+                        f"symbol {context.symbol!r}"
+                    )
+                    base = base + "\n\n## CPython module builtin\n" + note
+            return base
         return self._incident_system_prompt()
 
     def _incident_system_prompt(self) -> str:
