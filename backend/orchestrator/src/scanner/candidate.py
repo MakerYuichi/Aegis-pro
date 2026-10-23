@@ -152,24 +152,6 @@ class ChainResult:
 
 @dataclass
 class PatternMatch:
-    """The pattern_matcher's output for one suspicious shape.
-
-    Fields:
-        file:        repo-relative POSIX path
-        line:        1-indexed
-        symbol:      the symbol the pattern involves (e.g. "order",
-                     "self.rag")
-        pattern:     the pattern name (e.g. "unchecked_optional_attr",
-                     "unchecked_dict_access")
-        confidence:  "high" | "medium" | "low" — the matcher's own
-                     confidence that this is worth investigating.
-                     The signal_scorer may override this.
-        snippet:     the source line, stripped
-        requires_chain: True when the pattern's danger depends on a
-                     symbol's origin (which the matcher cannot see).
-                     False for patterns that are dangerous on their
-                     own (e.g. bare `except: pass`).
-    """
     file: str
     line: int
     symbol: str
@@ -177,6 +159,7 @@ class PatternMatch:
     confidence: str
     snippet: str = ""
     requires_chain: bool = True
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -187,6 +170,7 @@ class PatternMatch:
             "confidence": self.confidence,
             "snippet": self.snippet,
             "requires_chain": self.requires_chain,
+            "metadata": self.metadata,
         }
 
 
