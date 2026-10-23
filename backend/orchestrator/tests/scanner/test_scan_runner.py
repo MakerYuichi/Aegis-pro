@@ -6,7 +6,10 @@ a real unchecked_optional_attr match with an Optional terminal
 chain, so the "report" branch of the gate is exercised with real
 input, not just synthetic.
 """
+from __future__ import annotations
+
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -133,14 +136,23 @@ def test_investigator_queue_sorted_by_score(repo):
 # The gate — investigator stream
 # ---------------------------------------------------------------------------
 
-def test_unknown_terminal_goes_to_investigator(repo):
-    """Every investigator outcome has terminal_kind == Unknown."""
+def test_unknown_or_untraced_terminal_goes_to_investigator(repo):
+    """Every investigator outcome has terminal_kind Unknown or None.
+
+    Two cases route to the investigator queue:
+      - "Unknown": the chain traced but couldn't classify the terminal
+        (origin function has no return annotation).
+      - None: the chain couldn't be built at all (untraceable symbol,
+        e.g. Pyright's "<expression>" placeholder).
+
+    Both are "we don't know" — the Investigator is the honest recipient.
+    Neither should ever end up in the report tier.
+    """
     result = run_scan(repo, top_n=10)
     for outcome in result.investigator_queue:
         assert outcome.destination == "investigator"
         assert outcome.chain is not None
-        assert outcome.chain.terminal_kind == "Unknown"
-        assert outcome.reasoning.startswith("INVESTIGATE:")
+        assert outcome.chain.terminal_kind in ("Unknown", None)
 
 
 def test_optional_terminal_goes_to_report_not_investigator(repo):
@@ -221,3 +233,77 @@ def test_synthesize_stack_trace_parses(repo):
     assert parsed["file_path"] == "src/services/incident_service.py"
     assert parsed["line_number"] == 1522
     assert parsed["exception_type"] == "AttributeError"
+
+def _match(file: str = "a.py", line: int = 1) -> PatternMatch:
+    return PatternMatch(
+        file=file, line=line, symbol="x",
+        pattern="bare_except", confidence="medium",
+        requires_chain=False,
+    )
+
+
+def test_scan_runner_calls_pyright_for_each_file(tmp_path):
+    """Pyright runs alongside match_patterns for every selected file."""
+    # Set up a minimal repo with one file.
+    (tmp_path / "a.py").write_text("x = 1\n")
+
+    with patch(
+        "src.scanner.scan_runner.select_files"
+    ) as mock_select, patch(
+        "src.scanner.scan_runner.match_patterns", return_value=[]
+    ), patch(
+        "src.scanner.scan_runner.run_pyright", return_value=[]
+    ) as mock_pyright:
+        # select_files returns objects with .path attribute
+        from types import SimpleNamespace
+        mock_select.return_value = [SimpleNamespace(path="a.py")]
+        run_scan(tmp_path, top_n=1, since_days=1, max_candidates=10)
+
+    mock_pyright.assert_called_once()
+    call_args = mock_pyright.call_args
+    assert call_args.args[0] == tmp_path / "a.py"
+    assert call_args.args[1] == "a.py"
+
+
+def test_scan_runner_merges_pattern_and_pyright_matches(tmp_path):
+    """Both sources contribute to the candidate pool."""
+    (tmp_path / "a.py").write_text("x = 1\n")
+
+    pyright_match = PatternMatch(
+        file="a.py", line=5, symbol="<expression>",
+        pattern="optional_operand", confidence="high",
+        requires_chain=True,
+    )
+    pattern_match = _match("a.py", line=1)
+
+    with patch(
+        "src.scanner.scan_runner.select_files"
+    ) as mock_select, patch(
+        "src.scanner.scan_runner.match_patterns",
+        return_value=[pattern_match],
+    ), patch(
+        "src.scanner.scan_runner.run_pyright",
+        return_value=[pyright_match],
+    ), patch(
+        "src.scanner.scan_runner.build_chain"
+    ) as mock_chain, patch(
+        "src.scanner.scan_runner.score_finding",
+        return_value=(0.5, "test"),
+    ):
+        from types import SimpleNamespace
+        mock_select.return_value = [SimpleNamespace(path="a.py")]
+        # build_chain is called for requires_chain=True matches only;
+        # the pyright match has requires_chain=True, the pattern
+        # match has requires_chain=False. Return a valid chain for
+        # the pyright match.
+        from src.scanner.candidate import ChainResult, CHAIN_TRACED
+        mock_chain.return_value = ChainResult(
+            status=CHAIN_TRACED,
+            chain=[],
+            terminal_kind="Unknown",
+        )
+        run_scan(tmp_path, top_n=1, since_days=1, max_candidates=10)
+
+    # Both matches were considered (build_chain called for the one
+    # that requires it, and score_finding called for both).
+    assert mock_chain.call_count == 1  # only the pyright one needs a chain

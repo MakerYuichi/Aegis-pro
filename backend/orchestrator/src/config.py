@@ -211,8 +211,8 @@ class Settings(BaseSettings):
 
     # Hard cap on candidates scored in one scan. Protects against a
     # pathological repo where every file fires every pattern.
-    SCANNER_MAX_CANDIDATES: int = 100
-    SCANNER_MAX_INCIDENTS: int = 10
+    SCANNER_MAX_CANDIDATES: int = 500
+    SCANNER_MAX_INCIDENTS: int = 20
     
     # Kubernetes (optional)
     K8S_API_URL: Optional[str] = None
