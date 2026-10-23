@@ -47,6 +47,7 @@ from src.agents.investigator_models import (
     STATUS_ITERATION_LIMIT,
     STATUS_REFUSED,
     STATUS_TIMEOUT,
+    STATUS_UNVERIFIED,
     CONFIRMATION_PROBE_REPRODUCED,
     CONFIRMATION_REASONED_ONLY,
     ALL_CONFIRMATIONS,
@@ -1183,9 +1184,27 @@ class InvestigatorAgent:
         iteration: int,
         history: list[dict[str, Any]],
     ) -> InvestigationResult:
+        reason = action.args.get("reason", "unspecified")
+        # A refusal with reason="could_not_determine" is not a
+        # verdict of "not a bug". It's the Investigator saying "I
+        # looked at the code and I can't decide." That's a
+        # different claim from "this is a false positive", and the
+        # pipeline should present it differently. Map it to
+        # status=unverified so downstream stages (the Fixer gate,
+        # the CLI's classification) can surface it under "Needs
+        # Review" rather than "Refused".
+        #
+        # A refusal with reason="false_positive" stays as
+        # STATUS_REFUSED — the Investigator is confident the
+        # finding is not a bug, and the report should say so.
+        status = (
+            STATUS_UNVERIFIED
+            if reason == REFUSE_COULD_NOT_DETERMINE
+            else STATUS_REFUSED
+        )
         return InvestigationResult(
-            status=STATUS_REFUSED,
-            reason=action.args.get("reason", "unspecified"),
+            status=status,
+            reason=reason,
             candidates_considered=action.args.get(
                 "candidates_considered", []
             ),
