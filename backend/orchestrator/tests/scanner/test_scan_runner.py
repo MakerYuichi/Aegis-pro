@@ -9,7 +9,8 @@ input, not just synthetic.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch, MagicMock
+import json
 
 import pytest
 
@@ -24,6 +25,13 @@ from src.scanner.candidate import (
     ChainLink,
     ChainResult,
     PatternMatch,
+)
+
+from src.services.incident_service import IncidentService
+from src.agents.investigator_models import (
+    InvestigationResult,
+    STATUS_UNVERIFIED,
+    REFUSE_COULD_NOT_DETERMINE,
 )
 
 
@@ -307,3 +315,67 @@ def test_scan_runner_merges_pattern_and_pyright_matches(tmp_path):
     # Both matches were considered (build_chain called for the one
     # that requires it, and score_finding called for both).
     assert mock_chain.call_count == 1  # only the pyright one needs a chain
+
+@pytest.mark.asyncio
+async def test_unverified_investigation_produces_unverified_finding():
+    """A status=unverified investigation flows to the incident's
+    extra_metadata.unverified_finding block, not to auto_fix."""
+    # Construct a context that will make _stage_investigator return
+    # an unverified investigation. The details are mocked — the
+    # assertion is about the classification, not the agent's
+    # reasoning.
+    mock_investigation = InvestigationResult(
+        status=STATUS_UNVERIFIED,
+        reason=REFUSE_COULD_NOT_DETERMINE,
+        failure_mode="some_failure_mode",
+        fix_location="src/foo.py",
+        evidence="couldn't determine",
+        confidence=0.5,
+        iterations=4,
+        history=[],
+    )
+
+    with patch.object(
+        IncidentService,
+        "_run_investigator_agent",
+        AsyncMock(return_value=mock_investigation),
+    ), patch(
+        "src.services.incident_service.settings",
+    ) as mock_settings:
+        mock_settings.INVESTIGATOR_MODE = "agent"
+        mock_settings.CURATOR_FEW_SHOT = False
+        mock_settings.CURATOR_MAX_OUTCOMES = 3
+
+        svc = IncidentService.__new__(IncidentService)
+        svc.llm = MagicMock()
+        svc.rag = MagicMock()
+        svc.rag.generate_context_prompt = AsyncMock(return_value="")
+        svc.llm.analyze_incident = AsyncMock(return_value={
+            "severity": "P2",
+            "title": "test",
+            "root_cause": "test",
+            "suggested_fix": "test",
+            "rollback_command": "test",
+            "confidence": 0.5,
+        })
+
+        context = {
+            "service_name": "svc",
+            "message": "test",
+            "reported_by": None,
+            "service": {"repo_name": None},
+            "stack_analysis": None,
+            "blast_radius": {"affected": [], "count": 0},
+            "incident_id": "INC-TEST",
+            "mode": "scan",
+            "chain": [],
+        }
+
+        result = await svc._stage_investigator(context)
+
+    # The classification should have produced unverified_finding,
+    # not auto_fix_skipped_reason alone.
+    assert "unverified_finding" in result
+    assert result["unverified_finding"]["status"] == "unverified"
+    assert result["unverified_finding"]["reason"] == REFUSE_COULD_NOT_DETERMINE
+    assert result.get("auto_fix_skipped_reason") == "investigator_unverified"

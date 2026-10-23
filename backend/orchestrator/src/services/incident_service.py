@@ -825,6 +825,21 @@ class IncidentService:
                     f"confirmation={investigation.confirmation}, "
                     f"confidence {investigation.confidence:.2f})"
                 )
+            elif investigation.status == "unverified":
+                # The Investigator looked, couldn't decide, and
+                # isn't claiming the finding is false positive.
+                # Route it to the unverified bucket so the CLI and
+                # dashboard show it under "Needs Review" — not
+                # alongside the confident false positives.
+                result["unverified_finding"] = investigation.to_dict()
+                result["auto_fix_skipped_reason"] = (
+                    "investigator_unverified"
+                )
+                logger.info(
+                    f"🔬 Investigator returned unverified "
+                    f"(reason={investigation.reason!r}); "
+                    f"no auto-fix, needs human review"
+                )
             else:
                 result["auto_fix_skipped_reason"] = investigation.status
                 logger.info(
