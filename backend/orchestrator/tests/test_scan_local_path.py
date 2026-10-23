@@ -89,7 +89,7 @@ async def test_scan_repo_local_path_defaults_service_to_dirname(tmp_path):
 
     captured: dict = {}
 
-    async def fake_scan_single(*, outcome, repo_path, service_name):
+    async def fake_scan_single(self, *, outcome, repo_path, service_name):
         captured["service_name"] = service_name
         return {"incident_id": "INC-1"}
 
