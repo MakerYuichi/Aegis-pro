@@ -749,8 +749,22 @@ class InvestigatorAgent:
             "hypothesis.\n\n"
             "End parameters:\n"
             '  confirm {"failure_mode": str, "fix_location": str, '
-            '"evidence": str, "confidence": float, '
-            '"confirmation": "probe_reproduced" | "reasoned_only"}\n'
+'"evidence": str, "confidence": float, '
+'"confirmation": "probe_reproduced" | "reasoned_only"}\n'
+'\n'
+'  IMPORTANT — the `evidence` field is REQUIRED, not optional. '
+'For any confirm, `evidence` must state: (a) the concrete '
+'failure mode, and (b) if `confirmation` is "reasoned_only", '
+'why a probe was not attempted. '
+'Confirmations with empty evidence are rejected by the pipeline. '
+'To satisfy (b), include one of these phrases in the evidence: '
+'"probe not possible: <reason>", '
+'"sandbox cannot reproduce: <reason>", '
+'"requires external state: <reason>", '
+'"environment-dependent: <reason>", '
+'"cannot construct: <reason>". '
+'An empty evidence field means an incomplete confirmation and '
+'the finding is discarded.\n\n'
             '  refuse  {"reason": "false_positive" | "could_not_determine", '
             '"candidates_considered": [str]}\n\n'
             "## Two kinds of findings\n"
@@ -835,6 +849,10 @@ class InvestigatorAgent:
 "line. It does not need to be a chain file — there is no "
 "chain. It is the file where the fix would land.\n\n"
 "## Rules for both kinds\n"
+"1. A confirm WITHOUT the `evidence` field populated will be "
+"REJECTED by the validator. `evidence` must state the failure "
+"mode and, for `reasoned_only`, why a probe was not attempted. "
+"See the schema section above.\n"
 "6. Every confirm must attempt a probe. If you name a "
 "failure_mode, you must write a probe call that reproduces "
 "it before calling confirm. The only exception is when the "
