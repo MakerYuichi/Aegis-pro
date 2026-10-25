@@ -1021,9 +1021,14 @@ class IncidentService:
         Render the Investigator's diagnosis as a prompt fragment for
         the Fixer.
 
-        Today the only diagnosis kind is a null source. When the
-        agent learns others, add a branch here — the Fixer's prompt
-        template does not change, and AutoFixService does not change.
+        Two diagnosis kinds, matching the two pipeline modes:
+
+          - incident mode: `null_source` is set. The block describes
+            the null-dereference expression the diff must address.
+          - scan mode: `failure_mode` is set (and often
+            `fix_location`). The block describes the failure mode
+            the diff must resolve, without naming a specific symbol
+            unless the failure mode itself names one.
 
         Returns an empty string when there is no diagnosis (stage
         mode, or the agent refused). An empty block leaves the
@@ -1036,24 +1041,47 @@ class IncidentService:
         part is done.
         """
         null_source = context.get("null_source")
-        if not null_source:
-            return ""
+        failure_mode = context.get("failure_mode")
 
-        return (
-            f"\nThe exception is a null dereference. The Investigator "
-            f"has identified the null source as:\n\n"
-            f"    {null_source}\n\n"
-            f"Your diff MUST address this exact expression. Either "
-            f"guard its use, add a null check where it's assigned, or "
-            f"replace it with a safe alternative. Do NOT modify any "
-            f"other line in the file — a diff that touches unrelated "
-            f"code will fail verification.\n\n"
-            f"Note: the stack trace's line number may be stale. The "
-            f"line that failed when the alert fired may not be the "
-            f"line that contains the null source now. Fix the code "
-            f"where {null_source} is assigned or used, not where the "
-            f"stack trace points."
-        )
+        if null_source:
+            return (
+                f"\nThe exception is a null dereference. The Investigator "
+                f"has identified the null source as:\n\n"
+                f"    {null_source}\n\n"
+                f"Your diff MUST address this exact expression. Either "
+                f"guard its use, add a null check where it's assigned, or "
+                f"replace it with a safe alternative. Do NOT modify any "
+                f"other line in the file — a diff that touches unrelated "
+                f"code will fail verification.\n\n"
+                f"Note: the stack trace's line number may be stale. The "
+                f"line that failed when the alert fired may not be the "
+                f"line that contains the null source now. Fix the code "
+                f"where {null_source} is assigned or used, not where the "
+                f"stack trace points."
+            )
+
+        if failure_mode:
+            return (
+                f"\nThe Investigator has confirmed the following "
+                f"failure mode:\n\n"
+                f"    {failure_mode}\n\n"
+                f"Your diff MUST fix this exact failure mode. "
+                f"Identify the specific line in the code below that "
+                f"produces it, and patch only that line. Do NOT add "
+                f"defensive checks to unrelated lines — a nearby "
+                f"`if X:` or `if not X.startswith(...)` pattern is "
+                f"NOT the bug unless the failure mode above names it. "
+                f"The code window shows ±30 lines around the crash "
+                f"site; only one line in that window is the actual "
+                f"defect. Choose it from the failure mode, not from "
+                f"what looks like it needs a guard.\n\n"
+                f"If the failure mode names a specific symbol (e.g. "
+                f"`__doc__`), the fix MUST target the line that uses "
+                f"or assigns that symbol — not a line that merely "
+                f"appears in the same window."
+            )
+
+        return ""
 
     # ------------------------------------------------------------------
     # Stage 3 — Fixer (Act)
@@ -1105,26 +1133,59 @@ class IncidentService:
         if inv_status == "confirmed" and inv_confirmation not in (
             "probe_reproduced", "probe_reproduced_realigned",
         ):
-            logger.info(
-                f"⏭️  Skipping auto-fix for {incident_id}: "
-                f"investigator confirmed but unverified "
-                f"(confirmation={inv_confirmation!r})"
+            # NEW: reasoned_only findings that document an interpreter-flag
+            # or external-state dependency are allowed through the Fixer.
+            # Rationale: the pipeline's whole point is that the Verifier is
+            # the trust anchor — a diff that doesn't fix the bug fails the
+            # Verifier. Blocking reasoned_only findings from the Fixer
+            # prevents the pipeline from ever producing a fix for a class
+            # of findings that are inherently un-probe-able (interpreter-
+            # flag-dependent, network-dependent, time-dependent). Those
+            # findings are not "unverified"; they're "un-probe-able but
+            # still real."
+            evidence = (investigation.get("evidence") or "").lower()
+            # Match _validate_scan_confirmation's marker list in
+            # investigator.py. The validator already decided this evidence
+            # is a valid reason to skip the probe; the Fixer should trust
+            # that verdict. The Verifier is the actual trust anchor — a
+            # wrong diff fails the tests regardless of the evidence.
+            #
+            # Keep this tuple in sync with the one in investigator.py.
+            un_probeable_markers = (
+                "probe", "sandbox", "network", "external",
+                "cannot construct", "cannot reproduce",
+                "environment", "time-dependent",
             )
-            return {
-                "auto_fix_skipped_reason": "investigator_unverified",
-                "unverified_finding": {
-                    "status": inv_status,
-                    "confirmation": inv_confirmation,
-                    "failure_mode": investigation.get("failure_mode"),
-                    "fix_location": investigation.get("fix_location"),
-                    "confidence": investigation.get("confidence"),
-                    "reason": (
-                        "Investigator confirmed this pattern but could "
-                        "not reproduce it with a probe. No fix was "
-                        "generated. Recommend human review."
-                    ),
-                },
-            }
+            if inv_confirmation == "reasoned_only" and any(
+                marker in evidence for marker in un_probeable_markers
+            ):
+                logger.info(
+                    f"⚙️  Fixer: proceeding with reasoned_only finding "
+                    f"{incident_id} — evidence documents an un-probe-able "
+                    f"external factor; Verifier will be the trust anchor"
+                )
+                # fall through to the fix generation below
+            else:
+                logger.info(
+                    f"⏭️  Skipping auto-fix for {incident_id}: "
+                    f"investigator confirmed but unverified "
+                    f"(confirmation={inv_confirmation!r})"
+                )
+                return {
+                    "auto_fix_skipped_reason": "investigator_unverified",
+                    "unverified_finding": {
+                        "status": inv_status,
+                        "confirmation": inv_confirmation,
+                        "failure_mode": investigation.get("failure_mode"),
+                        "fix_location": investigation.get("fix_location"),
+                        "confidence": investigation.get("confidence"),
+                        "reason": (
+                            "Investigator confirmed this pattern but could "
+                            "not reproduce it with a probe. No fix was "
+                            "generated. Recommend human review."
+                        ),
+                    },
+                }
 
         if inv_status == "confirmed" and inv_confirmation is None:
             # Defensive: this shouldn't happen. If it does, it's a bug
