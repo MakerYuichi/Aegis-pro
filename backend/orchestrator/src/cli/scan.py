@@ -95,6 +95,7 @@ async def _run(args: argparse.Namespace) -> int:
     print()
 
     verified = []
+    verification_failed = []
     unverified = []
     refused = []
     for iid in result.get("incident_ids", []):
@@ -108,14 +109,24 @@ async def _run(args: argparse.Namespace) -> int:
                 meta = _json.loads(meta)
             except Exception:
                 meta = {}
-        if meta.get("unverified_finding"):
-            unverified.append((iid, incident, meta["unverified_finding"]))
-        elif meta.get("auto_fix"):
-            verified.append((iid, incident, meta["auto_fix"]))
-        elif (meta.get("investigation") or {}).get("status") == "refused":
-            refused.append((iid, incident, meta.get("investigation", {})))
 
-    if not verified and not unverified:
+        investigation = meta.get("investigation") or {}
+        auto_fix = meta.get("auto_fix") or {}
+        verification = meta.get("verification") or {}
+
+        if auto_fix.get("diff") and verification.get("passed") is True:
+            verified.append((iid, incident, auto_fix))
+        elif auto_fix.get("diff"):
+            # A fix was generated but the Verifier did not confirm it.
+            # Common reasons: clone_failed, prefetch_failed_*,
+            # diff_does_not_apply, tests_failed, no_verification_surface.
+            verification_failed.append((iid, incident, auto_fix, verification))
+        elif meta.get("unverified_finding"):
+            unverified.append((iid, incident, meta["unverified_finding"]))
+        elif investigation.get("status") == "refused":
+            refused.append((iid, incident, investigation))
+
+    if not verified and not verification_failed and not unverified:
         print("No findings.")
     else:
         if verified:
@@ -127,16 +138,38 @@ async def _run(args: argparse.Namespace) -> int:
                 print(f"           Fix generated and verified.")
             print()
 
+        if verification_failed:
+            print("=== Verification Failed (fix generated, not confirmed) ===")
+            for iid, incident, auto_fix, verification in verification_failed:
+                print(f"  {iid}  {incident.get('file_path')}:"
+                      f"{incident.get('line_number')}  "
+                      f"{incident.get('title')}")
+                print(f"           reason={verification.get('reason', 'unknown')}")
+            print()
+
         if unverified:
             print("=== Needs Review (unverified) ===")
             for iid, incident, finding in unverified:
                 print(f"  {iid}  {incident.get('file_path')}:"
                       f"{incident.get('line_number')}  "
                       f"{incident.get('title')}")
-                mode = finding.get("failure_mode") or "unspecified pattern"
-                print(f"           {mode}")
-                print(f"           No fix generated — probe did not "
-                      f"reproduce. Recommend human review.")
+                # Two kinds of unverified findings:
+                #   1. confirmed+reasoned_only — the Fixer gate wrote
+                #      failure_mode; the finding was nearly proven
+                #   2. could_not_determine — the Investigator refused
+                #      without concluding false_positive; there's no
+                #      failure_mode, only a reason
+                failure_mode = finding.get("failure_mode")
+                if failure_mode:
+                    print(f"           {failure_mode}")
+                    print(f"           No fix generated — probe did not "
+                          f"reproduce. Recommend human review.")
+                else:
+                    reason = finding.get("reason") or "unknown"
+                    print(f"           Investigator could not determine "
+                          f"({reason})")
+                    print(f"           No fix generated. Recommend "
+                          f"human review.")
             print()
 
     if refused:
