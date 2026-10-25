@@ -224,13 +224,32 @@ class HostedVerifier(Verifier):
         existing = (context or {}).get("repo_workdir")
         reuse = False
         workdir: Path
+        tree_root: Path | None = None
+        # Whether the tree lives at <workdir>/repo/ (GitHub incident path:
+        # Provisioner cloned there) or directly at <workdir>/ (local scan:
+        # the operator pointed AEGIS at a checkout). The distinction
+        # matters for three things below: where git apply runs, where
+        # the test runner is detected, and where the file is read for
+        # realignment. Determined once and threaded through.
+        tree_relative: str = "repo"
 
         if existing:
             candidate = Path(existing)
-            if candidate.is_dir() and (candidate / "repo").is_dir():
-                workdir = candidate
+            if candidate.is_dir():
+                if (candidate / "repo").is_dir():
+                    workdir = candidate
+                    tree_root = candidate / "repo"
+                    tree_relative = "repo"
+                else:
+                    # Local scan: <workdir> IS the tree.
+                    workdir = candidate
+                    tree_root = candidate
+                    tree_relative = ""
                 reuse = True
-                logger.info(f"Verifier: reusing clone at {workdir}")
+                logger.info(
+                    f"Verifier: reusing clone at {workdir} "
+                    f"(tree_root={tree_root})"
+                )
 
         if not reuse:
             workdir = self._new_workdir()
@@ -244,9 +263,20 @@ class HostedVerifier(Verifier):
                     duration_ms=self._ms_since(start),
                     verifier="hosted",
                 )
+            tree_root = workdir / "repo"
+            tree_relative = "repo"
+            if not clone_ok:
+                logger.error(f"[TRACE] return: clone_failed")
+                return VerificationResult(
+                    passed=False,
+                    reason="clone_failed",
+                    output=clone_err,
+                    duration_ms=self._ms_since(start),
+                    verifier="hosted",
+                )
 
         try:
-            command, reason_prefix = _detect_runner(workdir / "repo", language)
+            command, reason_prefix = _detect_runner(tree_root, language)
             if command is None:
                 logger.error(f"[TRACE] return: no_verification_surface")
                 return VerificationResult(
@@ -270,7 +300,7 @@ class HostedVerifier(Verifier):
             ).get("file_path")
             file_lines: list[str] = []
             if target_path:
-                full = _resolve_repo_path(workdir / "repo", target_path)
+                full = _resolve_repo_path(tree_root, target_path)
                 if full is not None:
                     try:
                         file_lines = full.read_text(
@@ -292,7 +322,7 @@ class HostedVerifier(Verifier):
                 if full is not None:
                     try:
                         repo_relative_path = full.relative_to(
-                            workdir / "repo"
+                            tree_root
                         ).as_posix()
                     except ValueError:
                         repo_relative_path = None
@@ -319,14 +349,14 @@ class HostedVerifier(Verifier):
             # from "no manifest, proceeding" to "sdist_only and
             # build disabled" to "mirror_dir_missing".
             manifest_ref: ManifestRef | None = find_manifest(
-                workdir / "repo", language,
+                tree_root, language
             )
 
             cache_host_path: Path | None = None
             manifest_relative_path: str | None = None
 
             if manifest_ref is not None:
-                manifest_container = workdir / "repo" / manifest_ref.path
+                manifest_container = tree_root / manifest_ref.path
                 manifest_relative_path = manifest_ref.path.as_posix()
 
                 try:
@@ -351,6 +381,7 @@ class HostedVerifier(Verifier):
                             build_entrypoint_container_path=Path(
                                 "/app/scripts/build_entrypoint.py"
                             ),
+                            manifest_kind=manifest_ref.kind,
                         )
                     else:
                         prefetch_result = await run_prefetch(
@@ -364,6 +395,7 @@ class HostedVerifier(Verifier):
                             cache_host_path=Path(
                                 settings.VERIFIER_PIP_CACHE_HOST_DIR
                             ),
+                            manifest_kind=manifest_ref.kind,
                         )
                     cache_host_path = prefetch_result.cache_host_path
                 except PrefetchError as e:
@@ -398,6 +430,7 @@ class HostedVerifier(Verifier):
                     cpu_limit=settings.VERIFIER_CPU_LIMIT,
                     cache_host_path=cache_host_path,
                     manifest_relative_path=manifest_relative_path,
+                    tree_relative=tree_relative,
                 )
                 baseline_output = baseline_full_output[:8000]
                 baseline_failures = parse_failed_tests(baseline_full_output)
@@ -420,7 +453,7 @@ class HostedVerifier(Verifier):
                 # treat that as a failure for this attempt and let the
                 # retry loop feed the apply error back to the LLM.
                 apply_ok, apply_err = await self._apply_diff(
-                    workdir, current_diff, reset=True
+                    tree_root, current_diff, reset=True
                 )
                 if not apply_ok:
                     # Include a preview of the diff and the commit so
@@ -483,6 +516,7 @@ class HostedVerifier(Verifier):
                     cpu_limit=settings.VERIFIER_CPU_LIMIT,
                     cache_host_path=cache_host_path,
                     manifest_relative_path=manifest_relative_path,
+                    tree_relative=tree_relative,
                 )
                 output = full_output[:8000]
 
@@ -532,13 +566,40 @@ class HostedVerifier(Verifier):
                         realignment=realignment,
                     )
 
-                # Nonzero exit but no parsed failures at all. This
-                # usually means a collection error or a crash
-                # before pytest could report test IDs. Treat as a
-                # failure and let the repair loop see the raw
-                # output — the LLM may be able to diagnose from
-                # the traceback even without test IDs.
+                # Nonzero exit but no parsed failures at all. Two
+                # distinct cases:
+                #
+                # 1. pytest ran but collected 0 tests, or hit a
+                #    collection error. That's a test-environment
+                #    problem — repair can't fix it, and the LLM
+                #    will hallucinate a diff against context it
+                #    can't see. Return tests_could_not_run.
+                #
+                # 2. pytest ran, collected tests, but exited
+                #    nonzero without FAILED lines (rare; usually
+                #    a mid-suite collection error). Let repair
+                #    fire.
                 if not new and not pre_existing:
+                    if (
+                        "no tests ran" in full_output
+                        or "collected 0 items" in full_output
+                        or "ERROR collecting" in full_output
+                    ):
+                        logger.warning(
+                            f"Verifier: attempt {attempt_num} "
+                            f"collected zero tests or hit a "
+                            f"collection error; repair cannot "
+                            f"help. Returning tests_could_not_run."
+                        )
+                        return VerificationResult(
+                            passed=False,
+                            reason="tests_could_not_run",
+                            output=output,
+                            duration_ms=self._ms_since(start),
+                            attempts=attempts,
+                            verifier="hosted",
+                            realignment=realignment,
+                        )
                     logger.warning(
                         f"Verifier: attempt {attempt_num} failed "
                         f"with nonzero exit but zero parsed "
@@ -611,6 +672,29 @@ class HostedVerifier(Verifier):
             )
 
         finally:
+            # Reset the tree so the next run starts clean. Any diff
+            # applied during this run's attempts is discarded.
+            # Without this, the diff sticks around in the tree,
+            # corrupting the next run's realignment (the file's
+            # content no longer matches the diff's context).
+            if reuse and tree_root is not None:
+                try:
+                    reset_proc = await asyncio.create_subprocess_exec(
+                        "git", "-C", str(tree_root), "reset", "--hard",
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    )
+                    await reset_proc.communicate()
+                    clean_proc = await asyncio.create_subprocess_exec(
+                        "git", "-C", str(tree_root), "clean", "-fd",
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    )
+                    await clean_proc.communicate()
+                except Exception as e:
+                    logger.warning(
+                        f"Verifier: failed to reset tree at end of "
+                        f"verify(): {e}"
+                    )
+
             # Only remove clones we created. The Provisioner's clone
             # is cleaned up by the coordinator's finally block.
             if not reuse:
@@ -673,8 +757,8 @@ class HostedVerifier(Verifier):
                 
         return True, ""
 
-    async def _apply_diff(self, workdir, diff, reset: bool = False) -> tuple[bool, str]:
-        repo_dir = workdir / "repo"
+    async def _apply_diff(self, tree_root: Path, diff: str, reset: bool = False) -> tuple[bool, str]:
+        repo_dir = tree_root
         if reset:
             # Discard any previously-applied diff before retrying.
             #
@@ -704,20 +788,36 @@ class HostedVerifier(Verifier):
             )
             await clean_proc.communicate()
 
-        diff_file = workdir / "fix.diff"
+        # Write the diff to a temp file OUTSIDE the tree. Writing
+        # it inside leaves a stray file if the apply fails, and
+        # that file corrupts the next run's realignment (it appears
+        # in git status as untracked, and the realignment search
+        # sees spurious context matches). This is a general fix,
+        # not a per-repo one — any repo's tree should be pristine
+        # between attempts.
         text = diff if diff.endswith("\n") else diff + "\n"
         text = _normalize_diff_paths(text)
-        diff_file.write_text(text)
-        proc = await asyncio.create_subprocess_exec(
-            "git", "-C", str(repo_dir), "apply", "--recount",
-            "--whitespace=nowarn", str(diff_file),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        )
-
-        out, _ = await proc.communicate()
-        if proc.returncode != 0:
-            return False, out.decode("utf-8", errors="replace")[:4000]
-        return True, ""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".diff", delete=False,
+            prefix="aegis-apply-", encoding="utf-8",
+        ) as tmp:
+            tmp.write(text)
+            tmp_path = tmp.name
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", str(repo_dir), "apply", "--recount",
+                "--whitespace=nowarn", tmp_path,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            out, _ = await proc.communicate()
+            if proc.returncode != 0:
+                return False, out.decode("utf-8", errors="replace")[:4000]
+            return True, ""
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     @staticmethod
     def _ms_since(start: float) -> int:
@@ -1073,8 +1173,8 @@ def _detect_python_runner(repo_dir: Path) -> tuple[str | None, str]:
                 continue
             rel = found.parent.relative_to(repo_dir)
             if str(rel) == ".":
-                return "python -m pytest -q", "tests"
-            return f"cd {rel.as_posix()} && python -m pytest -q", "tests"
+                return "python -m pytest -q .", "tests"
+            return f"cd {rel.as_posix()} && python -m pytest -q .", "tests"
 
     # A bare tests/ directory (no config) is also a pytest signal.
     for tests_dir in repo_dir.rglob("tests"):
@@ -1087,8 +1187,8 @@ def _detect_python_runner(repo_dir: Path) -> tuple[str | None, str]:
             continue
         rel = tests_dir.parent.relative_to(repo_dir)
         if str(rel) == ".":
-            return "python -m pytest -q", "tests"
-        return f"cd {rel.as_posix()} && python -m pytest -q", "tests"
+            return "python -m pytest -q tests/", "tests"
+        return f"cd {rel.as_posix()} && python -m pytest -q tests/", "tests"
 
     # 2. ruff — same any-depth treatment.
     for marker in ("ruff.toml", ".ruff.toml"):
@@ -1146,6 +1246,7 @@ async def _run_in_docker(
     cpu_limit: str,
     cache_host_path: Path | None = None,
     manifest_relative_path: str | None = None,
+    tree_relative: str = "repo",
 ) -> tuple[int, str]:
     """
     Run `command` inside a fresh container with the repo bind-mounted
@@ -1160,7 +1261,10 @@ async def _run_in_docker(
     """
     container_relative = host_workdir.name
     host_path = f"{settings.VERIFIER_HOST_WORKDIR.rstrip('/')}/{container_relative}"
-    container_path = f"{container_workdir}/{container_relative}/repo"
+    if tree_relative:
+        container_path = f"{container_workdir}/{container_relative}/{tree_relative}"
+    else: 
+        container_path = f"{container_workdir}/{container_relative}/repo"
     container_name = f"aegis-verify-{uuid.uuid4().hex[:12]}"
 
     # Every argument in argv comes from a trusted source:
@@ -1203,27 +1307,36 @@ async def _run_in_docker(
     if cache_host_path is not None and manifest_relative_path is not None:
         argv.extend([
             "-v", f"{cache_host_path}:/cache:ro",
-            "-e", "PYTHONPATH=/tmp/site-packages",
         ])
-        # --no-deps was removed. The prefetcher's cache contains
-        # the full transitive closure — every wheel any direct
-        # dependency needs. The manifest only names the direct
-        # deps. With --no-deps, pip installs only what the
-        # manifest names and skips the transitives; pytest then
-        # fails at import time on the first missing plugin
-        # (pygments, iniconfig, pluggy, packaging, …).
-        # Removing --no-deps lets pip resolve against the cache.
-        # --no-index still prevents network access; the install
-        # is entirely local.
+        # Create a fresh virtualenv for this repo and install
+        # everything (runtime + test deps) into it. Run pytest from
+        # INSIDE the venv — this isolates the repo's deps AND plugins
+        # from the verifier image's packages.
+        #
+        # Without this:
+        #   - A repo pinning idna<2.8 conflicts with the image's
+        #     anyio (which needs idna>=2.8).
+        #   - The image's pytest-asyncio 0.25 breaks psf/requests
+        #     v2.19.0's collection (MarkDecorator incompatibility).
+        #
+        # With the venv:
+        #   - The venv has only what requirements.lock declared.
+        #   - pytest-asyncio is NOT installed unless the repo needs it.
+        #   - Old test suites collect and run correctly.
+        #
+        # PATH=/tmp/venv/bin:$PATH means `python -m pytest -q` (the
+        # command _detect_runner emits) resolves to the venv's python
+        # and pytest. No command-string rewriting needed.
         install_cmd = (
-            "mkdir -p /tmp/aegis-home /tmp/site-packages && "
-            "pip install --no-index --find-links /cache "
+            "python -m venv /tmp/venv && "
+            "/tmp/venv/bin/pip install --no-index --find-links /cache "
             "--quiet "
-            "--target /tmp/site-packages "
-            f"-r {manifest_relative_path} "
+            "-r /cache/requirements.lock "
             "&& "
+            "PATH=/tmp/venv/bin:$PATH "
         )
         effective_command = install_cmd + command
+
 
     argv.extend([
         "-w", container_path,
