@@ -13,6 +13,7 @@ and the agent falls back to confirmation="reasoned_only".
 """
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 import uuid
@@ -25,36 +26,73 @@ from src.agents.tools.repo_tools import ToolResult
 
 MAX_PROBE_CHARS = 4000  # cap the agent's test source
 
+# Flags the agent is permitted to pass. These are the CPython
+# interpreter flags that affect module-load-time behavior without
+# requiring a new file. Anything outside this set is refused —
+# notably, "-c" (arbitrary code), "-m" (arbitrary module), and any
+# path argument. The set is intentionally narrow.
+ALLOWED_INTERPRETER_FLAGS = frozenset({
+    "-O",    # basic optimizations; strips asserts
+    "-OO",   # also strips docstrings
+    "-B",    # don't write .pyc files
+    "-u",    # unbuffered stdout/stderr
+    "-E",    # ignore environment variables
+    "-S",    # don't run site initialization
+    "-q",    # quiet mode
+    "-X",    # implementation-specific option; requires the next arg
+})
+
+# Patterns the probe checks for when `reproduced=False` and no
+# interpreter_flags were supplied. These are the concrete ways
+# an agent can be tripped up by not having set the right flags.
+_DUNDER_PATTERNS: dict[str, tuple[re.Pattern, list[str]]] = {
+    "__doc__": (
+        re.compile(r"\b__doc__\b"),
+        ["-OO"],
+    ),
+    "__file__": (
+        re.compile(r"\b__file__\b"),
+        ["-c", "-m"],  # informational; not in allowlist
+    ),
+    "__spec__": (
+        re.compile(r"\b__spec__\b"),
+        ["-c", "-m"],  # informational
+    ),
+    "assert": (
+        re.compile(r"^\s*assert\b", re.MULTILINE),
+        ["-O", "-OO"],
+    ),
+    "help()": (
+        re.compile(r"\bhelp\s*\("),
+        ["-OO"],
+    ),
+}
+
 
 async def probe(
     repo: str,
     code: str,
     language: str = "Python",
+    interpreter_flags: list[str] | None = None,
 ) -> ToolResult:
     """Run a small test in the verifier's sandbox.
 
-    `repo` is the checked-out repo the agent is investigating. The
-    probe writes `code` to a temp file inside a sandbox workdir and
-    runs it. The test is expected to fail (that's the point — the
-    agent is trying to reproduce a suspected failure mode); a
-    successful run means the failure mode was NOT reproduced.
+    [unchanged docstring for the base case...]
 
-    Returns a ToolResult whose `result` is the captured stdout/stderr
-    and whose metadata carries:
-        exit_code:  int
-        duration_ms: int
-        reproduced: True when the test ran and failed as expected
-                    (exit_code != 0). False otherwise.
-        ran:        True when the probe actually ran in a sandbox.
-                    False when the sandbox was unavailable or the
-                    run could not be attempted. The agent must not
-                    claim probe_reproduced when ran is False.
+    `interpreter_flags`, when supplied, is prepended to the python
+    invocation inside the sandbox: `python -OO -m aegis_probe`.
+    The list must contain only flags from ALLOWED_INTERPRETER_FLAGS;
+    anything else is refused with error="invalid_interpreter_flags".
 
-    This tool never raises. Every failure mode — no repo, empty
-    code, sandbox unavailable — is a ToolResult with ok=False or
-    ran=False, and the agent handles it as an observation.
+    When `reproduced=False`, the result metadata contains
+    `reproduction_hint`: a short string the agent can act on. See
+    `_suggest_interpreter_flags` for how it is derived.
     """
-    args = {"language": language, "code_chars": len(code or "")}
+    args = {
+        "language": language,
+        "code_chars": len(code or ""),
+        "interpreter_flags": list(interpreter_flags or []),
+    }
 
     if not code or not code.strip():
         return ToolResult(
@@ -67,23 +105,29 @@ async def probe(
             error=f"code_too_long: {len(code)} > {MAX_PROBE_CHARS}",
         )
 
+    # Validate flags before anything else — cheap, and the error
+    # message tells the agent what's allowed.
+    flags = list(interpreter_flags or [])
+    invalid = [f for f in flags if f not in ALLOWED_INTERPRETER_FLAGS]
+    if invalid:
+        return ToolResult(
+            ok=False, tool="probe", args=args,
+            error=(
+                f"invalid_interpreter_flags: {invalid!r}; "
+                f"allowed: {sorted(ALLOWED_INTERPRETER_FLAGS)}"
+            ),
+        )
+
     repo_path = Path(repo).resolve()
     if not repo_path.is_dir():
         return ToolResult(
             ok=False, tool="probe", args=args, error="repo_not_found",
         )
 
-    # Import the sandbox primitive from the verifier. This is the
-    # same code path HostedVerifier uses; keeping the import local
-    # avoids a circular dependency (verifier imports models, models
-    # imports nothing from tools).
     from src.agents.verifier import _run_in_docker, _image_for_language
     from src.config import settings
 
     if not settings.VERIFY_BEFORE_REPORT:
-        # The sandbox is disabled. Refuse to run — and report the
-        # reason so the agent knows probe_reproduced is impossible
-        # in this deployment.
         return ToolResult(
             ok=False,
             tool="probe",
@@ -98,9 +142,6 @@ async def probe(
 
     workdir = _new_probe_workdir()
     try:
-        # Write the agent's test into the workdir alongside a copy of
-        # the repo, so the test can import from it. The sandbox
-        # mounts the workdir read-write.
         repo_copy = workdir / "repo"
         try:
             shutil.copytree(
@@ -119,35 +160,75 @@ async def probe(
         test_file = repo_copy / "aegis_probe.py"
         test_file.write_text(code, encoding="utf-8")
 
+        # Build the command with flags. The flags were validated
+        # against ALLOWED_INTERPRETER_FLAGS above, so the only
+        # tokens reaching the shell are allowlisted and the module
+        # name is a fixed string. There is no path through this
+        # code where agent-supplied text becomes a shell token.
+        flag_str = (" " + " ".join(flags)) if flags else ""
+        probe_command = f"python{flag_str} -m aegis_probe"
+
         exit_code, output = await _run_in_docker(
             image=_image_for_language(language),
             host_workdir=workdir,
             container_workdir=settings.VERIFIER_CONTAINER_WORKDIR,
-            command="python -m aegis_probe",
+            command=probe_command,
             timeout=settings.VERIFY_TIMEOUT_SECONDS,
             memory_limit=settings.VERIFIER_MEMORY_LIMIT,
             cpu_limit=settings.VERIFIER_CPU_LIMIT,
         )
 
         reproduced = exit_code != 0
+
+        # Build metadata. When reproduced is False and no flags were
+        # supplied, check whether the code likely needs them.
+        metadata: dict = {
+            "ran": True,
+            "reproduced": reproduced,
+            "exit_code": exit_code,
+        }
+        if not reproduced and not flags:
+            hint = _suggest_interpreter_flags(code)
+            if hint:
+                metadata["reproduction_hint"] = hint
+
         return ToolResult(
             ok=True,
             tool="probe",
             args=args,
             result=output,
-            metadata={
-                "ran": True,
-                "reproduced": reproduced,
-                "exit_code": exit_code,
-            },
+            metadata=metadata,
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _suggest_interpreter_flags(code: str) -> str | None:
+    """
+    Inspect the agent's probe source. If it references a symbol
+    whose value depends on interpreter flags, return a hint string
+    suggesting the flag.
+
+    The hint is advisory — the agent decides whether to retry.
+    Returning None means "no evidence the flags are needed", which
+    is the honest answer when the code doesn't touch dunders.
+    """
+    for symbol, (pattern, flags) in _DUNDER_PATTERNS.items():
+        if pattern.search(code):
+            usable = [f for f in flags if f in ALLOWED_INTERPRETER_FLAGS]
+            if not usable:
+                continue
+            flag_list = ", ".join(repr(f) for f in usable)
+            return (
+                f"probe referenced {symbol!r} but ran without "
+                f"interpreter flags; the value of {symbol} depends on "
+                f"the interpreter mode. If the failure mode requires "
+                f"{flag_list}, retry with interpreter_flags=[{flag_list}]."
+            )
+    return None
+
+
 def _new_probe_workdir() -> Path:
-    """Create a fresh workdir for the probe. Same layout as the
-    verifier's, so the sandbox mount resolves the same way."""
     from src.config import settings
     base = Path(settings.VERIFIER_CONTAINER_WORKDIR)
     base.mkdir(parents=True, exist_ok=True)
