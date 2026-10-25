@@ -109,5 +109,11 @@ def format_note(symbol: str) -> str | None:
         f"iteration (for _ in x) all raise at runtime when the "
         f"symbol is None. If the code does not have a runtime guard "
         f"before the operation, this is a real bug, not a false "
-        f"positive."
+        f"positive. Do NOT refuse on the grounds that the builtin is "
+        f"'usually a string'. Under the invocation mode described above"
+        f" (e.g. -OO for __doc__), it is None, and the operation raises."
+        f"The question is not whether the value is usually non-None. "
+        f"The question is whether the code guards against the case where" 
+        f"it IS None. If it doesn't, confirm."
+        
     )

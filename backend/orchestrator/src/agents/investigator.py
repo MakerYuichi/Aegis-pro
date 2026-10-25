@@ -252,10 +252,17 @@ def _validate_scan_confirmation(
                 "reasoned_only"
             )
             result.confirmation = CONFIRMATION_REASONED_ONLY
+            # NEW: annotate the evidence so downstream validators and
+            # human readers know the downgrade happened. Without this,
+            # the very next check refuses the finding because the
+            # evidence doesn't acknowledge a failure to probe — but
+            # the agent never had a chance to write that
+            # acknowledgement, because it believed the probe
+            # succeeded when it composed the evidence.
+            result.evidence = _append_downgrade_note(
+                result.evidence, history,
+            )
 
-    # NEW: reasoned_only confirmations must state why a probe was
-    # not attempted. A finding that names a failure_mode but offers
-    # no probe and no explanation is a guess dressed as a finding.
     if result.confirmation == CONFIRMATION_REASONED_ONLY:
         evidence = (result.evidence or "").lower()
         if not any(
@@ -274,6 +281,55 @@ def _validate_scan_confirmation(
             )
 
     return result
+
+
+def _append_downgrade_note(
+    evidence: str,
+    history: list[dict[str, Any]],
+) -> str:
+    """
+    Append a note explaining that a probe ran but did not reproduce.
+
+    The note is derived from the last successful probe observation
+    in the history. It is what makes the evidence string self-
+    consistent after the pipeline downgrades the confirmation: the
+    reader sees both what the agent claimed and what the pipeline
+    observed.
+
+    If no probe observation exists at all (the agent claimed
+    probe_reproduced but never called probe), the note says so. That
+    is also the honest answer.
+    """
+    last_probe = None
+    for obs in reversed(history):
+        if obs.get("tool") == "probe":
+            last_probe = obs
+            break
+
+    if last_probe is None:
+        note = (
+            " [Pipeline: probe_reproduced claimed but no probe was "
+            "called; confirmation downgraded to reasoned_only.]"
+        )
+    elif not last_probe.get("ok"):
+        note = (
+            f" [Pipeline: last probe failed with "
+            f"error={last_probe.get('error')!r}; confirmation "
+            f"downgraded to reasoned_only.]"
+        )
+    else:
+        meta = last_probe.get("metadata") or {}
+        hint = meta.get("reproduction_hint")
+        note = (
+            f" [Pipeline: probe ran but did not reproduce "
+            f"(exit_code={meta.get('exit_code')}); confirmation "
+            f"downgraded to reasoned_only."
+        )
+        if hint:
+            note += f" Hint: {hint}"
+        note += "]"
+
+    return (evidence or "").rstrip() + note
 
 
 def _find_observation_at_crash(
@@ -744,9 +800,12 @@ class InvestigatorAgent:
             '  read_symbol     {"path": str, "symbol_name": str}\n'
             '  search_codebase {"pattern": str, "file_glob": str?}\n'
             '  read_chain      {}  — reads the full chain in one observation\n'
-            '  probe           {"code": str, "language": "Python"?}  — '
-            "runs the code in a sandbox. Use this to test your "
-            "hypothesis.\n\n"
+            '  probe           {"code": str, "language": "Python"?, '
+'"interpreter_flags": [str]?}  — runs the code in a sandbox. '
+'Use this to test your hypothesis. If the failure depends on '
+'interpreter flags (-O, -OO), pass them in `interpreter_flags` '
+'— otherwise the probe runs plain `python` and will not '
+'reproduce dunder-stripping failures.\n\n'
             "End parameters:\n"
             '  confirm {"failure_mode": str, "fix_location": str, '
 '"evidence": str, "confidence": float, '
@@ -855,15 +914,19 @@ class InvestigatorAgent:
 "See the schema section above.\n"
 "6. Every confirm must attempt a probe. If you name a "
 "failure_mode, you must write a probe call that reproduces "
-"it before calling confirm. The only exception is when the "
-"failure mode requires external state you cannot construct "
-"in a sandbox (network, time, filesystem, interpreter "
-"flags like -OO, -c, -m, or specific Python versions) — in "
-"that case, set confirmation=\"reasoned_only\" and state in "
-"evidence which external factor makes a sandbox probe "
-"impossible. A confirm with confirmation=\"reasoned_only\" "
-"and no stated reason is incomplete and will be rejected by "
-"the validator.\n"
+"it before calling confirm. If the probe returns "
+"ran=true, reproduced=false and the observation includes a "
+"`reproduction_hint` field, follow the hint and retry the "
+"probe with `interpreter_flags` set — do NOT immediately "
+"confirm with confirmation=\"probe_reproduced\"; that claim "
+"will be rejected by the validator. The only reasons to "
+"give up after a probe failure are: (a) the failure mode "
+"requires external state that cannot be constructed in a "
+"sandbox at all (network, wall-clock time, filesystem state "
+"outside the repo); (b) the probe requires an interpreter "
+"flag outside the allowed set. In either case, set "
+"confirmation=\"reasoned_only\" and state in evidence which "
+"external factor makes a sandbox probe impossible.\n"
 "7. State a concrete failure mode. Not \"looks wrong\" — "
 "\"crashes when order_id doesn't exist\". Name the input "
 "shape that triggers it, and name the observable result.\n"
@@ -1154,6 +1217,7 @@ class InvestigatorAgent:
                 repo=self.repo_root,
                 code=action.args.get("code", ""),
                 language=action.args.get("language", "Python"),
+                interpreter_flags=action.args.get("interpreter_flags"),
             )
         else:
             # Should be unreachable — _parse_action rejects unknown
