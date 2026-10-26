@@ -90,6 +90,7 @@ async def probe(
     """
     args = {
         "language": language,
+        "code": code[:MAX_PROBE_CHARS] if code else "",
         "code_chars": len(code or ""),
         "interpreter_flags": list(interpreter_flags or []),
     }
@@ -178,7 +179,8 @@ async def probe(
             cpu_limit=settings.VERIFIER_CPU_LIMIT,
         )
 
-        reproduced = exit_code != 0
+        reproduced = (exit_code != 0) or _output_signals_bug(output)
+
 
         # Build metadata. When reproduced is False and no flags were
         # supplied, check whether the code likely needs them.
@@ -235,3 +237,25 @@ def _new_probe_workdir() -> Path:
     target = base / f"probe-{uuid.uuid4().hex[:12]}"
     target.mkdir(parents=True, exist_ok=False)
     return target
+
+def _output_signals_bug(output: str) -> bool:
+    """
+    Return True if the probe's output contains a Python exception
+    signature — i.e., the code caught the exception and printed it
+    (as agents often do), rather than letting it propagate.
+    """
+    if not output:
+        return False
+    patterns = (
+        "TypeError:",
+        "AttributeError:",
+        "KeyError:",
+        "ValueError:",
+        "RuntimeError:",
+        "AssertionError:",
+        "ImportError:",
+        "ModuleNotFoundError:",
+        "SyntaxError:",
+        "IndexError:",
+    )
+    return any(p in output for p in patterns)
