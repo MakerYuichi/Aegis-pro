@@ -416,260 +416,42 @@ class HostedVerifier(Verifier):
                     f"Verifier: no dependency manifest in "
                     f"{repo_name}; skipping prefetch"
                 )
+                
+                        # ── Single-attempt verification ──────────────────────
+            #
+            # No toolchain loop. Use the fixed image (Python 3.11 +
+            # pytest 8.3.4) and try to run the repo's tests. If the
+            # suite can't collect (old repo, MarkDecorator error,
+            # pytest version mismatch), report tests_could_not_run
+            # honestly. No whack-a-mole, no Python 3.7.
+            image = _image_for_language(language)
 
-            baseline_failures: set[str] = set()
-            baseline_output = ""
-            try:
-                baseline_exit, baseline_full_output = await _run_in_docker(
-                    image=_image_for_language(language),
-                    host_workdir=workdir,
-                    container_workdir=settings.VERIFIER_CONTAINER_WORKDIR,
-                    command=command,
-                    timeout=settings.VERIFY_TIMEOUT_SECONDS,
-                    memory_limit=settings.VERIFIER_MEMORY_LIMIT,
-                    cpu_limit=settings.VERIFIER_CPU_LIMIT,
-                    cache_host_path=cache_host_path,
-                    manifest_relative_path=manifest_relative_path,
-                    tree_relative=tree_relative,
-                )
-                baseline_output = baseline_full_output[:8000]
-                baseline_failures = parse_failed_tests(baseline_full_output)
-                logger.info(
-                    f"Verifier: baseline run exit={baseline_exit}, "
-                    f"{len(baseline_failures)} pre-existing failures"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Verifier: baseline run failed, "
-                    f"treating all failures as new: {e}"
-                )
-
-            attempts: list[dict] = []
-            max_attempts = max(1, settings.VERIFY_MAX_ATTEMPTS)
-            current_diff = diff
-
-            for attempt_num in range(1, max_attempts + 1):
-                # Try to apply the current diff. If it doesn't apply,
-                # treat that as a failure for this attempt and let the
-                # retry loop feed the apply error back to the LLM.
-                apply_ok, apply_err = await self._apply_diff(
-                    tree_root, current_diff, reset=True
-                )
-                if not apply_ok:
-                    # Include a preview of the diff and the commit so
-                    # the failure is diagnosable from the incident
-                    # record alone. Without the commit, a future
-                    # version-mismatch failure would require the same
-                    # manual archaeology this run just went through.
-                    diff_preview = current_diff[:400] if current_diff else "<empty>"
-                    attempts.append({
-                        "attempt": attempt_num,
-                        "passed": False,
-                        "output": (
-                            f"git apply failed at commit {commit_sha}: {apply_err}\n"
-                            f"--- diff (first 400 chars) ---\n"
-                            f"{diff_preview}"
-                        ),
-                    })
-
-                    if attempt_num < max_attempts:
-                        repaired = await _attempt_repair(
-                            original_context=context or {},
-                            failed_output=f"git apply failed: {apply_err}",
-                            previous_diff=current_diff,
-                        )
-                        if not repaired:
-                            logger.info(
-                                f"Verifier: repair failed on "
-                                f"attempt {attempt_num}; "
-                                f"breaking with {len(attempts)} "
-                                f"attempts recorded"
-                            )
-                            break
-                        # The repair LLM doesn't know about
-                        # monorepo layout. Its hunk headers use the
-                        # conceptual path from the stack trace
-                        # (src/agents/repo_clone.py), not the
-                        # resolved repo path
-                        # (backend/orchestrator/src/agents/
-                        # repo_clone.py). Rewrite the headers the
-                        # same way the initial diff was rewritten,
-                        # so the next git apply targets a file that
-                        # exists.
-                        if file_lines:
-                            repaired, _ = _realign_diff(
-                                repaired, file_lines,
-                                repo_relative_path,
-                            )
-                        current_diff = repaired
-                        continue
-                    else:
-                        break
-
-                exit_code, full_output = await _run_in_docker(
-                    image=_image_for_language(language),
-                    host_workdir=workdir,
-                    container_workdir=settings.VERIFIER_CONTAINER_WORKDIR,
-                    command=command,
-                    timeout=settings.VERIFY_TIMEOUT_SECONDS,
-                    memory_limit=settings.VERIFIER_MEMORY_LIMIT,
-                    cpu_limit=settings.VERIFIER_CPU_LIMIT,
-                    cache_host_path=cache_host_path,
-                    manifest_relative_path=manifest_relative_path,
-                    tree_relative=tree_relative,
-                )
-                output = full_output[:8000]
-
-                # Compare this attempt's failures against the
-                current_failed = parse_failed_tests(full_output)
-                new = current_failed - baseline_failures
-                pre_existing = current_failed & baseline_failures
-
-                passed = exit_code == 0
-                attempts.append({
-                    "attempt": attempt_num,
-                    "passed": passed,
-                    "output": output,
-                    "new_failures": sorted(new),
-                    "pre_existing_failures": sorted(pre_existing),
-                })
-
-                if passed:
-                    logger.error(f"[TRACE] return: tests_passed attempts={len(attempts)}")
-                    return VerificationResult(
-                        passed=True,
-                        reason=f"{reason_prefix}_passed",
-                        output=output,
-                        duration_ms=self._ms_since(start),
-                        attempts=attempts,
-                        verifier="hosted",
-                        realignment=realignment,
-                    )
-
-                # Exit code was nonzero but no new failures.
-                # The diff didn't break anything; the failures
-                # are all pre-existing. Report the diff as clean
-                # with an honest label.
-                if not new and pre_existing:
-                    logger.info(
-                        f"Verifier: attempt {attempt_num} failed "
-                        f"but all {len(pre_existing)} failures are "
-                        f"pre-existing; treating as passed"
-                    )
-                    return VerificationResult(
-                        passed=True,
-                        reason=f"{reason_prefix}_passed_pre_existing_failures",
-                        output=output,
-                        duration_ms=self._ms_since(start),
-                        attempts=attempts,
-                        verifier="hosted",
-                        realignment=realignment,
-                    )
-
-                # Nonzero exit but no parsed failures at all. Two
-                # distinct cases:
-                #
-                # 1. pytest ran but collected 0 tests, or hit a
-                #    collection error. That's a test-environment
-                #    problem — repair can't fix it, and the LLM
-                #    will hallucinate a diff against context it
-                #    can't see. Return tests_could_not_run.
-                #
-                # 2. pytest ran, collected tests, but exited
-                #    nonzero without FAILED lines (rare; usually
-                #    a mid-suite collection error). Let repair
-                #    fire.
-                if not new and not pre_existing:
-                    if (
-                        "no tests ran" in full_output
-                        or "collected 0 items" in full_output
-                        or "ERROR collecting" in full_output
-                    ):
-                        logger.warning(
-                            f"Verifier: attempt {attempt_num} "
-                            f"collected zero tests or hit a "
-                            f"collection error; repair cannot "
-                            f"help. Returning tests_could_not_run."
-                        )
-                        return VerificationResult(
-                            passed=False,
-                            reason="tests_could_not_run",
-                            output=output,
-                            duration_ms=self._ms_since(start),
-                            attempts=attempts,
-                            verifier="hosted",
-                            realignment=realignment,
-                        )
-                    logger.warning(
-                        f"Verifier: attempt {attempt_num} failed "
-                        f"with nonzero exit but zero parsed "
-                        f"failures; letting repair loop fire"
-                    )
-                    # fall through to repair
-
-                if attempt_num < max_attempts:
-                    repaired = await _attempt_repair(
-                        original_context=context or {},
-                        failed_output=full_output[-8000:],
-                        previous_diff=current_diff,
-                    )
-                    if not repaired:
-                        logger.info(
-                            f"Verifier: repair failed on "
-                            f"attempt {attempt_num}; "
-                            f"breaking with {len(attempts)} "
-                            f"attempts recorded"
-                        )
-                        break
-                    # Same realignment as the apply-failure
-                    # branch. Test failures can also produce a
-                    # repaired diff that names the wrong path in a
-                    # monorepo — the LLM reasons from the stack
-                    # trace's path, not from the resolved one.
-                    if file_lines:
-                        repaired, _ = _realign_diff(
-                            repaired, file_lines,
-                            repo_relative_path,
-                        )
-                    current_diff = repaired
-
-            # If we got here, all attempts failed. The last attempt's
-            # output tells the reader what happened — either a test
-            # failure or an apply failure.
-            last_output = attempts[-1]["output"] if attempts else ""
-            if attempts and "git apply failed" in attempts[-1]["output"]:
-                return VerificationResult(
-                    passed=False,
-                    reason="diff_does_not_apply",
-                    output=last_output,
-                    duration_ms=self._ms_since(start),
-                    attempts=attempts,
-                    verifier="hosted",
-                    realignment=realignment,
-                )
-
-            last_new = set(attempts[-1].get("new_failures", []))
-            last_pre = set(attempts[-1].get("pre_existing_failures", []))
-            if not last_new and last_pre:
-                return VerificationResult(
-                    passed=True,
-                    reason=f"{reason_prefix}_passed_pre_existing_failures",
-                    output=last_output,
-                    duration_ms=self._ms_since(start),
-                    attempts=attempts,
-                    verifier="hosted",
-                    realignment=realignment,
-                )
-
-            return VerificationResult(
-                passed=False,
-                reason=f"{reason_prefix}_failed",
-                output=last_output,
-                duration_ms=self._ms_since(start),
-                attempts=attempts,
-                verifier="hosted",
-                realignment=realignment,
+            logger.info(
+                f"Verifier: single-attempt verification "
+                f"(image={image})"
             )
+
+            tc_result = await self._attempt_with_toolchain(
+                tree_root=tree_root,
+                workdir=workdir,
+                tree_relative=tree_relative,
+                diff=diff,
+                language=language,
+                command=command,
+                commit_sha=commit_sha,
+                context=context,
+                realignment=realignment,
+                cache_host_path=cache_host_path,
+                manifest_relative_path=manifest_relative_path,
+                pytest_version="8.3.4",
+                python_version="3.11",
+                image=image,
+                file_lines=file_lines,
+                repo_relative_path=repo_relative_path,
+            )
+
+            return tc_result
+
 
         finally:
             # Reset the tree so the next run starts clean. Any diff
@@ -822,6 +604,415 @@ class HostedVerifier(Verifier):
     @staticmethod
     def _ms_since(start: float) -> int:
         return int((time.monotonic() - start) * 1000)
+    
+    
+    async def _attempt_with_toolchain(
+        self,
+        *,
+        tree_root: Path,
+        workdir: Path,
+        tree_relative: str,
+        diff: str,
+        language: str,
+        command: str,
+        commit_sha: str,
+        context: dict | None,
+        realignment: RealignmentReport,
+        cache_host_path: Path | None,
+        manifest_relative_path: str | None,
+        pytest_version: str,
+        python_version: str,
+        image: str,
+        file_lines: list[str],
+        repo_relative_path: str | None,
+        constraints: list[str] | None = None,
+    ) -> VerificationResult:
+        """
+        One attempt: baseline pytest, apply diff, re-run pytest.
+        No toolchain-specific logic — the image is fixed at Python
+        3.11 with pytest 8.3.4. Used when running pytest against a
+        repo whose test suite is modern enough to collect on pytest 8.
+        """
+        start = time.monotonic()
+
+        baseline_failures: set[str] = set()
+        baseline_output = ""
+        baseline_exit = -1
+        try:
+            baseline_exit, baseline_full_output = await _run_in_docker(
+                image=image,
+                host_workdir=workdir,
+                container_workdir=settings.VERIFIER_CONTAINER_WORKDIR,
+                command=command,
+                timeout=settings.VERIFY_TIMEOUT_SECONDS,
+                memory_limit=settings.VERIFIER_MEMORY_LIMIT,
+                cpu_limit=settings.VERIFIER_CPU_LIMIT,
+                cache_host_path=cache_host_path,
+                manifest_relative_path=manifest_relative_path,
+                tree_relative=tree_relative,
+            )
+            baseline_output = baseline_full_output[:8000]
+            baseline_failures = parse_failed_tests(baseline_full_output)
+            logger.info(
+                f"Verifier: baseline run exit={baseline_exit}, "
+                f"{len(baseline_failures)} pre-existing failures"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Verifier: baseline run failed, "
+                f"treating all failures as new: {e}"
+            )
+
+        # pytest couldn't run. Multiple signals:
+        #  - exit 5 = no tests collected
+        #  - exit 2 with MarkDecorator / collection errors = old suite
+        #  - Requires-Python = deps won't install on this Python
+        # For all these, fall back to probe-based verification.
+        could_not_run = False
+        if baseline_exit == 5:
+            could_not_run = True
+        elif baseline_exit == 2 and (
+            "MarkDecorator" in baseline_output
+            or "ERROR collecting" in baseline_output
+        ):
+            could_not_run = True
+        elif "Requires-Python" in baseline_output or "requires a different Python" in baseline_output:
+            could_not_run = True
+
+        if could_not_run:
+            logger.info(
+                f"Verifier: pytest couldn't run "
+                f"(exit={baseline_exit}); falling back to probe verification"
+            )
+            return await self._verify_with_probe(
+                tree_root=tree_root,
+                tree_relative=tree_relative,
+                investigation=(context or {}).get("investigation") or {},
+                diff=diff,
+                cache_host_path=cache_host_path,
+                manifest_relative_path=manifest_relative_path,
+                image=image,
+            )
+
+        # Normal test run.
+        attempts: list[dict] = []
+        max_attempts = max(1, settings.VERIFY_MAX_ATTEMPTS)
+        current_diff = diff
+
+        for attempt_num in range(1, max_attempts + 1):
+            apply_ok, apply_err = await self._apply_diff(
+                tree_root, current_diff, reset=True
+            )
+            if not apply_ok:
+                diff_preview = current_diff[:400] if current_diff else "<empty>"
+                attempts.append({
+                    "attempt": attempt_num,
+                    "passed": False,
+                    "output": (
+                        f"git apply failed at commit {commit_sha}: {apply_err}\n"
+                        f"--- diff (first 400 chars) ---\n"
+                        f"{diff_preview}"
+                    ),
+                })
+                if attempt_num < max_attempts:
+                    repaired = await _attempt_repair(
+                        original_context=context or {},
+                        failed_output=f"git apply failed: {apply_err}",
+                        previous_diff=current_diff,
+                    )
+                    if not repaired:
+                        break
+                    if file_lines:
+                        repaired, _ = _realign_diff(
+                            repaired, file_lines,
+                            repo_relative_path,
+                        )
+                    current_diff = repaired
+                    continue
+                else:
+                    break
+
+            exit_code, full_output = await _run_in_docker(
+                image=image,
+                host_workdir=workdir,
+                container_workdir=settings.VERIFIER_CONTAINER_WORKDIR,
+                command=command,
+                timeout=settings.VERIFY_TIMEOUT_SECONDS,
+                memory_limit=settings.VERIFIER_MEMORY_LIMIT,
+                cpu_limit=settings.VERIFIER_CPU_LIMIT,
+                cache_host_path=cache_host_path,
+                manifest_relative_path=manifest_relative_path,
+                tree_relative=tree_relative,
+            )
+            output = full_output[:8000]
+
+            current_failed = parse_failed_tests(full_output)
+            new = current_failed - baseline_failures
+            pre_existing = current_failed & baseline_failures
+
+            passed = exit_code == 0
+            attempts.append({
+                "attempt": attempt_num,
+                "passed": passed,
+                "output": output,
+                "new_failures": sorted(new),
+                "pre_existing_failures": sorted(pre_existing),
+            })
+
+            if passed:
+                return VerificationResult(
+                    passed=True,
+                    reason="tests_passed",
+                    output=output,
+                    duration_ms=self._ms_since(start),
+                    attempts=attempts,
+                    verifier="hosted",
+                    realignment=realignment,
+                )
+
+            if not new and pre_existing:
+                return VerificationResult(
+                    passed=True,
+                    reason="tests_passed_pre_existing_failures",
+                    output=output,
+                    duration_ms=self._ms_since(start),
+                    attempts=attempts,
+                    verifier="hosted",
+                    realignment=realignment,
+                )
+
+            if not new and not pre_existing:
+                if (
+                    "no tests ran" in full_output
+                    or "collected 0 items" in full_output
+                    or "ERROR collecting" in full_output
+                ):
+                    return VerificationResult(
+                        passed=False,
+                        reason="tests_could_not_run",
+                        output=output,
+                        duration_ms=self._ms_since(start),
+                        attempts=attempts,
+                        verifier="hosted",
+                        realignment=realignment,
+                    )
+
+            if attempt_num < max_attempts:
+                repaired = await _attempt_repair(
+                    original_context=context or {},
+                    failed_output=full_output[-8000:],
+                    previous_diff=current_diff,
+                )
+                if not repaired:
+                    break
+                if file_lines:
+                    repaired, _ = _realign_diff(
+                        repaired, file_lines,
+                        repo_relative_path,
+                    )
+                current_diff = repaired
+
+        last_output = attempts[-1]["output"] if attempts else ""
+        if attempts and "git apply failed" in attempts[-1]["output"]:
+            return VerificationResult(
+                passed=False,
+                reason="diff_does_not_apply",
+                output=last_output,
+                duration_ms=self._ms_since(start),
+                attempts=attempts,
+                verifier="hosted",
+                realignment=realignment,
+            )
+
+        return VerificationResult(
+            passed=False,
+            reason="tests_failed",
+            output=last_output,
+            duration_ms=self._ms_since(start),
+            attempts=attempts,
+            verifier="hosted",
+            realignment=realignment,
+        )
+        
+    async def _verify_with_probe(
+        self,
+        *,
+        tree_root: Path,
+        tree_relative: str,
+        investigation: dict,
+        diff: str,
+        cache_host_path: Path | None,
+        manifest_relative_path: str | None,
+        image: str,
+    ) -> VerificationResult:
+        """
+        Verify a fix by re-running the Investigator's probe against
+        the original code and the fixed code. Used when pytest can't
+        run (old Python, dep conflicts, collection errors).
+
+        The probe is extracted from investigation.history: the last
+        successful probe observation, with its code and flags.
+
+        Returns:
+          probe_passed  — probe failed before, passed after (verified!)
+          probe_failed  — probe failed both before and after (fix wrong)
+          probe_ambiguous — probe passed both (doesn't reproduce bug)
+          tests_could_not_run — no probe in history
+        """
+        import shlex
+
+        history = investigation.get("history") or []
+        probe_code: str | None = None
+        probe_flags: list[str] = []
+        for obs in reversed(history):
+            if obs.get("tool") == "probe" and obs.get("ok"):
+                probe_code = (obs.get("args") or {}).get("code")
+                probe_flags = (obs.get("args") or {}).get("interpreter_flags") or []
+                break
+
+        if not probe_code:
+            return VerificationResult(
+                passed=False,
+                reason="tests_could_not_run",
+                output="No probe in Investigator history; cannot verify.",
+                verifier="hosted",
+            )
+
+        # Run a probe inside a Docker container against the tree.
+        # Uses --network none because the probe code is LLM-generated.
+        # Run a probe inside a Docker container against the tree.
+        # Uses --network none because the probe code is LLM-generated.
+        # Installs deps from the cache into a venv before running —
+        # otherwise `import requests` fails on missing urllib3, etc.
+        async def _run_probe() -> tuple[bool, str]:
+            host_path = f"{settings.VERIFIER_HOST_WORKDIR.rstrip('/')}/{tree_root.name}"
+            if tree_relative:
+                workdir_inside = f"/work/{tree_relative}"
+            else:
+                workdir_inside = "/work"
+            flag_str = " ".join(probe_flags)
+            quoted_code = shlex.quote(probe_code)
+
+            has_cache = (
+                cache_host_path is not None
+                and manifest_relative_path is not None
+            )
+
+            if has_cache:
+                command = (
+                    f"cd {workdir_inside} && "
+                    "python -m venv /tmp/venv && "
+                    "/tmp/venv/bin/pip install --no-index --find-links /cache "
+                    "--quiet -r /cache/requirements.lock || true; "
+                    f"PATH=/tmp/venv/bin:$PATH "
+                    f"PYTHONPATH={workdir_inside} "
+                    f"python {flag_str} -c {quoted_code}"
+                )
+            else:
+                command = (
+                    f"cd {workdir_inside} && "
+                    f"PYTHONPATH={workdir_inside} "
+                    f"python {flag_str} -c {quoted_code}"
+                )
+
+            argv = [
+                "docker", "run", "--rm",
+                "--network", "none",
+                "-v", f"{host_path}:/work",
+            ]
+            if has_cache:
+                argv.extend(["-v", f"{cache_host_path}:/cache:ro"])
+            argv.extend([
+                "-w", workdir_inside,
+                image,
+                "sh", "-c", command,
+            ])
+
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+            except asyncio.TimeoutError:
+                proc.kill()
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
+                return False, "probe timed out after 60s"
+            output = out.decode("utf-8", errors="replace")[:2000]
+            # "passed" = "bug absent" = no exception + exit 0.
+            # Uses _output_signals_bug so probes that catch-and-print
+            # (agent style) are correctly classified as failures.
+            from src.agents.tools.probe import _output_signals_bug
+            passed = (proc.returncode == 0) and not _output_signals_bug(output)
+            return passed, output
+
+        # Ensure the tree is at HEAD (original code).
+        reset_proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(tree_root), "reset", "--hard",
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        await reset_proc.communicate()
+
+        # Probe BEFORE fix.
+        before_passed, before_output = await _run_probe()
+
+        # Apply the diff.
+        apply_ok, apply_err = await self._apply_diff(tree_root, diff, reset=True)
+        if not apply_ok:
+            return VerificationResult(
+                passed=False,
+                reason="diff_does_not_apply",
+                output=f"Probe verification: {apply_err}",
+                verifier="hosted",
+            )
+
+        # Probe AFTER fix.
+        after_passed, after_output = await _run_probe()
+
+        # Reset again so the tree is pristine.
+        reset_proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(tree_root), "reset", "--hard",
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        await reset_proc.communicate()
+
+        if not before_passed and after_passed:
+            return VerificationResult(
+                passed=True,
+                reason="probe_passed",
+                output=(
+                    f"Probe failed before fix:\n{before_output}\n\n"
+                    f"Probe passed after fix:\n{after_output}"
+                ),
+                verifier="hosted",
+            )
+
+        if before_passed and after_passed:
+            return VerificationResult(
+                passed=False,
+                reason="probe_ambiguous",
+                output=(
+                    f"Probe passed BOTH before and after fix; "
+                    f"it does not reproduce the bug.\n"
+                    f"Before: {before_output}\n\n"
+                    f"After: {after_output}"
+                ),
+                verifier="hosted",
+            )
+
+        return VerificationResult(
+            passed=False,
+            reason="probe_failed",
+            output=(
+                f"Probe failed BOTH before and after fix; the fix did not work.\n"
+                f"Before: {before_output}\n\n"
+                f"After: {after_output}"
+            ),
+            verifier="hosted",
+        )
 
 
 def _repo_url(repo_name: str) -> str:
@@ -1327,6 +1518,11 @@ async def _run_in_docker(
         # PATH=/tmp/venv/bin:$PATH means `python -m pytest -q` (the
         # command _detect_runner emits) resolves to the venv's python
         # and pytest. No command-string rewriting needed.
+        # Pin pytest to the specific version decided by the
+        # toolchain selector. The prefetched requirements.lock
+        # contains `pytest>=X` (usually unpinned), so pip would
+        # install the latest — which breaks old repos. Override
+        # with an explicit pytest install first.
         install_cmd = (
             "python -m venv /tmp/venv && "
             "/tmp/venv/bin/pip install --no-index --find-links /cache "
