@@ -95,6 +95,8 @@ async def read_chain(
             file_path=link.get("file", ""),
             line_number=link.get("line", 0),
             context_lines=context_lines,
+            terminal_kind=link.get("terminal_kind", "Unknown"),
+            symbol=link.get("symbol", ""),
         )
         if section is not None:
             sections.append(section)
@@ -133,8 +135,19 @@ def _read_link(
     file_path: str,
     line_number: int,
     context_lines: int,
+    terminal_kind: str = "Unknown",
+    symbol: str = "",
 ) -> str | None:
-    """Read one link's window. Returns the formatted section, or None."""
+    """Read one link's window. Returns the formatted section, or None.
+
+    The header carries the symbol and terminal_kind when known.
+    For 1-length chains (single-location symbols — a CPython
+    builtin, a Python builtin, an imported name, or an annotated
+    member), terminal_kind is the entire signal read_chain provides
+    beyond what read_file would give. Without it in the header the
+    Investigator sees the same window it could get from read_file
+    and gains nothing from calling read_chain on a 1-length chain.
+    """
     resolved, _reason = _safe_resolve(str(repo_path), file_path)
     if resolved is None or not resolved.is_file():
         hint = _find_by_basename(str(repo_path), file_path)
@@ -161,4 +174,10 @@ def _read_link(
     if len(numbered) > MAX_CHARS_PER_FILE:
         numbered = numbered[:MAX_CHARS_PER_FILE] + "\n[... truncated]"
 
-    return f"=== {file_path}:{line_number} (lines {start}-{end} of {total}) ===\n{numbered}"
+    suffix_parts = [f"lines {start}-{end} of {total}"]
+    if symbol:
+        suffix_parts.append(f"symbol={symbol!r}")
+    if terminal_kind and terminal_kind != "Unknown":
+        suffix_parts.append(f"terminal_kind={terminal_kind}")
+    suffix = ", ".join(suffix_parts)
+    return f"=== {file_path}:{line_number} ({suffix}) ===\n{numbered}"
