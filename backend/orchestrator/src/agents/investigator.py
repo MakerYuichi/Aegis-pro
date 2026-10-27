@@ -252,35 +252,127 @@ def _validate_scan_confirmation(
                 "reasoned_only"
             )
             result.confirmation = CONFIRMATION_REASONED_ONLY
-            # NEW: annotate the evidence so downstream validators and
-            # human readers know the downgrade happened. Without this,
-            # the very next check refuses the finding because the
-            # evidence doesn't acknowledge a failure to probe — but
-            # the agent never had a chance to write that
-            # acknowledgement, because it believed the probe
-            # succeeded when it composed the evidence.
+            # Annotate the evidence so a human reader sees that the
+            # downgrade happened. The note is NOT read by the policy
+            # check below — that would let the note defeat the
+            # check. The policy reads history, which is the
+            # structural fact.
             result.evidence = _append_downgrade_note(
                 result.evidence, history,
             )
 
     if result.confirmation == CONFIRMATION_REASONED_ONLY:
-        evidence = (result.evidence or "").lower()
-        if not any(
-            marker in evidence
-            for marker in ("probe", "sandbox", "network", "external",
-                           "cannot construct", "cannot reproduce",
-                           "environment", "time-dependent")
-        ):
+        legitimate, why = _reasoned_only_is_legitimate(history)
+        if not legitimate:
             logger.warning(
-                "Investigator: reasoned_only confirmation without a "
-                "stated reason a probe was not attempted; rejecting"
+                f"Investigator: reasoned_only rejected — {why}; "
+                f"no fix will be generated, finding goes to Needs Review"
             )
             return _refuse(
                 result, history, REFUSE_COULD_NOT_DETERMINE,
                 [result.failure_mode or "<no failure mode>"],
             )
+        logger.info(
+            f"Investigator: reasoned_only accepted — {why}"
+        )
 
     return result
+
+
+def _reasoned_only_is_legitimate(
+    history: list[dict[str, Any]],
+) -> tuple[bool, str]:
+    """
+    A reasoned_only finding is legitimate ONLY if a probe was
+    actually attempted and failed for an environmental reason
+    (missing deps, sandbox unavailable, network needed, timeout,
+    etc.). No probe attempt = not legitimate. Probe ran and
+    returned cleanly with no exception = not legitimate (the bug
+    wasn't reproduced).
+
+    This replaces the previous keyword check on evidence text. The
+    keyword check was defeatable: _append_downgrade_note writes the
+    word "probe" into the evidence, so any downgraded finding
+    trivially passed the check. The structural fact lives in
+    `history` — read it directly.
+
+    Accepts these cases as legitimate:
+      - A probe observation (ok=False) whose error is environmental
+        (ModuleNotFoundError, sandbox_disabled, repo_not_found, etc.)
+      - A probe observation (ok=True) whose metadata.reproduced is
+        True — the agent ran a probe, it reproduced the bug, and
+        the agent mislabeled confirmation=reasoned_only. The
+        finding is real.
+      - A probe observation (ok=True) whose result text contains an
+        environmental marker (ModuleNotFoundError before the
+        Verifier re-runs against a correct env — the DBF975 shape).
+
+    Rejects:
+      - No probe observation at all (the 329B7F shape)
+      - A probe that ran cleanly (exit 0, no exception) — the bug
+        wasn't reproduced, and the failure wasn't environmental.
+
+    Returns (legitimate, reason_string).
+    """
+    probes = [
+        obs for obs in history
+        if obs.get("tool") == "probe"
+    ]
+
+    if not probes:
+        return False, "no probe attempted in history"
+
+    environmental_markers = (
+        "ModuleNotFoundError",
+        "ImportError",
+        "No module named",
+        "command not found",
+        "Permission denied",
+        "No such file or directory",
+        "Operation not permitted",
+        "sandbox_disabled",
+        "repo_not_found",
+        "repo_copy_failed",
+        "Cannot connect to the Docker daemon",
+        "docker:",
+        "verification timed out",
+    )
+
+    for obs in probes:
+        meta = obs.get("metadata") or {}
+
+        # Case 1: probe tool returned an error (ok=False).
+        if not obs.get("ok"):
+            err = str(obs.get("error") or "")
+            reason_field = str(meta.get("reason") or "")
+            blob = err + " " + reason_field
+            if any(m in blob for m in environmental_markers):
+                return True, (
+                    f"probe attempted, failed environmentally: "
+                    f"{err[:120] or reason_field[:120]}"
+                )
+
+        # Case 2: probe ran and reproduced the bug, but the agent
+        # labeled it reasoned_only. The finding is real. Accept.
+        if obs.get("ok") and meta.get("reproduced") is True:
+            return True, (
+                "probe reproduced; agent mislabeled as reasoned_only"
+            )
+
+        # Case 3: probe ran, didn't reproduce, but the output
+        # shows an environmental failure (e.g. ModuleNotFoundError
+        # on import). This is the DBF975 shape — probe failed for
+        # an environment reason, Verifier can re-run against a
+        # correct env.
+        if obs.get("ok") and meta.get("reproduced") is False:
+            output = str(obs.get("result") or "")
+            if any(m in output for m in environmental_markers):
+                return True, "probe ran, environmental failure detected"
+
+    return False, (
+        "probe attempted but did not reproduce and no environmental "
+        "failure recorded"
+    )
 
 
 def _append_downgrade_note(
@@ -541,10 +633,24 @@ class InvestigatorAgent:
     path to a local checkout.
     """
 
-    def __init__(self, llm_service, repo_root: str):
+    def __init__(
+        self,
+        llm_service,
+        repo_root: str,
+        cache_host_path: str | None = None,
+        manifest_relative_path: str | None = None,
+    ):
         self.llm = llm_service
         self.repo_root = repo_root
         self._current_chain: list[dict[str, Any]] = []
+        # Prefetched dependency cache, set by the pipeline for
+        # scan/incident runs. When present, the probe tool installs
+        # deps into a venv before running the probe so `import
+        # <module>` works. Without it, probes that import tree code
+        # fail on ModuleNotFoundError.
+        self._cache_host_path = cache_host_path
+        self._manifest_relative_path = manifest_relative_path
+
 
     async def investigate(
         self,
@@ -594,9 +700,50 @@ class InvestigatorAgent:
 
             if action.action == "confirm" and context.mode == MODE_SCAN:
                 confirmed = self._confirm_result(action, iteration, history)
-                return _validate_scan_confirmation(
+                validated = _validate_scan_confirmation(
                     confirmed, history, chain=context.chain,
                 )
+                # If the confirmation was rejected specifically because
+                # no probe was run, feed that back and give the agent
+                # another iteration. This is the enforcement of the
+                # prompt's "you MUST call probe before confirm" rule.
+                # Without this, models that don't follow soft
+                # instructions (Gemini-3.5-flash-lite observed) shortcut
+                # to confirm on the first turn and the pipeline has no
+                # way to teach them to do better within the same run.
+                if (
+                    validated.status == STATUS_UNVERIFIED
+                    and validated.reason == REFUSE_COULD_NOT_DETERMINE
+                    and iteration < max_iterations
+                ):
+                    history.append({
+                        "tool": "__pipeline_rejection__",
+                        "ok": False,
+                        "error": (
+                            "Your confirmation was REJECTED by the "
+                            "pipeline. Reason: no probe was run. You "
+                            "MUST call the `probe` tool to reproduce "
+                            "the failure before calling `confirm` with "
+                            "confirmation='probe_reproduced'. The probe "
+                            "code must import the module from the tree "
+                            "(e.g., `import requests.status_codes`) so "
+                            "the fix, when applied, will affect the "
+                            "probe. If the failure requires interpreter "
+                            "flags, pass them via `interpreter_flags` "
+                            "(e.g., ['-OO']). Only after the probe has "
+                            "run and shown `reproduced: true` should "
+                            "you call `confirm`. Do NOT resubmit the "
+                            "same confirm."
+                        ),
+                        "iteration": iteration,
+                    })
+                    logger.warning(
+                        f"Investigator: confirm rejected (no probe in "
+                        f"history); re-prompting at iteration "
+                        f"{iteration + 1}"
+                    )
+                    continue
+                return validated
 
             if action.action == "refuse":
                 return self._refuse_result(action, iteration, history)
@@ -912,21 +1059,39 @@ class InvestigatorAgent:
 "REJECTED by the validator. `evidence` must state the failure "
 "mode and, for `reasoned_only`, why a probe was not attempted. "
 "See the schema section above.\n"
-"6. Every confirm must attempt a probe. If you name a "
-"failure_mode, you must write a probe call that reproduces "
-"it before calling confirm. If the probe returns "
-"ran=true, reproduced=false and the observation includes a "
-"`reproduction_hint` field, follow the hint and retry the "
-"probe with `interpreter_flags` set — do NOT immediately "
-"confirm with confirmation=\"probe_reproduced\"; that claim "
-"will be rejected by the validator. The only reasons to "
-"give up after a probe failure are: (a) the failure mode "
-"requires external state that cannot be constructed in a "
-"sandbox at all (network, wall-clock time, filesystem state "
-"outside the repo); (b) the probe requires an interpreter "
-"flag outside the allowed set. In either case, set "
-"confirmation=\"reasoned_only\" and state in evidence which "
-"external factor makes a sandbox probe impossible.\n"
+"6. Every confirm must attempt a probe. This is not "
+"optional. Before you call `confirm`, there MUST be a "
+"`probe` tool call in your history whose result shows "
+"`reproduced: true`. If you have not yet run a probe, "
+"you cannot confirm — call `probe` first. The pipeline "
+"enforces this: a `confirm` with no probe in history is "
+"REJECTED and you will be re-prompted on the next "
+"iteration with an error message. Do not waste an "
+"iteration by trying to confirm without probing.\n"
+"\n"
+"   The probe MUST import the module from the tree under "
+"test, not just exercise the pattern in isolation. For "
+"`requests/status_codes.py:116`, the probe should be:\n"
+"       import requests.status_codes\n"
+"   with `interpreter_flags=['-OO']` (because the failure "
+"mode is `__doc__` being None under -OO).\n"
+"\n"
+"   A probe that does NOT import from the tree (e.g., "
+"creating a fresh module with `__doc__ = None` and "
+"reproducing the operator inline) is a TOY probe. It "
+"reproduces the failure shape but is not affected by any "
+"fix to the tree, so the Verifier cannot use it to check "
+"the fix. Only probe results that import from the tree "
+"count as a real reproduction.\n"
+"\n"
+"   If the probe returns `ran=true, reproduced=false` and "
+"includes a `reproduction_hint`, retry the probe with "
+"`interpreter_flags` set to the suggested flags. Only "
+"after a real probe has reproduced, or the environment "
+"genuinely cannot construct the failing condition, may "
+"you confirm. In the second case, set "
+"`confirmation='reasoned_only'` and explain the external "
+"factor in `evidence`.\n"
 "7. State a concrete failure mode. Not \"looks wrong\" — "
 "\"crashes when order_id doesn't exist\". Name the input "
 "shape that triggers it, and name the observable result.\n"
@@ -1218,6 +1383,8 @@ class InvestigatorAgent:
                 code=action.args.get("code", ""),
                 language=action.args.get("language", "Python"),
                 interpreter_flags=action.args.get("interpreter_flags"),
+                cache_host_path=self._cache_host_path,
+                manifest_relative_path=self._manifest_relative_path,
             )
         else:
             # Should be unreachable — _parse_action rejects unknown
