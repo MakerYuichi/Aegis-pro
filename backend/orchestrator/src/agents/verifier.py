@@ -336,86 +336,33 @@ class HostedVerifier(Verifier):
                     f"{len(realignment.hunks_flagged)} flagged"
                 )
 
-            # ── Prefetch the repo's dependencies ────────────────
+            # ── Prefetch reuse ─────────────────────────────────
             #
-            # Runs once, before the attempt loop. The cache is
-            # keyed by manifest hash, so re-running the same repo
-            # hits the cache; different repos get different
-            # caches. This is where a source-only dependency
-            # triggers a build (if BUILD_ON_MISS_ENABLED).
+            # The prefetch now happens once, in _stage_prefetch,
+            # BEFORE the Investigator. This lets the Investigator's
+            # probe tool install real deps and run real imports. The
+            # Verifier reuses the same cache — no second download.
             #
-            # A prefetch failure is a verification failure, not an
-            # exception. The reason string names what went wrong —
-            # from "no manifest, proceeding" to "sdist_only and
-            # build disabled" to "mirror_dir_missing".
-            manifest_ref: ManifestRef | None = find_manifest(
-                tree_root, language
+            # If the prefetch failed (or no manifest), context will
+            # not have prefetch_cache_host_path. The Verifier then
+            # runs the tests without cached deps — the honest
+            # degradation.
+            cache_host_path = (
+                Path(context["prefetch_cache_host_path"])
+                if context and context.get("prefetch_cache_host_path")
+                else None
+            )
+            manifest_relative_path = (
+                context.get("prefetch_manifest_relative")
+                if context else None
             )
 
-            cache_host_path: Path | None = None
-            manifest_relative_path: str | None = None
-
-            if manifest_ref is not None:
-                manifest_container = tree_root / manifest_ref.path
-                manifest_relative_path = manifest_ref.path.as_posix()
-
-                try:
-                    if settings.BUILD_ON_MISS_ENABLED:
-                        prefetch_result = await run_prefetch_with_build_on_miss(
-                            manifest_container_path=manifest_container,
-                            entrypoint_container_path=Path(
-                                "/app/scripts/prefetch_entrypoint.py"
-                            ),
-                            cache_container_path=Path(
-                                settings.VERIFIER_PIP_CACHE_CONTAINER_DIR
-                            ),
-                            cache_host_path=Path(
-                                settings.VERIFIER_PIP_CACHE_HOST_DIR
-                            ),
-                            mirror_container_path=Path(
-                                settings.MIRROR_CONTAINER_DIR
-                            ),
-                            mirror_host_path=Path(
-                                settings.MIRROR_HOST_DIR
-                            ),
-                            build_entrypoint_container_path=Path(
-                                "/app/scripts/build_entrypoint.py"
-                            ),
-                            manifest_kind=manifest_ref.kind,
-                        )
-                    else:
-                        prefetch_result = await run_prefetch(
-                            manifest_container_path=manifest_container,
-                            entrypoint_container_path=Path(
-                                "/app/scripts/prefetch_entrypoint.py"
-                            ),
-                            cache_container_path=Path(
-                                settings.VERIFIER_PIP_CACHE_CONTAINER_DIR
-                            ),
-                            cache_host_path=Path(
-                                settings.VERIFIER_PIP_CACHE_HOST_DIR
-                            ),
-                            manifest_kind=manifest_ref.kind,
-                        )
-                    cache_host_path = prefetch_result.cache_host_path
-                except PrefetchError as e:
-                    logger.warning(
-                        f"Verifier: prefetch failed for "
-                        f"{repo_name}: {e.reason}: {e.detail}"
-                    )
-                    return VerificationResult(
-                        passed=False,
-                        reason=f"prefetch_failed_{e.reason}",
-                        output=e.detail,
-                        duration_ms=self._ms_since(start),
-                        verifier="hosted",
-                        realignment=realignment,
-                    )
-            else:
+            if cache_host_path is None:
                 logger.info(
-                    f"Verifier: no dependency manifest in "
-                    f"{repo_name}; skipping prefetch"
+                    f"Verifier: no prefetch cache for "
+                    f"{repo_name}; tests will run without cached deps"
                 )
+
                 
                         # ── Single-attempt verification ──────────────────────
             #
@@ -454,12 +401,40 @@ class HostedVerifier(Verifier):
 
 
         finally:
-            # Reset the tree so the next run starts clean. Any diff
-            # applied during this run's attempts is discarded.
-            # Without this, the diff sticks around in the tree,
-            # corrupting the next run's realignment (the file's
-            # content no longer matches the diff's context).
-            if reuse and tree_root is not None:
+            # Conditional reset. The rule:
+            #
+            #   - probe_passed  → DO NOT reset. The fix is the
+            #                     product. The next scan must see it
+            #                     and report it as already_fixed.
+            #                     .aegis/fixes.json was written by
+            #                     _persist_fix_to_tree; the fix must
+            #                     still be applied for that record to
+            #                     be verifiable on the next run.
+            #
+            #   - anything else → reset. A failed or ambiguous
+            #                     verification's diff is worthless;
+            #                     leaving it in the tree corrupts the
+            #                     next run's realignment and makes
+            #                     the next scan find a fake "fix".
+            #
+            # The signal is tc_result.reason, which is set by
+            # _attempt_with_toolchain (either from _verify_with_probe
+            # or from the normal test path).
+            preserve_tree = (
+                "tc_result" in locals()
+                and tc_result is not None
+                and tc_result.reason == "probe_passed"
+                and reuse
+                and tree_root is not None
+            )
+
+            if preserve_tree:
+                logger.info(
+                    f"Verifier: preserving tree at {tree_root} "
+                    f"(probe_passed — fix stays applied; next scan "
+                    f"will report it as already_fixed)"
+                )
+            elif reuse and tree_root is not None:
                 try:
                     reset_proc = await asyncio.create_subprocess_exec(
                         "git", "-C", str(tree_root), "reset", "--hard",
@@ -862,13 +837,65 @@ class HostedVerifier(Verifier):
         import shlex
 
         history = investigation.get("history") or []
+
+        # Prefer a probe that touches the tree over one that
+        # doesn't. The previous selection used `reversed(history)`
+        # — "the last successful probe." That's wrong when the
+        # agent retried a failed probe with a toy reproduction:
+        # the last probe becomes the toy, and the Verifier
+        # re-runs the toy, which fails before *and* after by
+        # construction. See INC-20261027-B209DF: the agent's
+        # probe #1 imported requests.status_codes (correct, but
+        # failed on ModuleNotFoundError due to a container path
+        # bug in probe.py); probe #2 hardcoded `__doc__ = None`
+        # on a fresh ModuleType (toy). The Verifier picked #2
+        # and reported probe_failed for a fix that was correct.
+        #
+        # Heuristic: a probe that imports anything other than
+        # `types`, `sys`, `os`, `traceback`, or the string
+        # builtins is assumed to touch the tree. Toy probes are
+        # almost always built from stdlib primitives only.
+        TOY_ONLY_MODULES = {
+            "types", "sys", "os", "traceback", "warnings",
+            "functools", "itertools", "collections", "re",
+        }
+
+        def _is_toy(code: str) -> bool:
+            import ast
+            try:
+                tree = ast.parse(code)
+            except SyntaxError:
+                return False  # unparseable — treat as real, let it run
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        root = alias.name.split(".")[0]
+                        if root not in TOY_ONLY_MODULES:
+                            return False
+                elif isinstance(node, ast.ImportFrom):
+                    root = (node.module or "").split(".")[0]
+                    if root and root not in TOY_ONLY_MODULES:
+                        return False
+            return True
+
+        candidates: list[tuple[dict, str, list[str]]] = []
+        for obs in history:
+            if obs.get("tool") != "probe" or not obs.get("ok"):
+                continue
+            code = (obs.get("args") or {}).get("code") or ""
+            flags = (obs.get("args") or {}).get("interpreter_flags") or []
+            candidates.append((obs, code, flags))
+
+        # Prefer non-toy probes; among those, prefer the most
+        # recent. Fall back to the most recent toy probe only if
+        # every probe was a toy.
+        real = [c for c in candidates if not _is_toy(c[1])]
+        chosen = real[-1] if real else (candidates[-1] if candidates else None)
+
         probe_code: str | None = None
         probe_flags: list[str] = []
-        for obs in reversed(history):
-            if obs.get("tool") == "probe" and obs.get("ok"):
-                probe_code = (obs.get("args") or {}).get("code")
-                probe_flags = (obs.get("args") or {}).get("interpreter_flags") or []
-                break
+        if chosen is not None:
+            _, probe_code, probe_flags = chosen
 
         if not probe_code:
             return VerificationResult(
@@ -972,12 +999,24 @@ class HostedVerifier(Verifier):
         # Probe AFTER fix.
         after_passed, after_output = await _run_probe()
 
-        # Reset again so the tree is pristine.
-        reset_proc = await asyncio.create_subprocess_exec(
-            "git", "-C", str(tree_root), "reset", "--hard",
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        )
-        await reset_proc.communicate()
+        # IMPORTANT: do NOT reset the tree here.
+        #
+        # The whole point of probe-verified fixes is that the fix
+        # stays in the working tree. The next scan reads .aegis/fixes.json,
+        # sees the fix is applied, and reports it as "already_fixed."
+        # If we reset here, the fix is lost, the next scan finds the
+        # bug again, and the "already fixed" state is never observable.
+        #
+        # The pre-probe reset at the top of this method is what
+        # guarantees a clean baseline — the before-probe runs against
+        # pristine code. That reset stays. This one goes.
+        #
+        # See INC-20261027-4B97CB: the fix was applied, .aegis/fixes.json
+        # was written correctly, and this reset wiped status_codes.py
+        # back to the buggy line — so the very next scan found the same
+        # bug again and reported probe_passed again, with no
+        # already_fixed state ever surfacing.
+
 
         if not before_passed and after_passed:
             return VerificationResult(

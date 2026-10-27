@@ -74,6 +74,8 @@ async def probe(
     code: str,
     language: str = "Python",
     interpreter_flags: list[str] | None = None,
+    cache_host_path: str | None = None,
+    manifest_relative_path: str | None = None,
 ) -> ToolResult:
     """Run a small test in the verifier's sandbox.
 
@@ -167,7 +169,37 @@ async def probe(
         # name is a fixed string. There is no path through this
         # code where agent-supplied text becomes a shell token.
         flag_str = (" " + " ".join(flags)) if flags else ""
-        probe_command = f"python{flag_str} -m aegis_probe"
+
+        # When the pipeline has prefetched deps, install them into a
+        # venv inside the probe container, then run the probe from
+        # that venv. This makes `import <repo_module>` work so the
+        # agent can write probes that test the actual code instead of
+        # toy reproductions that don't load the tree.
+        # The probe container mounts `workdir` at
+        # <VERIFIER_CONTAINER_WORKDIR>/<workdir.name>. `workdir.name`
+        # is "probe-<uuid>", and the repo is copied into
+        # `workdir/repo`, so the tree root inside the container is:
+        #   <VERIFIER_CONTAINER_WORKDIR>/<workdir.name>/repo
+        # The previous command hardcoded `/work/probe-repo`, which
+        # is not where anything is mounted. `cd` failed, pip never
+        # ran, and every probe that imported tree code hit
+        # ModuleNotFoundError.
+        container_workdir = settings.VERIFIER_CONTAINER_WORKDIR
+        container_repo = (
+            f"{container_workdir}/{workdir.name}/repo"
+        )
+        if cache_host_path and manifest_relative_path:
+            probe_command = (
+                f"cd {container_repo} && "
+                "python -m venv /tmp/venv && "
+                "/tmp/venv/bin/pip install --no-index --find-links /cache "
+                "--quiet -r /cache/requirements.lock && "
+                f"PATH=/tmp/venv/bin:$PATH "
+                f"PYTHONPATH={container_repo} "
+                f"python{flag_str} -m aegis_probe"
+            )
+        else:
+            probe_command = f"python{flag_str} -m aegis_probe"
 
         exit_code, output = await _run_in_docker(
             image=_image_for_language(language),
@@ -177,6 +209,9 @@ async def probe(
             timeout=settings.VERIFY_TIMEOUT_SECONDS,
             memory_limit=settings.VERIFIER_MEMORY_LIMIT,
             cpu_limit=settings.VERIFIER_CPU_LIMIT,
+            cache_host_path=(
+                Path(cache_host_path) if cache_host_path else None
+            ),
         )
 
         reproduced = (exit_code != 0) or _output_signals_bug(output)
@@ -243,10 +278,45 @@ def _output_signals_bug(output: str) -> bool:
     Return True if the probe's output contains a Python exception
     signature — i.e., the code caught the exception and printed it
     (as agents often do), rather than letting it propagate.
+
+    Two forms of exception output are recognized:
+
+    1. Python's default uncaught-exception traceback:
+         Traceback (most recent call last):
+         ...
+         TypeError: unsupported operand type(s)
+
+       In this form the exception class name is followed by a
+       colon — `TypeError:`, `AttributeError:`, etc.
+
+    2. Agent-written try/except that prints `type(e).__name__` and
+       the message separately:
+         try:
+             ...
+         except Exception as e:
+             print('Error:', type(e).__name__, e)
+
+       In this form the output is:
+         Error: TypeError unsupported operand type(s)
+
+       The exception class name is followed by a SPACE, not a
+       colon. The previous version of this function only matched
+       form (1); form (2) was missed, causing probe runs that
+       reproduced a bug to be classified as "passed." See
+       INC-20261027-5DDC5A: the probe printed
+       "Error: TypeError unsupported operand type(s)..."
+       and was classified as `before_passed=True`, leading to
+       `probe_ambiguous` and a false negative.
+
+    Also matches the runtime-error prefix "ERROR:" that pip and
+    other tools emit, and the string "ModuleNotFoundError" without
+    a colon (the most common form for missing-deps failures).
     """
     if not output:
         return False
-    patterns = (
+
+    # Form 1: `TypeError: ...` (traceback style, with colon)
+    COLONED = (
         "TypeError:",
         "AttributeError:",
         "KeyError:",
@@ -257,5 +327,39 @@ def _output_signals_bug(output: str) -> bool:
         "ModuleNotFoundError:",
         "SyntaxError:",
         "IndexError:",
+        "FileNotFoundError:",
+        "PermissionError:",
+        "OSError:",
+        "NameError:",
+        "NotImplementedError:",
+        "StopIteration:",
+        "UnicodeError:",
     )
-    return any(p in output for p in patterns)
+
+    # Form 2: `Error: TypeError unsupported ...` (agent style, class
+    # name followed by space and the message)
+    SPACED_CLASSES = (
+        "TypeError ",
+        "AttributeError ",
+        "KeyError ",
+        "ValueError ",
+        "RuntimeError ",
+        "AssertionError ",
+        "ImportError ",
+        "ModuleNotFoundError ",
+        "SyntaxError ",
+        "IndexError ",
+        "FileNotFoundError ",
+        "PermissionError ",
+        "OSError ",
+        "NameError ",
+        "NotImplementedError ",
+    )
+
+    # Verifier-friendly: `_output_signals_bug` is also used in
+    # verifier.py to classify probes. Include the string forms
+    # that appear regardless of whether a colon is present.
+    return (
+        any(p in output for p in COLONED)
+        or any(p in output for p in SPACED_CLASSES)
+    )
