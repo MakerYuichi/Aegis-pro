@@ -128,7 +128,10 @@ class IncidentService:
         # The finally block below calls the Provisioner's cleanup to
         # remove the clone after all stages are done.
         context.update(await self._stage_provisioner(context))
-
+        
+        # Stage 2.5 — Prefetch (deps for Investigator's probe)
+        context.update(await self._stage_prefetch(context))
+        
         # Stage 3 — Investigator (Reason)
         context.update(await self._stage_investigator(context))
 
@@ -372,13 +375,41 @@ class IncidentService:
                             f"(tier={tier_name}): {e}"
                         )
 
+            # Already-fixed entries skip the pipeline entirely. No
+            # Investigation, no Fixer, no Verifier — the prior
+            # verification is the trust anchor. Just persist a report
+            # row so the CLI and dashboard can show "we fixed this
+            # and it's still fixed."
+            #
+            # Not counted against SCANNER_MAX_INCIDENTS because they
+            # don't consume an LLM budget or a Docker run.
+            already_fixed_ids: list[str] = []
+            for outcome in (result.already_fixed or []):
+                try:
+                    incident_id = await self._declare_already_fixed_incident(
+                        outcome=outcome,
+                        repo_path=scan_workdir,
+                        service_name=effective_service,
+                    )
+                    if incident_id:
+                        already_fixed_ids.append(incident_id)
+                        incident_ids.append(incident_id)
+                except Exception as e:
+                    logger.error(
+                        f"scan_repo: failed to declare already_fixed "
+                        f"for {outcome.candidate.root_file}:"
+                        f"{outcome.candidate.root_line}: {e}"
+                    )
+
             return {
                 "repo": owner_repo,
                 "files_scanned": result.files_scanned,
                 "counts": result.to_dict()["counts"],
                 "scan_result": result.to_dict(),
                 "incident_ids": incident_ids,
+                "already_fixed_ids": already_fixed_ids,
             }
+
         finally:
             if needs_cleanup:
                 cleanup_repo(scan_workdir)
@@ -444,7 +475,105 @@ class IncidentService:
         # Run the rest of the pipeline: Provisioner → Investigator →
         # Fixer → Verifier → Communicator → Curator.
         return await self._run_pipeline_from_watcher(context)
+    
+    async def _declare_already_fixed_incident(
+        self,
+        *,
+        outcome,
+        repo_path: str,
+        service_name: str,
+    ) -> str | None:
+        """Persist a report-only incident for an already-fixed bug.
 
+        Called from scan_repo for every ScanOutcome with
+        destination="already_fixed". The pipeline skips investigation
+        for these — the .aegis/fixes.json record (written when the fix
+        was originally verified) is the trust anchor.
+
+        Returns the incident_id on success, or None on failure.
+        Failure is logged but does not break the scan — one bad
+        already-fixed record shouldn't kill the report.
+        """
+        fix = outcome.previous_fix or {}
+        candidate = outcome.candidate
+        provenance = (candidate.metadata or {}).get("aegis_provenance") or {}
+        original_id = provenance.get("original_incident_id") or fix.get("incident_id") or "unknown"
+
+        incident_id = f"INC-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
+        extra_metadata = json.dumps({
+            "already_fixed": True,
+            "aegis_provenance": {
+                "original_incident_id": original_id,
+                "verified_at": provenance.get("verified_at") or fix.get("verified_at"),
+                "verification_reason": provenance.get("verification_reason") or fix.get("verification_reason"),
+                "base_commit": provenance.get("base_commit") or fix.get("base_commit"),
+                "probe_code": provenance.get("probe_code") or fix.get("probe_code"),
+                "probe_flags": provenance.get("probe_flags") or fix.get("probe_flags") or [],
+            },
+        })
+
+        try:
+            async with get_db_session() as session:
+                # Fetch service dependencies for blast-radius parity
+                # with normal incidents. Light — one query.
+                svc = await self.get_service(service_name)
+                affected = json.dumps([service_name])
+
+                await session.execute(
+                    text("""
+                        INSERT INTO incidents (
+                            incident_id, service_name, severity, status, title, description,
+                            stack_trace, exception_type, file_path, line_number,
+                            root_cause, suggested_fix, rollback_command, confidence_score,
+                            declared_at, extra_metadata, affected_services
+                        ) VALUES (
+                            :incident_id, :service_name, :severity, :status, :title, :description,
+                            :stack_trace, :exception_type, :file_path, :line_number,
+                            :root_cause, :suggested_fix, :rollback_command, :confidence_score,
+                            :declared_at, :extra_metadata, :affected_services
+                        )
+                    """),
+                    {
+                        "incident_id": incident_id,
+                        "service_name": service_name,
+                        "severity": "P3",
+                        "status": "already_fixed",
+                        "title": f"Previously fixed: {candidate.pattern} at {candidate.root_file}:{candidate.root_line}",
+                        "description": (
+                            f"AEGIS PRO previously found and fixed this bug "
+                            f"(incident {original_id}, verified "
+                            f"{provenance.get('verified_at') or 'unknown'}). "
+                            f"The fix is still applied to the working tree."
+                        ),
+                        "stack_trace": (
+                            f"Prior verification: {provenance.get('verification_reason') or 'unknown'}"
+                        ),
+                        "exception_type": None,
+                        "file_path": candidate.root_file,
+                        "line_number": candidate.root_line,
+                        "root_cause": "Previously diagnosed and fixed by AEGIS PRO",
+                        "suggested_fix": fix.get("fix_diff") or "",
+                        "rollback_command": "",
+                        "confidence_score": 1.0,
+                        "declared_at": datetime.utcnow(),
+                        "extra_metadata": extra_metadata,
+                        "affected_services": affected,
+                    },
+                )
+                await session.commit()
+                logger.info(
+                    f"✅ Already-fixed incident {incident_id} persisted "
+                    f"(from {original_id} at "
+                    f"{candidate.root_file}:{candidate.root_line})"
+                )
+                return incident_id
+        except Exception as e:
+            logger.error(
+                f"Error persisting already_fixed incident for "
+                f"{candidate.root_file}:{candidate.root_line}: {e}"
+            )
+            return None
 
     @staticmethod
     def _synthesize_stack_trace(candidate) -> str:
@@ -568,7 +697,7 @@ class IncidentService:
             "blast_radius": blast_radius,
         }
         
-        # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Stage 2 — Provisioner (Clone once)
     # ------------------------------------------------------------------
 
@@ -623,6 +752,113 @@ class IncidentService:
         from src.agents.provisioner import provision_clone
 
         return await provision_clone(context)
+    
+    # ------------------------------------------------------------------
+    # Stage 2.5 — Prefetch (dependencies for probe + verifier)
+    # ------------------------------------------------------------------
+
+    async def _stage_prefetch(self, context: dict) -> dict:
+        """
+        Prefetch the repo's dependencies into a cache before the
+        Investigator runs. The Investigator's probe tool needs the
+        cache to install real deps; without it, `import <module>`
+        probes fail on ModuleNotFoundError and the agent falls back
+        to toy reproductions that don't test the tree's code.
+
+        The Verifier reuses this same cache — no second prefetch.
+
+        Returns:
+            {
+              "prefetch_cache_host_path": "<host path>",
+              "prefetch_manifest_relative": "<manifest rel path>",
+            }
+            or {} when no manifest exists or prefetch fails. Downstream
+            stages degrade honestly (probe tool runs without deps;
+            verifier does the same).
+        """
+        from pathlib import Path
+        from src.agents.prefetch.manifest_finder import find_manifest
+        from src.agents.prefetch.runner import (
+            run_prefetch,
+            run_prefetch_with_build_on_miss,
+            PrefetchError,
+        )
+
+        tree_root_str = context.get("repo_workdir")
+        if not tree_root_str:
+            return {}
+
+        tree_root = Path(tree_root_str)
+        if not tree_root.is_dir():
+            return {}
+
+        language = (
+            context.get("language")
+            or self._infer_language(
+                context.get("stack_analysis") or {},
+                context["service_name"],
+            )
+        )
+
+        manifest_ref = find_manifest(tree_root, language)
+        if manifest_ref is None:
+            logger.info(
+                f"Prefetch: no dependency manifest in "
+                f"{context['service_name']}; skipping"
+            )
+            return {}
+
+        manifest_path = tree_root / manifest_ref.path
+
+        try:
+            if settings.BUILD_ON_MISS_ENABLED:
+                result = await run_prefetch_with_build_on_miss(
+                    manifest_container_path=manifest_path,
+                    entrypoint_container_path=Path(
+                        "/app/scripts/prefetch_entrypoint.py"
+                    ),
+                    cache_container_path=Path(
+                        settings.VERIFIER_PIP_CACHE_CONTAINER_DIR
+                    ),
+                    cache_host_path=Path(
+                        settings.VERIFIER_PIP_CACHE_HOST_DIR
+                    ),
+                    mirror_container_path=Path(settings.MIRROR_CONTAINER_DIR),
+                    mirror_host_path=Path(settings.MIRROR_HOST_DIR),
+                    build_entrypoint_container_path=Path(
+                        "/app/scripts/build_entrypoint.py"
+                    ),
+                    manifest_kind=manifest_ref.kind,
+                )
+            else:
+                result = await run_prefetch(
+                    manifest_container_path=manifest_path,
+                    entrypoint_container_path=Path(
+                        "/app/scripts/prefetch_entrypoint.py"
+                    ),
+                    cache_container_path=Path(
+                        settings.VERIFIER_PIP_CACHE_CONTAINER_DIR
+                    ),
+                    cache_host_path=Path(
+                        settings.VERIFIER_PIP_CACHE_HOST_DIR
+                    ),
+                    manifest_kind=manifest_ref.kind,
+                )
+
+            logger.info(
+                f"Prefetch: cache ready for "
+                f"{context['service_name']} at {result.cache_host_path}"
+            )
+            return {
+                "prefetch_cache_host_path": str(result.cache_host_path),
+                "prefetch_manifest_relative": manifest_ref.path.as_posix(),
+            }
+        except PrefetchError as e:
+            logger.warning(
+                f"Prefetch: failed for {context['service_name']}: "
+                f"{e.reason}: {e.detail}"
+            )
+            return {"prefetch_error": f"{e.reason}: {e.detail}"}
 
     # ------------------------------------------------------------------
     # Stage 3 — Investigator (Reason)
@@ -915,6 +1151,8 @@ class IncidentService:
             agent = InvestigatorAgent(
                 llm_service=self.llm,
                 repo_root=repo_workdir or "",
+                cache_host_path=context.get("prefetch_cache_host_path"),
+                manifest_relative_path=context.get("prefetch_manifest_relative"),
             )
             return await agent.investigate(
                 ctx,
@@ -1422,6 +1660,28 @@ class IncidentService:
                 "verifier": "unknown",
             }}
 
+        # When verification passes via probe, persist the fix to the
+        # working tree so the next scan can recognize it as
+        # already-fixed. This writes <repo_workdir>/.aegis/fixes.json
+        # and git-excludes the .aegis/ directory so subsequent
+        # git reset/clean don't touch it.
+        if result.passed and result.reason == "probe_passed":
+            try:
+                await self._persist_fix_to_tree(
+                    context=context,
+                    diff=diff,
+                    verification=result,
+                )
+            except Exception as e:
+                # Persisting the fix is a best-effort operation. If
+                # it fails, the verification still stands — the
+                # incident is still recorded as verified. Just log
+                # and move on.
+                logger.error(
+                    f"Verifier: failed to persist fix to tree for "
+                    f"{context.get('incident_id')}: {e}"
+                )
+
         return {"verification": {
             "passed": result.passed,
             "reason": result.reason,
@@ -1436,6 +1696,170 @@ class IncidentService:
                 "hunks_flagged": result.realignment.hunks_flagged,
             },
         }}
+        
+    async def _persist_fix_to_tree(
+        self,
+        *,
+        context: dict,
+        diff: str,
+        verification,
+    ) -> None:
+        """Persist a verified fix to <repo_workdir>/.aegis/fixes.json.
+
+        This is what makes subsequent scans report the bug as
+        "already_fixed by AEGIS PRO" rather than silently omitting
+        the line. The file records what was fixed, when, at what
+        commit, and with what probe. It's git-excluded so reset/clean
+        don't remove it, but survives tree resets because the fix
+        itself stays applied in the working tree.
+
+        Failure is not fatal — the caller catches and logs.
+        """
+        from pathlib import Path
+
+        repo_workdir = context.get("repo_workdir")
+        if not repo_workdir:
+            logger.debug(
+                "Verifier: no repo_workdir; skipping fix persistence"
+            )
+            return
+
+        tree_root = Path(repo_workdir)
+        if not tree_root.is_dir():
+            logger.warning(
+                f"Verifier: repo_workdir {tree_root} is not a directory; "
+                f"skipping fix persistence"
+            )
+            return
+
+        # Read the investigation to extract the successful probe.
+        investigation = context.get("investigation") or {}
+        probe_code = ""
+        probe_flags: list[str] = []
+        for h in (investigation.get("history") or []):
+            if h.get("tool") == "probe" and (h.get("metadata") or {}).get("reproduced") is True:
+                probe_code = (h.get("args") or {}).get("code") or ""
+                probe_flags = (h.get("args") or {}).get("interpreter_flags") or []
+                break
+
+        stack = context.get("stack_analysis") or {}
+        chain = context.get("chain") or []
+        root_link = chain[0] if chain else {}
+        scan_candidate = context.get("scan_candidate") or {}
+
+        # Compute the fix's file/line/pattern. In scan mode these
+        # come from the ScanCandidate (the synthetic stack trace is
+        # built from them). In incident mode they come from the
+        # stack trace.
+        file_rel = (
+            scan_candidate.get("root_file")
+            or stack.get("file_path")
+            or root_link.get("file")
+            or ""
+        )
+        line = (
+            scan_candidate.get("root_line")
+            or stack.get("line_number")
+            or root_link.get("line")
+            or 0
+        )
+        pattern = (
+            scan_candidate.get("pattern")
+            or "incident"
+        )
+        symbol = (
+            scan_candidate.get("symbol")
+            or context.get("null_source")
+            or ""
+        )
+
+        if not (file_rel and line):
+            logger.warning(
+                f"Verifier: cannot determine fix target for "
+                f"persistence (file={file_rel!r}, line={line!r}); "
+                f"skipping"
+            )
+            return
+
+        aegis_dir = tree_root / ".aegis"
+        aegis_dir.mkdir(exist_ok=True)
+
+        # Git-exclude .aegis/ so reset --hard and clean -fd don't
+        # touch it. This is essential: the fix provenance must
+        # survive the Verifier's own tree reset.
+        exclude = tree_root / ".git" / "info" / "exclude"
+        if exclude.is_file():
+            try:
+                content = exclude.read_text()
+                if ".aegis/" not in content:
+                    exclude.write_text(
+                        content.rstrip() + "\n# AEGIS PRO state\n.aegis/\n"
+                    )
+            except OSError as e:
+                logger.warning(
+                    f"Verifier: could not update .git/info/exclude: {e}"
+                )
+
+        fixes_path = aegis_dir / "fixes.json"
+        data = {"version": 1, "fixes": []}
+        if fixes_path.is_file():
+            try:
+                data = json.loads(fixes_path.read_text())
+                if not isinstance(data, dict):
+                    data = {"version": 1, "fixes": []}
+                data.setdefault("fixes", [])
+            except (OSError, json.JSONDecodeError) as e:
+                logger.warning(
+                    f"Verifier: could not read {fixes_path}: {e}; "
+                    f"starting fresh"
+                )
+                data = {"version": 1, "fixes": []}
+
+        new_entry = {
+            "incident_id": context.get("incident_id") or "",
+            "file": file_rel,
+            "line": line,
+            "pattern": pattern,
+            "symbol": symbol,
+            "fix_diff": diff,
+            "base_commit": context.get("commit_sha") or "HEAD",
+            "verified_at": datetime.utcnow().isoformat() + "Z",
+            "verification_reason": verification.reason,
+            "probe_code": probe_code,
+            "probe_flags": probe_flags,
+        }
+
+        # Idempotency: replace any existing entry for the same
+        # (file, line, pattern).
+        data["fixes"] = [
+            f for f in data["fixes"]
+            if not (
+                f.get("file") == file_rel
+                and f.get("line") == line
+                and f.get("pattern") == pattern
+            )
+        ]
+        data["fixes"].append(new_entry)
+
+        # Atomic write
+        tmp = fixes_path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(data, indent=2))
+            tmp.replace(fixes_path)
+            logger.info(
+                f"✅ Verifier: persisted fix for {file_rel}:{line} "
+                f"({pattern}) to {fixes_path} "
+                f"({len(data['fixes'])} total fixes tracked)"
+            )
+        except OSError as e:
+            logger.error(
+                f"Verifier: could not write {fixes_path}: {e}"
+            )
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     def _infer_language(self, stack_analysis: dict, repo_name: str) -> str:
         """

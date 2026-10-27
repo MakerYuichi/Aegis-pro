@@ -49,6 +49,7 @@ from loguru import logger
 
 from src.scanner.candidate import (
     CHAIN_TRACED,
+    DEST_ALREADY_FIXED,
     PatternMatch,
     ScanCandidate,
     ChainResult,
@@ -70,28 +71,48 @@ from src.scanner.variety_shuffler import variety_shuffle
 class ScanOutcome:
     """One candidate that survived the gate.
 
-    `destination` is "report" or "investigator" — the two output
-    streams. The `score` is the same value `score_finding` produced;
-    the gate doesn't re-score, only routes.
+    `destination` is one of "report", "investigator", or
+    "already_fixed". The first two are the classic output streams;
+    "already_fixed" means a prior Aegis PRO run fixed this bug and
+    the fix is still in the working tree. See candidate.py's
+    DEST_* constants.
+
+    `score` is the same value `score_finding` produced; the gate
+    doesn't re-score, only routes.
 
     `reasoning` is the human-readable explanation from the scorer,
     with the gate's destination attached as a prefix so a report can
     show "REPORT: <reasoning>" or "INVESTIGATE: <reasoning>."
+
+    `previous_fix` is populated only for destination="already_fixed".
+    It carries the persisted fix metadata from .aegis/fixes.json
+    (incident_id, fix_diff, verified_at, base_commit, probe_code,
+    probe_flags). Downstream uses it to build the "already fixed"
+    incident.
     """
-    destination: str                  # "report" | "investigator"
+    destination: str
     candidate: ScanCandidate
     match: PatternMatch
     chain: ChainResult | None
     score: float
     reasoning: str
+    previous_fix: dict | None = None
 
 
 @dataclass
 class ScanResult:
     """Everything a scan produced.
 
-    `report` and `investigator_queue` are the two gated output
-    streams. `dropped` is a count per reason, for telemetry.
+    `report`, `investigator_queue`, and `already_fixed` are the
+    three gated output streams. `dropped` is a count per reason, for
+    telemetry.
+
+    `already_fixed` is populated when a prior Aegis PRO run fixed a
+    bug and the fix is still in the working tree. The scanner reads
+    .aegis/fixes.json, checks each recorded fix against the current
+    file content, and emits one ScanOutcome per fix still applied.
+    Downstream skips investigation for these — the prior
+    verification is the trust anchor.
 
     `repo` and `files_scanned` describe the input. `duration_ms` is
     wall time for the whole scan.
@@ -100,8 +121,34 @@ class ScanResult:
     files_scanned: int
     report: list[ScanOutcome] = field(default_factory=list)
     investigator_queue: list[ScanOutcome] = field(default_factory=list)
+    already_fixed: list[ScanOutcome] = field(default_factory=list)
     dropped: dict[str, int] = field(default_factory=dict)
     duration_ms: int = 0
+
+    @property
+    def total_candidates(self) -> int:
+        return len(self.report) + len(self.investigator_queue) + len(self.already_fixed)
+
+    def to_dict(self) -> dict:
+        return {
+            "repo": self.repo,
+            "files_scanned": self.files_scanned,
+            "report": [self._outcome_dict(o) for o in self.report],
+            "investigator_queue": [
+                self._outcome_dict(o) for o in self.investigator_queue
+            ],
+            "already_fixed": [
+                self._outcome_dict(o) for o in self.already_fixed
+            ],
+            "dropped": self.dropped,
+            "duration_ms": self.duration_ms,
+            "counts": {
+                "report": len(self.report),
+                "investigator": len(self.investigator_queue),
+                "already_fixed": len(self.already_fixed),
+                "dropped_total": sum(self.dropped.values()),
+            },
+        }
 
     @property
     def total_candidates(self) -> int:
@@ -280,15 +327,142 @@ def run_scan(
         else:
             result.investigator_queue.append(outcome)
 
+    # ── Phase 5: already-fixed reconciliation ───────────────────
+    #
+    # Read .aegis/fixes.json from the repo root. Each entry records
+    # a bug that a prior Aegis PRO run fixed and verified. If the
+    # fix is still applied to the file (the added lines from the
+    # fix's diff are still present), emit an "already_fixed" outcome
+    # so downstream stages report it explicitly rather than silently
+    # skipping the line.
+    #
+    # If the fix is NOT still applied (someone reverted it), the
+    # bug should still be flagged by pyright and will show up in
+    # the normal report/investigator streams. That's the honest
+    # answer — the fix that was once verified is no longer present.
+    import json as _json
+
+    aegis_fixes_path = repo_path / ".aegis" / "fixes.json"
+    persisted_fixes: list[dict] = []
+    if aegis_fixes_path.is_file():
+        try:
+            data = _json.loads(aegis_fixes_path.read_text())
+            persisted_fixes = data.get("fixes") or []
+        except (OSError, _json.JSONDecodeError) as e:
+            logger.warning(
+                f"scan_runner: could not read {aegis_fixes_path}: {e}"
+            )
+
+    # Build a set of (file, line, pattern) currently flagged by the
+    # scanner. If a persisted fix's target is still flagged, the
+    # fix was reverted (or never fully applied) — do not report as
+    # already_fixed; let the normal pipeline re-fix it.
+    still_flagged: set[tuple[str, int, str]] = set()
+    for _outcome in (result.report + result.investigator_queue):
+        c = _outcome.candidate
+        still_flagged.add((c.root_file, c.root_line, c.pattern))
+
+    for fix in persisted_fixes:
+        file_rel = fix.get("file") or ""
+        line = fix.get("line") or 0
+        pattern = fix.get("pattern") or ""
+        fix_diff = fix.get("fix_diff") or ""
+        if not (file_rel and line and pattern and fix_diff):
+            continue
+
+        # Fix was reverted — the scanner still flags it. Do not
+        # report as already_fixed; the normal pipeline will pick it
+        # up from report/investigator_queue and re-fix it.
+        if (file_rel, line, pattern) in still_flagged:
+            logger.info(
+                f"scan_runner: persisted fix for {file_rel}:{line} "
+                f"({pattern}) was reverted; re-scanning normally"
+            )
+            continue
+
+        # The scanner does not flag it. Verify the fix is genuinely
+        # present by checking the added lines from the diff still
+        # appear in the file.
+        file_abs = repo_path / file_rel
+        if not file_abs.is_file():
+            continue
+        try:
+            current = file_abs.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            logger.warning(
+                f"scan_runner: could not read {file_abs} for fix "
+                f"verification: {e}"
+            )
+            continue
+
+        added_lines = [
+            ln[1:]
+            for ln in fix_diff.split("\n")
+            if ln.startswith("+") and not ln.startswith("+++")
+        ]
+        if not added_lines:
+            continue
+        if not all(a in current for a in added_lines):
+            logger.info(
+                f"scan_runner: persisted fix for {file_rel}:{line} "
+                f"({pattern}) is no longer in the file; skipping"
+            )
+            continue
+
+        # Fix is applied and the scanner doesn't flag it. Report.
+        synthetic = ScanCandidate(
+            root_file=file_rel,
+            root_line=line,
+            symbol=fix.get("symbol") or "",
+            pattern=pattern,
+            score=1.0,
+            reasoning=(
+                f"Already fixed by Aegis PRO. Original incident "
+                f"{fix.get('incident_id')}, verified "
+                f"{fix.get('verified_at')}."
+            ),
+            metadata={
+                "aegis_provenance": {
+                    "original_incident_id": fix.get("incident_id"),
+                    "verified_at": fix.get("verified_at"),
+                    "verification_reason": fix.get("verification_reason"),
+                    "base_commit": fix.get("base_commit"),
+                    "probe_code": fix.get("probe_code"),
+                    "probe_flags": fix.get("probe_flags"),
+                },
+            },
+        )
+        synthetic_match = PatternMatch(
+            file=file_rel,
+            line=line,
+            symbol=fix.get("symbol") or "",
+            pattern=pattern,
+            confidence="proven",
+            requires_chain=False,
+        )
+        result.already_fixed.append(ScanOutcome(
+            destination=DEST_ALREADY_FIXED,
+            candidate=synthetic,
+            match=synthetic_match,
+            chain=None,
+            score=1.0,
+            reasoning=f"ALREADY FIXED: {synthetic.reasoning}",
+            previous_fix=fix,
+        ))
+        logger.info(
+            f"scan_runner: emitted already_fixed for "
+            f"{file_rel}:{line} ({pattern}) "
+            f"from incident {fix.get('incident_id')}"
+        )
+
     # Sort each stream by score descending, so the top finding is
     # first. The report and the queue sort independently.
     result.report.sort(key=lambda o: -o.score)
     result.investigator_queue.sort(key=lambda o: -o.score)
+    result.already_fixed.sort(key=lambda o: -o.score)
 
     # Variety shuffle: round-robin across files so the queue is not
     # starved by the top-churn files. Same scores, different order.
-    # `status_codes.py:116` becomes the second item processed even
-    # though 10 `models.py` candidates outrank it.
     result.report = variety_shuffle(result.report)
     result.investigator_queue = variety_shuffle(result.investigator_queue)
 

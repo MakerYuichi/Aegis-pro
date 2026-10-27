@@ -98,6 +98,7 @@ async def _run(args: argparse.Namespace) -> int:
     verification_failed = []
     unverified = []
     refused = []
+    already_fixed = []
     for iid in result.get("incident_ids", []):
         incident = await service.get_incident(iid)
         if not incident:
@@ -110,43 +111,56 @@ async def _run(args: argparse.Namespace) -> int:
             except Exception:
                 meta = {}
 
+        # Already-fixed incidents short-circuit. They have no
+        # investigation, no auto_fix, no verification — the prior
+        # verification (persisted in extra_metadata.aegis_provenance)
+        # is the trust anchor.
+        if meta.get("already_fixed"):
+            already_fixed.append((iid, incident, meta.get("aegis_provenance") or {}))
+            continue
+
         investigation = meta.get("investigation") or {}
         auto_fix = meta.get("auto_fix") or {}
         verification = meta.get("verification") or {}
 
         reason = verification.get("reason") or ""
 
-        if auto_fix.get("diff") and verification.get("passed") is True:
-            # Verified — either by full test suite (tests_passed /
-            # tests_passed_pre_existing_failures) or by probe
-            # (probe_passed). Both mean the fix is confirmed.
+        fix_content = auto_fix.get("fix") or auto_fix.get("diff")
+
+        if fix_content and verification.get("passed") is True:
             verified.append((iid, incident, auto_fix, reason))
-        elif auto_fix.get("diff") and reason in (
+        elif fix_content and reason in (
             "tests_could_not_run", "probe_ambiguous",
         ):
-            # Fix was generated but couldn't be verified:
-            #   tests_could_not_run — test suite won't run AND no probe
-            #   probe_ambiguous     — probe passed both before and after
-            #                         (didn't actually reproduce the bug)
-            # Surface as "needs review" rather than "failed".
             unverified.append((iid, incident, {
                 "failure_mode": investigation.get("failure_mode"),
                 "reason": reason,
                 "output": verification.get("output", "")[:500],
             }))
-        elif auto_fix.get("diff"):
-            # Fix was generated but verification failed
-            # (diff_does_not_apply, tests_failed, probe_failed,
-            # prefetch_failed_*, clone_failed, no_verification_surface).
+        elif fix_content:
             verification_failed.append((iid, incident, auto_fix, verification))
         elif meta.get("unverified_finding"):
             unverified.append((iid, incident, meta["unverified_finding"]))
         elif investigation.get("status") == "refused":
             refused.append((iid, incident, investigation))
 
-    if not verified and not verification_failed and not unverified:
+    if not verified and not verification_failed and not unverified and not already_fixed:
         print("No findings.")
     else:
+        if already_fixed:
+            print("=== Already Fixed (verified by prior Aegis run) ===")
+            for iid, incident, provenance in already_fixed:
+                print(f"  {iid}  {incident.get('file_path')}:"
+                      f"{incident.get('line_number')}  "
+                      f"{incident.get('title')}")
+                original = provenance.get("original_incident_id") or "unknown"
+                verified_at = provenance.get("verified_at") or "unknown"
+                reason = provenance.get("verification_reason") or "verified"
+                print(f"           Fix from {original}, verified "
+                      f"{verified_at} ({reason}).")
+                print(f"           Still applied to the working tree.")
+            print()
+
         if verified:
             print("=== Verified Findings ===")
             for iid, incident, auto_fix, reason in verified:
