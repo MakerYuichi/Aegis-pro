@@ -95,8 +95,10 @@ async def _run(args: argparse.Namespace) -> int:
     print()
 
     verified = []
+    verification_failed = []
     unverified = []
     refused = []
+    already_fixed = []
     for iid in result.get("incident_ids", []):
         incident = await service.get_incident(iid)
         if not incident:
@@ -108,23 +110,79 @@ async def _run(args: argparse.Namespace) -> int:
                 meta = _json.loads(meta)
             except Exception:
                 meta = {}
-        if meta.get("unverified_finding"):
-            unverified.append((iid, incident, meta["unverified_finding"]))
-        elif meta.get("auto_fix"):
-            verified.append((iid, incident, meta["auto_fix"]))
-        elif (meta.get("investigation") or {}).get("status") == "refused":
-            refused.append((iid, incident, meta.get("investigation", {})))
 
-    if not verified and not unverified:
+        # Already-fixed incidents short-circuit. They have no
+        # investigation, no auto_fix, no verification — the prior
+        # verification (persisted in extra_metadata.aegis_provenance)
+        # is the trust anchor.
+        if meta.get("already_fixed"):
+            already_fixed.append((iid, incident, meta.get("aegis_provenance") or {}))
+            continue
+
+        investigation = meta.get("investigation") or {}
+        auto_fix = meta.get("auto_fix") or {}
+        verification = meta.get("verification") or {}
+
+        reason = verification.get("reason") or ""
+
+        fix_content = auto_fix.get("fix") or auto_fix.get("diff")
+
+        if fix_content and verification.get("passed") is True:
+            verified.append((iid, incident, auto_fix, reason))
+        elif fix_content and reason in (
+            "tests_could_not_run", "probe_ambiguous",
+        ):
+            unverified.append((iid, incident, {
+                "failure_mode": investigation.get("failure_mode"),
+                "reason": reason,
+                "output": verification.get("output", "")[:500],
+            }))
+        elif fix_content:
+            verification_failed.append((iid, incident, auto_fix, verification))
+        elif meta.get("unverified_finding"):
+            unverified.append((iid, incident, meta["unverified_finding"]))
+        elif investigation.get("status") == "refused":
+            refused.append((iid, incident, investigation))
+
+    if not verified and not verification_failed and not unverified and not already_fixed:
         print("No findings.")
     else:
-        if verified:
-            print("=== Verified Findings ===")
-            for iid, incident, auto_fix in verified:
+        if already_fixed:
+            print("=== Already Fixed (verified by prior Aegis run) ===")
+            for iid, incident, provenance in already_fixed:
                 print(f"  {iid}  {incident.get('file_path')}:"
                       f"{incident.get('line_number')}  "
                       f"{incident.get('title')}")
-                print(f"           Fix generated and verified.")
+                original = provenance.get("original_incident_id") or "unknown"
+                verified_at = provenance.get("verified_at") or "unknown"
+                reason = provenance.get("verification_reason") or "verified"
+                print(f"           Fix from {original}, verified "
+                      f"{verified_at} ({reason}).")
+                print(f"           Still applied to the working tree.")
+            print()
+
+        if verified:
+            print("=== Verified Findings ===")
+            for iid, incident, auto_fix, reason in verified:
+                print(f"  {iid}  {incident.get('file_path')}:"
+                      f"{incident.get('line_number')}  "
+                      f"{incident.get('title')}")
+                if reason == "probe_passed":
+                    print(f"           Fix verified via probe "
+                          f"(bug reproduced before, gone after).")
+                elif reason == "tests_passed_pre_existing_failures":
+                    print(f"           Fix verified — no new test failures.")
+                else:
+                    print(f"           Fix generated and verified (tests passed).")
+            print()
+
+        if verification_failed:
+            print("=== Verification Failed (fix generated, not confirmed) ===")
+            for iid, incident, auto_fix, verification in verification_failed:
+                print(f"  {iid}  {incident.get('file_path')}:"
+                      f"{incident.get('line_number')}  "
+                      f"{incident.get('title')}")
+                print(f"           reason={verification.get('reason', 'unknown')}")
             print()
 
         if unverified:
@@ -133,10 +191,32 @@ async def _run(args: argparse.Namespace) -> int:
                 print(f"  {iid}  {incident.get('file_path')}:"
                       f"{incident.get('line_number')}  "
                       f"{incident.get('title')}")
-                mode = finding.get("failure_mode") or "unspecified pattern"
-                print(f"           {mode}")
-                print(f"           No fix generated — probe did not "
-                      f"reproduce. Recommend human review.")
+                # Three kinds of unverified findings:
+                #   1. confirmed + reasoned_only (Fixer gate skip)
+                #   2. could_not_determine (Investigator refused)
+                #   3. tests_could_not_run (test suite + probe both
+                #      couldn't verify)
+                #   4. probe_ambiguous (probe passed both before/after,
+                #      doesn't reproduce the bug)
+                reason = finding.get("reason") or ""
+                failure_mode = finding.get("failure_mode")
+
+                if reason == "tests_could_not_run":
+                    print(f"           Fix generated, but tests couldn't "
+                          f"run and no probe could reproduce the bug.")
+                    print(f"           Recommend human review.")
+                elif reason == "probe_ambiguous":
+                    print(f"           Probe passed both before and after "
+                          f"fix; doesn't reproduce the bug.")
+                    print(f"           Recommend human review.")
+                elif failure_mode:
+                    print(f"           {failure_mode}")
+                    print(f"           No fix generated — probe did not "
+                          f"reproduce. Recommend human review.")
+                else:
+                    print(f"           Investigator could not determine "
+                          f"({reason or 'unknown'})")
+                    print(f"           No fix generated. Recommend human review.")
             print()
 
     if refused:

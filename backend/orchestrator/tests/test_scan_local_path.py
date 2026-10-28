@@ -37,7 +37,11 @@ async def test_scan_repo_accepts_local_directory(tmp_path):
     fake_scan_result = SimpleNamespace(
         report=[],
         investigator_queue=[],
+        already_fixed=[],
+        dropped={},
         files_scanned=1,
+        duration_ms=0,
+        repo=str(repo_dir),
         to_dict=lambda: {"counts": {"report": 0, "investigator": 0}},
     )
 
@@ -83,7 +87,11 @@ async def test_scan_repo_local_path_defaults_service_to_dirname(tmp_path):
     fake_scan_result = SimpleNamespace(
         report=[],
         investigator_queue=[],
+        already_fixed=[],
+        dropped={},
         files_scanned=1,
+        duration_ms=0,
+        repo=str(repo_dir),
         to_dict=lambda: {"counts": {"report": 0, "investigator": 0}},
     )
 
@@ -119,7 +127,11 @@ async def test_scan_repo_local_path_defaults_service_to_dirname(tmp_path):
     fake_scan_result = SimpleNamespace(
         report=[fake_outcome],
         investigator_queue=[],
+        already_fixed=[],
+        dropped={},
         files_scanned=1,
+        duration_ms=0,
+        repo=str(repo_dir),
         to_dict=lambda: {"counts": {"report": 1, "investigator": 0}},
     )
 
@@ -154,7 +166,11 @@ async def test_scan_repo_remote_path_still_clones(tmp_path):
     fake_scan_result = SimpleNamespace(
         report=[],
         investigator_queue=[],
+        already_fixed=[],
+        dropped={},
         files_scanned=0,
+        duration_ms=0,
+        repo="owner/repo",
         to_dict=lambda: {"counts": {"report": 0, "investigator": 0}},
     )
 

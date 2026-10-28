@@ -209,12 +209,43 @@ ENTRYPOINT_PATH = (
 
 
 def _load_entrypoint_module():
+    """Load scripts/prefetch_entrypoint.py as a module for agreement tests.
+
+    The script imports `parsers` at the top:
+        from parsers import parse_manifest, ManifestParseError
+
+    That's a bare import, not a package-relative one, because
+    inside the prefetch container the script and parsers.py are
+    both mounted at /opt, and PYTHONPATH=/opt puts them on
+    sys.path together.
+
+    In the orchestrator's test environment, /opt doesn't exist and
+    src/agents/prefetch/ isn't on sys.path. The bare `parsers`
+    import would fail with ModuleNotFoundError: No module named
+    'parsers'. This helper adds src/agents/prefetch/ to sys.path
+    before loading the script, so `from parsers import ...`
+    resolves to the same file the container uses.
+
+    This is what the container's PYTHONPATH=/opt mount achieves —
+    the test reproduces that arrangement in-process. No production
+    code change; the script's `from parsers import ...` is
+    unchanged.
+    """
+    import sys
+    parsers_dir = (
+        Path(__file__).parents[2] / "src" / "agents" / "prefetch"
+    )
+    parsers_dir_str = str(parsers_dir)
+    if parsers_dir_str not in sys.path:
+        sys.path.insert(0, parsers_dir_str)
+
     spec = _importlib_util.spec_from_file_location(
         "prefetch_entrypoint", ENTRYPOINT_PATH,
     )
     mod = _importlib_util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
 
 
 def test_entrypoint_script_exists():

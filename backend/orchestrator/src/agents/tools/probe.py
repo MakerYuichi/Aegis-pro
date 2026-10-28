@@ -13,6 +13,7 @@ and the agent falls back to confirmation="reasoned_only".
 """
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 import uuid
@@ -25,36 +26,76 @@ from src.agents.tools.repo_tools import ToolResult
 
 MAX_PROBE_CHARS = 4000  # cap the agent's test source
 
+# Flags the agent is permitted to pass. These are the CPython
+# interpreter flags that affect module-load-time behavior without
+# requiring a new file. Anything outside this set is refused —
+# notably, "-c" (arbitrary code), "-m" (arbitrary module), and any
+# path argument. The set is intentionally narrow.
+ALLOWED_INTERPRETER_FLAGS = frozenset({
+    "-O",    # basic optimizations; strips asserts
+    "-OO",   # also strips docstrings
+    "-B",    # don't write .pyc files
+    "-u",    # unbuffered stdout/stderr
+    "-E",    # ignore environment variables
+    "-S",    # don't run site initialization
+    "-q",    # quiet mode
+    "-X",    # implementation-specific option; requires the next arg
+})
+
+# Patterns the probe checks for when `reproduced=False` and no
+# interpreter_flags were supplied. These are the concrete ways
+# an agent can be tripped up by not having set the right flags.
+_DUNDER_PATTERNS: dict[str, tuple[re.Pattern, list[str]]] = {
+    "__doc__": (
+        re.compile(r"\b__doc__\b"),
+        ["-OO"],
+    ),
+    "__file__": (
+        re.compile(r"\b__file__\b"),
+        ["-c", "-m"],  # informational; not in allowlist
+    ),
+    "__spec__": (
+        re.compile(r"\b__spec__\b"),
+        ["-c", "-m"],  # informational
+    ),
+    "assert": (
+        re.compile(r"^\s*assert\b", re.MULTILINE),
+        ["-O", "-OO"],
+    ),
+    "help()": (
+        re.compile(r"\bhelp\s*\("),
+        ["-OO"],
+    ),
+}
+
 
 async def probe(
     repo: str,
     code: str,
     language: str = "Python",
+    interpreter_flags: list[str] | None = None,
+    cache_host_path: str | None = None,
+    manifest_relative_path: str | None = None,
 ) -> ToolResult:
     """Run a small test in the verifier's sandbox.
 
-    `repo` is the checked-out repo the agent is investigating. The
-    probe writes `code` to a temp file inside a sandbox workdir and
-    runs it. The test is expected to fail (that's the point — the
-    agent is trying to reproduce a suspected failure mode); a
-    successful run means the failure mode was NOT reproduced.
+    [unchanged docstring for the base case...]
 
-    Returns a ToolResult whose `result` is the captured stdout/stderr
-    and whose metadata carries:
-        exit_code:  int
-        duration_ms: int
-        reproduced: True when the test ran and failed as expected
-                    (exit_code != 0). False otherwise.
-        ran:        True when the probe actually ran in a sandbox.
-                    False when the sandbox was unavailable or the
-                    run could not be attempted. The agent must not
-                    claim probe_reproduced when ran is False.
+    `interpreter_flags`, when supplied, is prepended to the python
+    invocation inside the sandbox: `python -OO -m aegis_probe`.
+    The list must contain only flags from ALLOWED_INTERPRETER_FLAGS;
+    anything else is refused with error="invalid_interpreter_flags".
 
-    This tool never raises. Every failure mode — no repo, empty
-    code, sandbox unavailable — is a ToolResult with ok=False or
-    ran=False, and the agent handles it as an observation.
+    When `reproduced=False`, the result metadata contains
+    `reproduction_hint`: a short string the agent can act on. See
+    `_suggest_interpreter_flags` for how it is derived.
     """
-    args = {"language": language, "code_chars": len(code or "")}
+    args = {
+        "language": language,
+        "code": code[:MAX_PROBE_CHARS] if code else "",
+        "code_chars": len(code or ""),
+        "interpreter_flags": list(interpreter_flags or []),
+    }
 
     if not code or not code.strip():
         return ToolResult(
@@ -67,23 +108,29 @@ async def probe(
             error=f"code_too_long: {len(code)} > {MAX_PROBE_CHARS}",
         )
 
+    # Validate flags before anything else — cheap, and the error
+    # message tells the agent what's allowed.
+    flags = list(interpreter_flags or [])
+    invalid = [f for f in flags if f not in ALLOWED_INTERPRETER_FLAGS]
+    if invalid:
+        return ToolResult(
+            ok=False, tool="probe", args=args,
+            error=(
+                f"invalid_interpreter_flags: {invalid!r}; "
+                f"allowed: {sorted(ALLOWED_INTERPRETER_FLAGS)}"
+            ),
+        )
+
     repo_path = Path(repo).resolve()
     if not repo_path.is_dir():
         return ToolResult(
             ok=False, tool="probe", args=args, error="repo_not_found",
         )
 
-    # Import the sandbox primitive from the verifier. This is the
-    # same code path HostedVerifier uses; keeping the import local
-    # avoids a circular dependency (verifier imports models, models
-    # imports nothing from tools).
     from src.agents.verifier import _run_in_docker, _image_for_language
     from src.config import settings
 
     if not settings.VERIFY_BEFORE_REPORT:
-        # The sandbox is disabled. Refuse to run — and report the
-        # reason so the agent knows probe_reproduced is impossible
-        # in this deployment.
         return ToolResult(
             ok=False,
             tool="probe",
@@ -98,9 +145,6 @@ async def probe(
 
     workdir = _new_probe_workdir()
     try:
-        # Write the agent's test into the workdir alongside a copy of
-        # the repo, so the test can import from it. The sandbox
-        # mounts the workdir read-write.
         repo_copy = workdir / "repo"
         try:
             shutil.copytree(
@@ -119,38 +163,247 @@ async def probe(
         test_file = repo_copy / "aegis_probe.py"
         test_file.write_text(code, encoding="utf-8")
 
+        # Build the command with flags. The flags were validated
+        # against ALLOWED_INTERPRETER_FLAGS above, so the only
+        # tokens reaching the shell are allowlisted and the module
+        # name is a fixed string. There is no path through this
+        # code where agent-supplied text becomes a shell token.
+        flag_str = (" " + " ".join(flags)) if flags else ""
+
+        # When the pipeline has prefetched deps, install them into a
+        # venv inside the probe container, then run the probe from
+        # that venv. This makes `import <repo_module>` work so the
+        # agent can write probes that test the actual code instead of
+        # toy reproductions that don't load the tree.
+        # The probe container mounts `workdir` at
+        # <VERIFIER_CONTAINER_WORKDIR>/<workdir.name>. `workdir.name`
+        # is "probe-<uuid>", and the repo is copied into
+        # `workdir/repo`, so the tree root inside the container is:
+        #   <VERIFIER_CONTAINER_WORKDIR>/<workdir.name>/repo
+        # The previous command hardcoded `/work/probe-repo`, which
+        # is not where anything is mounted. `cd` failed, pip never
+        # ran, and every probe that imported tree code hit
+        # ModuleNotFoundError.
+        container_workdir = settings.VERIFIER_CONTAINER_WORKDIR
+        container_repo = (
+            f"{container_workdir}/{workdir.name}/repo"
+        )
+        if cache_host_path and manifest_relative_path:
+            probe_command = (
+                f"cd {container_repo} && "
+                "python -m venv /tmp/venv && "
+                "/tmp/venv/bin/pip install --no-index --find-links /cache "
+                "--quiet -r /cache/requirements.lock && "
+                f"PATH=/tmp/venv/bin:$PATH "
+                f"PYTHONPATH={container_repo} "
+                f"python{flag_str} -m aegis_probe"
+            )
+        else:
+            probe_command = f"python{flag_str} -m aegis_probe"
+
         exit_code, output = await _run_in_docker(
             image=_image_for_language(language),
             host_workdir=workdir,
             container_workdir=settings.VERIFIER_CONTAINER_WORKDIR,
-            command="python -m aegis_probe",
+            command=probe_command,
             timeout=settings.VERIFY_TIMEOUT_SECONDS,
             memory_limit=settings.VERIFIER_MEMORY_LIMIT,
             cpu_limit=settings.VERIFIER_CPU_LIMIT,
+            cache_host_path=(
+                Path(cache_host_path) if cache_host_path else None
+            ),
+            # _run_in_docker only mounts the cache at /cache when
+            # BOTH cache_host_path and manifest_relative_path are
+            # set. The probe's pip install references
+            # /cache/requirements.lock, so the mount must happen.
+            # Previously this call passed cache_host_path but not
+            # manifest_relative_path, so the mount was skipped and
+            # the probe hit `No such file or directory:
+            # '/cache/requirements.lock'` on every run. See
+            # INC-20261028-F434AE (and every earlier probe run).
+            manifest_relative_path=manifest_relative_path,
         )
 
-        reproduced = exit_code != 0
+
+        reproduced = (exit_code != 0) or _output_signals_bug(output)
+
+
+        # Build metadata. When reproduced is False and no flags were
+        # supplied, check whether the code likely needs them.
+        metadata: dict = {
+            "ran": True,
+            "reproduced": reproduced,
+            "exit_code": exit_code,
+        }
+        if not reproduced and not flags:
+            hint = _suggest_interpreter_flags(code)
+            if hint:
+                metadata["reproduction_hint"] = hint
+
         return ToolResult(
             ok=True,
             tool="probe",
             args=args,
             result=output,
-            metadata={
-                "ran": True,
-                "reproduced": reproduced,
-                "exit_code": exit_code,
-            },
+            metadata=metadata,
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _suggest_interpreter_flags(code: str) -> str | None:
+    """
+    Inspect the agent's probe source. If it references a symbol
+    whose value depends on interpreter flags, return a hint string
+    suggesting the flag.
+
+    The hint is advisory — the agent decides whether to retry.
+    Returning None means "no evidence the flags are needed", which
+    is the honest answer when the code doesn't touch dunders.
+    """
+    for symbol, (pattern, flags) in _DUNDER_PATTERNS.items():
+        if pattern.search(code):
+            usable = [f for f in flags if f in ALLOWED_INTERPRETER_FLAGS]
+            if not usable:
+                continue
+            flag_list = ", ".join(repr(f) for f in usable)
+            return (
+                f"probe referenced {symbol!r} but ran without "
+                f"interpreter flags; the value of {symbol} depends on "
+                f"the interpreter mode. If the failure mode requires "
+                f"{flag_list}, retry with interpreter_flags=[{flag_list}]."
+            )
+    return None
+
+
 def _new_probe_workdir() -> Path:
-    """Create a fresh workdir for the probe. Same layout as the
-    verifier's, so the sandbox mount resolves the same way."""
     from src.config import settings
     base = Path(settings.VERIFIER_CONTAINER_WORKDIR)
     base.mkdir(parents=True, exist_ok=True)
     target = base / f"probe-{uuid.uuid4().hex[:12]}"
     target.mkdir(parents=True, exist_ok=False)
     return target
+
+# Import errors and cache-missing errors inside a probe almost
+# always mean the probe's environment is broken — dependencies
+# not installed, sys.path wrong, cache volume not mounted — not
+# that the bug under test reproduced. Classifying these as bug
+# signals caused the pipeline to report false probe_passed on
+# findings whose probe never reached the code under test. See
+# INC-20261028-3F38D0: probe output was
+# "ModuleNotFoundError: No module named 'urllib3'",
+# classified as reproduced=True, propagated to the Verifier as
+# a signal that the bug had fired.
+#
+# These patterns take precedence: when any is present in the
+# output, _output_signals_bug returns False regardless of what
+# else the output contains. The rationale is that if the probe
+# couldn't run at all, whatever exception it printed is not the
+# bug under test.
+_ENVIRONMENT_FAILURE_PATTERNS = (
+    "ERROR: Could not open requirements file",
+    "No such file or directory: '/cache/",
+    "Cannot connect to the Docker daemon",
+    "verification timed out",
+    "pip install failed",
+    "command not found",
+)
+
+
+def _output_signals_bug(output: str) -> bool:
+    """
+    Return True if the probe's output contains a Python exception
+    signature — i.e., the code caught the exception and printed it
+    (as agents often do), rather than letting it propagate.
+
+    Two forms of exception output are recognized:
+
+    1. Python's default uncaught-exception traceback:
+         Traceback (most recent call last):
+         ...
+         TypeError: unsupported operand type(s)
+
+       In this form the exception class name is followed by a
+       colon — `TypeError:`, `AttributeError:`, etc.
+
+    2. Agent-written try/except that prints `type(e).__name__` and
+       the message separately:
+         try:
+             ...
+         except Exception as e:
+             print('Error:', type(e).__name__, e)
+
+       In this form the output is:
+         Error: TypeError unsupported operand type(s)
+
+       The exception class name is followed by a SPACE, not a
+       colon. The previous version of this function only matched
+       form (1); form (2) was missed, causing probe runs that
+       reproduced a bug to be classified as "passed." See
+       INC-20261027-5DDC5A: the probe printed
+       "Error: TypeError unsupported operand type(s)..."
+       and was classified as `before_passed=True`, leading to
+       `probe_ambiguous` and a false negative.
+
+    Also matches the runtime-error prefix "ERROR:" that pip and
+    other tools emit, and the string "ModuleNotFoundError" without
+    a colon (the most common form for missing-deps failures).
+
+    Environment failures take precedence. When the output contains
+    a signature of a broken probe environment (missing dependencies,
+    missing cache, sandbox failure), the function returns False even
+    if the output also contains an exception signature. Rationale:
+    if the probe couldn't run, whatever exception it produced is
+    the environment failure, not the bug under test. See
+    _ENVIRONMENT_FAILURE_PATTERNS above.
+    """
+    if not output:
+        return False
+
+    # Environment failures take precedence over bug signals: if
+    # the probe couldn't import its deps or couldn't reach the
+    # cache volume, its output is not evidence about the bug.
+    if any(p in output for p in _ENVIRONMENT_FAILURE_PATTERNS):
+        return False
+
+    # Form 1: `TypeError: ...` (traceback style, with colon)
+    COLONED = (
+        "TypeError:",
+        "AttributeError:",
+        "KeyError:",
+        "ValueError:",
+        "RuntimeError:",
+        "AssertionError:",
+        "SyntaxError:",
+        "IndexError:",
+        "FileNotFoundError:",
+        "PermissionError:",
+        "OSError:",
+        "NameError:",
+        "NotImplementedError:",
+        "StopIteration:",
+        "UnicodeError:",
+    )
+
+    # Form 2: `Error: TypeError unsupported ...` (agent style, class
+    # name followed by space and the message)
+    SPACED_CLASSES = (
+        "TypeError ",
+        "AttributeError ",
+        "KeyError ",
+        "ValueError ",
+        "RuntimeError ",
+        "AssertionError ",
+        "SyntaxError ",
+        "IndexError ",
+        "FileNotFoundError ",
+        "PermissionError ",
+        "OSError ",
+        "NameError ",
+        "NotImplementedError ",
+    )
+
+    return (
+        any(p in output for p in COLONED)
+        or any(p in output for p in SPACED_CLASSES)
+    )

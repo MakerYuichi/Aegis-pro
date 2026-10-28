@@ -30,7 +30,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-
+from parsers import parse_manifest, ManifestParseError
 
 # ── Sanitizer (duplicated, deliberately) ─────────────────────────
 #
@@ -47,6 +47,8 @@ from pathlib import Path
 # The two implementations are covered by tests that assert they
 # agree on the fixture corpus. See tests/prefetch/test_sanitize.py.
 
+MANIFEST_KIND = os.environ.get("MANIFEST_KIND", "requirements")
+
 _REQ_RE = re.compile(
     r"""
     ^\s*
@@ -54,10 +56,20 @@ _REQ_RE = re.compile(
     (?P<extras>\[[^\]]+\])?
     \s*
     (?:
-        (?P<op>==|>=|<=|~=|!=|>|<)
-        \s*
-        (?P<version>[A-Za-z0-9][A-Za-z0-9._-]*)
-        (?:\+(?P<variant>[A-Za-z0-9][A-Za-z0-9._-]*))?
+        (?P<specifiers>
+            (?:
+                (?:==|>=|<=|~=|!=|>|<)
+                \s*
+                [A-Za-z0-9][A-Za-z0-9._+-]*
+                (?:\.\*)?
+            )
+            (?:\s*,\s*
+                (?:==|>=|<=|~=|!=|>|<)
+                \s*
+                [A-Za-z0-9][A-Za-z0-9._+-]*
+                (?:\.\*)?
+            )*
+        )
     )?
     \s*
     (?:;\s*(?P<marker>.+?))?
@@ -94,106 +106,142 @@ class EntryError(Exception):
     pass
 
 
+def parse_and_sanitize(path: Path, kind: str) -> list[dict]:
+    """
+    Two-step pipeline:
+      1. parse_manifest(kind, text) → list[str] of requirement strings
+      2. sanitize() each string → list[dict] of pin dicts
+
+    The parse step handles the manifest format. The sanitize step
+    validates each requirement line and normalizes it to the pin
+    dict. Malformed requirements raise EntryError from sanitize();
+    malformed manifests raise ManifestParseError from parse_manifest().
+
+    Between the two, the container gets a normalized list of pins
+    regardless of what format the manifest came in as.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise EntryError(f"manifest_read_failed: {e}")
+
+    try:
+        req_strings = parse_manifest(kind, text)
+    except ManifestParseError as e:
+        raise EntryError(f"manifest_parse_failed: {e.reason}: {e.detail}")
+
+    if req_strings is None:
+        # Manifest recognized, no deps to install. That's a
+        # legitimate state — a setup.cfg with only [metadata],
+        # for example. Return empty; the caller (main) treats
+        # an empty manifest as "nothing to prefetch."
+        return []
+
+    # Now sanitize each line — this is the existing per-line
+    # validation that was previously the whole sanitizer.
+    pins: list[dict] = []
+    for lineno, line in enumerate(req_strings, start=1):
+        line_stripped = line.strip()
+        if not line_stripped or line_stripped.startswith("#"):
+            continue
+        try:
+            pins.extend(_sanitize_line(line_stripped, lineno))
+        except EntryError as e:
+            raise EntryError(
+                f"malformed_requirement at line {lineno} "
+                f"(from {kind}): {line!r} — {e}"
+            )
+    return pins
+
+
+def _sanitize_line(line: str, lineno: int) -> list[dict]:
+    """
+    Validate one requirement line. Returns a list of pin dicts.
+
+    This is the per-line logic that used to live inside the
+    single sanitize() function. Now it's split out so the parse
+    step can preprocess the manifest however it needs.
+    """
+    if line.startswith(("\\", ";")):
+        raise EntryError(
+            f"unsupported_continuation at line {lineno}: {line!r}"
+        )
+    if line.startswith("-"):
+        token = line.split()[0]
+        if token in _REJECTED_DIRECTIVES:
+            parts = line.split()
+            if len(parts) == 2 and parts[1] in (".", "./"):
+                return []  # silently skip -e .
+            raise EntryError(
+                f"rejected_directive: {token} at line {lineno}"
+            )
+        if token in _STRIPPED_DIRECTIVES:
+            return []
+        raise EntryError(
+            f"unknown_directive: {token} at line {lineno}"
+        )
+    if " @ " in line:
+        raise EntryError(
+            f"direct_url_not_allowed at line {lineno}: {line!r}"
+        )
+    if "\\" in line:
+        raise EntryError(
+            f"multiline_hash_not_supported at line {lineno}"
+        )
+
+    m = _REQ_RE.match(line)
+    if m is None:
+        raise EntryError(
+            f"malformed_requirement at line {lineno}: {line!r}"
+        )
+
+    extras = ()
+    if m.group("extras"):
+        extras = tuple(
+            e.strip()
+            for e in m.group("extras")[1:-1].split(",")
+            if e.strip()
+        )
+
+    specifiers = (m.group("specifiers") or "").strip()
+
+    # A requirement is "exactly pinned" only when it has one
+    # specifier that is `==X` with no wildcard. Multi-specifier
+    # ranges (chardet>=3.0.2,<3.1.0) are ranges, not pins — the
+    # resolver picks a specific version during pip download.
+    is_pinned = False
+    base_version = ""
+    local_variant = ""
+    if specifiers.startswith("==") and "," not in specifiers:
+        pin_body = specifiers[2:].strip()
+        if "*" not in pin_body:
+            is_pinned = True
+            if "+" in pin_body:
+                base_version, local_variant = pin_body.split("+", 1)
+            else:
+                base_version = pin_body
+                local_variant = ""
+
+    return [{
+        "name": normalize_name(m.group("name")),
+        "is_pinned": is_pinned,
+        "base_version": base_version,
+        "local_variant": local_variant,
+        "raw_specifier": specifiers,
+        "extras": list(extras),
+        "environment_marker": (m.group("marker") or "").strip() or None,
+        "raw_line": line,
+        "line_number": lineno,
+    }]
+
+
 def sanitize(path: Path) -> list[dict]:
     """
-    Parse a manifest into a list of requirement dicts.
-
-    Ranges are accepted, not rejected. The dict records whether
-    the line was an exact pin or a range; the lockfile renderer
-    preserves the original specifier for ranges so pip's resolver
-    can pick the absolute version during download.
-
-    Raises EntryError only for directives or malformed syntax.
+    Backward-compatible wrapper. Uses MANIFEST_KIND (env) for the
+    dispatch. Same call sites work without change; the manifest
+    kind flows through the env var.
     """
-    text = path.read_text(encoding="utf-8")
-    pins = []
-    for lineno, raw in enumerate(text.splitlines(), start=1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith(("\\", ";")):
-            raise EntryError(
-                f"unsupported_continuation at line {lineno}: {raw!r}"
-            )
-        if line.startswith("-"):
-            token = line.split()[0]
-            if token in _REJECTED_DIRECTIVES:
-                # Allow `-e .` (editable install of the repo itself).
-                # The repo's own code is what the tests will import;
-                # installing it editable adds no attack surface beyond
-                # what the tests already do. Reject every other form
-                # of editable install — `-e git+https://...`,
-                # `-e /path/to/something`, `-e <pkg-name>` — those
-                # fetch code from outside the repo.
-                parts = line.split()
-                if len(parts) == 2 and parts[1] in (".", "./"):
-                    continue  # silently strip; pip install will handle it
-                raise EntryError(
-                    f"rejected_directive: {token} at line {lineno}"
-                )
-
-            if token in _STRIPPED_DIRECTIVES:
-                continue
-            raise EntryError(
-                f"unknown_directive: {token} at line {lineno}"
-            )
-        if " @ " in line:
-            raise EntryError(
-                f"direct_url_not_allowed at line {lineno}: {raw!r}"
-            )
-        if "\\" in line:
-            raise EntryError(
-                f"multiline_hash_not_supported at line {lineno}"
-            )
-
-        m = _REQ_RE.match(line)
-        if m is None:
-            raise EntryError(f"malformed_requirement at line {lineno}: {raw!r}")
-
-        extras = ()
-        if m.group("extras"):
-            extras = tuple(
-                e.strip()
-                for e in m.group("extras")[1:-1].split(",")
-                if e.strip()
-            )
-
-        op = m.group("op")
-        version = m.group("version")
-        variant = m.group("variant")
-
-        if op is None:
-            is_pinned = False
-            raw_specifier = ""
-            base_version = ""
-            local_variant = ""
-        elif op == "==":
-            is_pinned = True
-            base_version = version
-            local_variant = variant or ""
-            raw_specifier = f"=={version}" + (
-                f"+{variant}" if variant else ""
-            )
-        else:
-            is_pinned = False
-            base_version = ""
-            local_variant = ""
-            raw_specifier = f"{op}{version}"
-
-        pins.append({
-            "name": normalize_name(m.group("name")),
-            "is_pinned": is_pinned,
-            "base_version": base_version,
-            "local_variant": local_variant,
-            "raw_specifier": raw_specifier,
-            "extras": list(extras),
-            "environment_marker": (m.group("marker") or "").strip() or None,
-            "raw_line": raw,
-            "line_number": lineno,
-        })
-    if not pins:
-        raise EntryError("empty_manifest")
-    return pins
+    return parse_and_sanitize(path, MANIFEST_KIND)
 
 
 _TORCH_FAMILY = frozenset({"torch", "torchvision", "torchaudio"})
@@ -234,14 +282,8 @@ def build_lockfile(pins: list[dict]) -> str:
     lines = []
     for p in pins:
         extras = f"[{','.join(p['extras'])}]" if p["extras"] else ""
-        if p["is_pinned"]:
-            body = f"{p['name']}{extras}{p['raw_specifier']}"
-        else:
-            spec = p["raw_specifier"]
-            if spec:
-                body = f"{p['name']}{extras}{spec}"
-            else:
-                body = f"{p['name']}{extras}"
+        spec = p["raw_specifier"]
+        body = f"{p['name']}{extras}{spec}" if spec else f"{p['name']}{extras}"
         if p["environment_marker"]:
             body += f" ; {p['environment_marker']}"
         lines.append(body)
@@ -510,7 +552,30 @@ def main() -> int:
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Sanitize.
-    pins = sanitize(manifest_path)
+    try:
+        pins = parse_and_sanitize(manifest_path, MANIFEST_KIND)
+    except EntryError as e:
+        # Emit a structured error on stderr, same shape as the
+        # existing prefetch failures. The orchestrator's
+        # parse_failure() reads it.
+        print(str(e), file=sys.stderr)
+        return 3
+
+    if not pins:
+        # No deps to prefetch. Emit an empty receipt and exit 0.
+        # The orchestrator treats an empty receipt as "skip
+        # prefetch for this repo" — verification will run tests
+        # against whatever the base image has.
+        print(json.dumps({
+            "manifest_path": manifest_path.name,
+            "manifest_hash": sha256_of(""),
+            "python_version": platform.python_version(),
+            "platform_tag": platform_tag(),
+            "packages": [],
+            "fetched_now": False,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+        }, separators=(",", ":")))
+        return 0
     lockfile_text = build_lockfile(pins)
     lock_path.write_text(lockfile_text, encoding="utf-8")
 

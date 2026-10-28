@@ -83,6 +83,7 @@ async def run_prefetch(
     entrypoint_container_path: Path,
     cache_container_path: Path,
     cache_host_path: Path,
+    manifest_kind: str = "requirements",
     timeout_seconds: int | None = None,
 ) -> PrefetchResult:
     """
@@ -125,9 +126,17 @@ async def run_prefetch(
     staged_manifest_container = (
         cache_container_path / STAGED_MANIFEST_NAME
     )
+    staged_parsers_container = cache_container_path / "_parsers.py"
 
     shutil.copy2(entrypoint_container_path, staged_entrypoint_container)
     shutil.copy2(manifest_container_path, staged_manifest_container)
+
+    # Stage the parsers module so the entrypoint can import it
+    # from /opt (added to PYTHONPATH below).
+    from src.agents.prefetch import parsers as _parsers_module
+    shutil.copy2(
+        Path(_parsers_module.__file__), staged_parsers_container,
+    )
 
     # ── Host-side paths for docker run -v ──────────────────────
     #
@@ -142,6 +151,7 @@ async def run_prefetch(
     staged_manifest_host = (
         cache_host_path / STAGED_MANIFEST_NAME
     )
+    staged_parsers_host = cache_host_path / "_parsers.py"
 
     argv = [
         "docker", "run", "--rm",
@@ -153,10 +163,14 @@ async def run_prefetch(
         "-v",
         f"{staged_manifest_host}:{MANIFEST_IN_PREFETCHER}:ro",
         "-v",
+        f"{staged_parsers_host}:/opt/parsers.py:ro",
+        "-v",
         f"{cache_host_path}:{CACHE_IN_PREFETCHER}",
+        "-e", "PYTHONPATH=/opt",
         "-e", f"MANIFEST_PATH={MANIFEST_IN_PREFETCHER}",
         "-e", f"CACHE_DIR={CACHE_IN_PREFETCHER}",
         "-e", f"LOCK_PATH={CACHE_IN_PREFETCHER}/requirements.lock",
+        "-e", f"MANIFEST_KIND={manifest_kind}",
         PREFETCHER_IMAGE,
         "python", ENTRYPOINT_IN_PREFETCHER,
     ]
@@ -186,7 +200,9 @@ async def run_prefetch(
             pass
         # Still clean up staged files before re-raising.
         _cleanup_staged(
-            staged_entrypoint_container, staged_manifest_container,
+            staged_entrypoint_container,
+            staged_manifest_container,
+            staged_parsers_container,
         )
         raise PrefetchError("prefetch_timeout", f"exceeded {timeout}s")
 
@@ -194,7 +210,9 @@ async def run_prefetch(
     stdout = stdout_bytes.decode("utf-8", errors="replace")
 
     _cleanup_staged(
-        staged_entrypoint_container, staged_manifest_container,
+        staged_entrypoint_container,
+        staged_manifest_container,
+        staged_parsers_container,
     )
 
     if proc.returncode != 0:
@@ -256,6 +274,7 @@ async def run_prefetch_with_build_on_miss(
     mirror_container_path: Path,
     mirror_host_path: Path,
     build_entrypoint_container_path: Path,
+    manifest_kind: str = "requirements",
     timeout_seconds: int | None = None,
 ) -> PrefetchResult:
     """
@@ -292,6 +311,7 @@ async def run_prefetch_with_build_on_miss(
             entrypoint_container_path=entrypoint_container_path,
             cache_container_path=cache_container_path,
             cache_host_path=cache_host_path,
+            manifest_kind=manifest_kind,
             timeout_seconds=timeout_seconds,
         )
     except PrefetchError as e:
@@ -354,6 +374,7 @@ async def run_prefetch_with_build_on_miss(
         cache_host_path=cache_host_path,
         find_links_container=wheel_dir_container,
         find_links_host=wheel_dir_host,
+        manifest_kind=manifest_kind,
         timeout_seconds=timeout_seconds,
     )
 
@@ -366,6 +387,7 @@ async def _retry_with_find_links(
     cache_host_path: Path,
     find_links_container: Path,
     find_links_host: Path,
+    manifest_kind: str = "requirements",
     timeout_seconds: int | None,
 ) -> PrefetchResult:
     """
@@ -393,8 +415,14 @@ async def _retry_with_find_links(
     staged_manifest_container = (
         cache_container_path / STAGED_MANIFEST_NAME
     )
+    staged_parsers_container = cache_container_path / "_parsers.py"
     shutil.copy2(entrypoint_container_path, staged_entrypoint_container)
     shutil.copy2(manifest_container_path, staged_manifest_container)
+
+    from src.agents.prefetch import parsers as _parsers_module
+    shutil.copy2(
+        Path(_parsers_module.__file__), staged_parsers_container,
+    )
 
     staged_entrypoint_host = (
         cache_host_path / STAGED_ENTRYPOINT_NAME
@@ -402,6 +430,7 @@ async def _retry_with_find_links(
     staged_manifest_host = (
         cache_host_path / STAGED_MANIFEST_NAME
     )
+    staged_parsers_host = cache_host_path / "_parsers.py"
 
     argv = [
         "docker", "run", "--rm",
@@ -413,12 +442,16 @@ async def _retry_with_find_links(
         "-v",
         f"{staged_manifest_host}:{MANIFEST_IN_PREFETCHER}:ro",
         "-v",
+        f"{staged_parsers_host}:/opt/parsers.py:ro",
+        "-v",
         f"{cache_host_path}:{CACHE_IN_PREFETCHER}",
         "-v",
         f"{find_links_host}:{FIND_LINKS_IN_PREFETCHER}:ro",
+        "-e", "PYTHONPATH=/opt",
         "-e", f"MANIFEST_PATH={MANIFEST_IN_PREFETCHER}",
         "-e", f"CACHE_DIR={CACHE_IN_PREFETCHER}",
         "-e", f"LOCK_PATH={CACHE_IN_PREFETCHER}/requirements.lock",
+        "-e", f"MANIFEST_KIND={manifest_kind}",
         "-e", (
             f"EXTRA_FIND_LINKS="
             f"{FIND_LINKS_IN_PREFETCHER}{os.pathsep}{CACHE_IN_PREFETCHER}"
@@ -482,7 +515,9 @@ async def _retry_with_find_links(
         except Exception:
             pass
         _cleanup_staged(
-            staged_entrypoint_container, staged_manifest_container,
+            staged_entrypoint_container,
+            staged_manifest_container,
+            staged_parsers_container,
         )
         raise PrefetchError("prefetch_timeout", f"exceeded {timeout}s")
 
@@ -490,7 +525,9 @@ async def _retry_with_find_links(
     stdout = bytes(buf).decode("utf-8", errors="replace")
 
     _cleanup_staged(
-        staged_entrypoint_container, staged_manifest_container,
+        staged_entrypoint_container,
+        staged_manifest_container,
+        staged_parsers_container,
     )
 
     if proc.returncode != 0:

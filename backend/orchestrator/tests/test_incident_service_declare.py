@@ -802,9 +802,18 @@ async def test_provisioner_clones_and_investigator_uses_it(
     captured: dict = {}
     real_init = InvestigatorAgent.__init__
 
-    def capturing_init(self, llm_service, repo_root):
+    def capturing_init(
+        self, llm_service, repo_root,
+        cache_host_path=None, manifest_relative_path=None,
+    ):
         captured["repo_root"] = repo_root
-        return real_init(self, llm_service, repo_root)
+        captured["cache_host_path"] = cache_host_path
+        captured["manifest_relative_path"] = manifest_relative_path
+        return real_init(
+            self, llm_service, repo_root,
+            cache_host_path=cache_host_path,
+            manifest_relative_path=manifest_relative_path,
+        )
 
     async def fake_investigate(self, ctx, **kw):
         return InvestigationResult(
@@ -874,9 +883,18 @@ async def test_provisioner_skips_clone_without_file_path(
     captured: dict = {}
     real_init = InvestigatorAgent.__init__
 
-    def capturing_init(self, llm_service, repo_root):
+    def capturing_init(
+        self, llm_service, repo_root,
+        cache_host_path=None, manifest_relative_path=None,
+    ):
         captured["repo_root"] = repo_root
-        return real_init(self, llm_service, repo_root)
+        captured["cache_host_path"] = cache_host_path
+        captured["manifest_relative_path"] = manifest_relative_path
+        return real_init(
+            self, llm_service, repo_root,
+            cache_host_path=cache_host_path,
+            manifest_relative_path=manifest_relative_path,
+        )
 
     async def fake_investigate(self, ctx, **kw):
         return InvestigationResult(

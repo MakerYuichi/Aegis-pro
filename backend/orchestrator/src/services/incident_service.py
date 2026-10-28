@@ -128,7 +128,10 @@ class IncidentService:
         # The finally block below calls the Provisioner's cleanup to
         # remove the clone after all stages are done.
         context.update(await self._stage_provisioner(context))
-
+        
+        # Stage 2.5 — Prefetch (deps for Investigator's probe)
+        context.update(await self._stage_prefetch(context))
+        
         # Stage 3 — Investigator (Reason)
         context.update(await self._stage_investigator(context))
 
@@ -372,13 +375,41 @@ class IncidentService:
                             f"(tier={tier_name}): {e}"
                         )
 
+            # Already-fixed entries skip the pipeline entirely. No
+            # Investigation, no Fixer, no Verifier — the prior
+            # verification is the trust anchor. Just persist a report
+            # row so the CLI and dashboard can show "we fixed this
+            # and it's still fixed."
+            #
+            # Not counted against SCANNER_MAX_INCIDENTS because they
+            # don't consume an LLM budget or a Docker run.
+            already_fixed_ids: list[str] = []
+            for outcome in (result.already_fixed or []):
+                try:
+                    incident_id = await self._declare_already_fixed_incident(
+                        outcome=outcome,
+                        repo_path=scan_workdir,
+                        service_name=effective_service,
+                    )
+                    if incident_id:
+                        already_fixed_ids.append(incident_id)
+                        incident_ids.append(incident_id)
+                except Exception as e:
+                    logger.error(
+                        f"scan_repo: failed to declare already_fixed "
+                        f"for {outcome.candidate.root_file}:"
+                        f"{outcome.candidate.root_line}: {e}"
+                    )
+
             return {
                 "repo": owner_repo,
                 "files_scanned": result.files_scanned,
                 "counts": result.to_dict()["counts"],
                 "scan_result": result.to_dict(),
                 "incident_ids": incident_ids,
+                "already_fixed_ids": already_fixed_ids,
             }
+
         finally:
             if needs_cleanup:
                 cleanup_repo(scan_workdir)
@@ -444,7 +475,105 @@ class IncidentService:
         # Run the rest of the pipeline: Provisioner → Investigator →
         # Fixer → Verifier → Communicator → Curator.
         return await self._run_pipeline_from_watcher(context)
+    
+    async def _declare_already_fixed_incident(
+        self,
+        *,
+        outcome,
+        repo_path: str,
+        service_name: str,
+    ) -> str | None:
+        """Persist a report-only incident for an already-fixed bug.
 
+        Called from scan_repo for every ScanOutcome with
+        destination="already_fixed". The pipeline skips investigation
+        for these — the .aegis/fixes.json record (written when the fix
+        was originally verified) is the trust anchor.
+
+        Returns the incident_id on success, or None on failure.
+        Failure is logged but does not break the scan — one bad
+        already-fixed record shouldn't kill the report.
+        """
+        fix = outcome.previous_fix or {}
+        candidate = outcome.candidate
+        provenance = (candidate.metadata or {}).get("aegis_provenance") or {}
+        original_id = provenance.get("original_incident_id") or fix.get("incident_id") or "unknown"
+
+        incident_id = f"INC-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
+        extra_metadata = json.dumps({
+            "already_fixed": True,
+            "aegis_provenance": {
+                "original_incident_id": original_id,
+                "verified_at": provenance.get("verified_at") or fix.get("verified_at"),
+                "verification_reason": provenance.get("verification_reason") or fix.get("verification_reason"),
+                "base_commit": provenance.get("base_commit") or fix.get("base_commit"),
+                "probe_code": provenance.get("probe_code") or fix.get("probe_code"),
+                "probe_flags": provenance.get("probe_flags") or fix.get("probe_flags") or [],
+            },
+        })
+
+        try:
+            async with get_db_session() as session:
+                # Fetch service dependencies for blast-radius parity
+                # with normal incidents. Light — one query.
+                svc = await self.get_service(service_name)
+                affected = json.dumps([service_name])
+
+                await session.execute(
+                    text("""
+                        INSERT INTO incidents (
+                            incident_id, service_name, severity, status, title, description,
+                            stack_trace, exception_type, file_path, line_number,
+                            root_cause, suggested_fix, rollback_command, confidence_score,
+                            declared_at, extra_metadata, affected_services
+                        ) VALUES (
+                            :incident_id, :service_name, :severity, :status, :title, :description,
+                            :stack_trace, :exception_type, :file_path, :line_number,
+                            :root_cause, :suggested_fix, :rollback_command, :confidence_score,
+                            :declared_at, :extra_metadata, :affected_services
+                        )
+                    """),
+                    {
+                        "incident_id": incident_id,
+                        "service_name": service_name,
+                        "severity": "P3",
+                        "status": "already_fixed",
+                        "title": f"Previously fixed: {candidate.pattern} at {candidate.root_file}:{candidate.root_line}",
+                        "description": (
+                            f"AEGIS PRO previously found and fixed this bug "
+                            f"(incident {original_id}, verified "
+                            f"{provenance.get('verified_at') or 'unknown'}). "
+                            f"The fix is still applied to the working tree."
+                        ),
+                        "stack_trace": (
+                            f"Prior verification: {provenance.get('verification_reason') or 'unknown'}"
+                        ),
+                        "exception_type": None,
+                        "file_path": candidate.root_file,
+                        "line_number": candidate.root_line,
+                        "root_cause": "Previously diagnosed and fixed by AEGIS PRO",
+                        "suggested_fix": fix.get("fix_diff") or "",
+                        "rollback_command": "",
+                        "confidence_score": 1.0,
+                        "declared_at": datetime.utcnow(),
+                        "extra_metadata": extra_metadata,
+                        "affected_services": affected,
+                    },
+                )
+                await session.commit()
+                logger.info(
+                    f"✅ Already-fixed incident {incident_id} persisted "
+                    f"(from {original_id} at "
+                    f"{candidate.root_file}:{candidate.root_line})"
+                )
+                return incident_id
+        except Exception as e:
+            logger.error(
+                f"Error persisting already_fixed incident for "
+                f"{candidate.root_file}:{candidate.root_line}: {e}"
+            )
+            return None
 
     @staticmethod
     def _synthesize_stack_trace(candidate) -> str:
@@ -568,7 +697,7 @@ class IncidentService:
             "blast_radius": blast_radius,
         }
         
-        # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Stage 2 — Provisioner (Clone once)
     # ------------------------------------------------------------------
 
@@ -623,6 +752,113 @@ class IncidentService:
         from src.agents.provisioner import provision_clone
 
         return await provision_clone(context)
+    
+    # ------------------------------------------------------------------
+    # Stage 2.5 — Prefetch (dependencies for probe + verifier)
+    # ------------------------------------------------------------------
+
+    async def _stage_prefetch(self, context: dict) -> dict:
+        """
+        Prefetch the repo's dependencies into a cache before the
+        Investigator runs. The Investigator's probe tool needs the
+        cache to install real deps; without it, `import <module>`
+        probes fail on ModuleNotFoundError and the agent falls back
+        to toy reproductions that don't test the tree's code.
+
+        The Verifier reuses this same cache — no second prefetch.
+
+        Returns:
+            {
+              "prefetch_cache_host_path": "<host path>",
+              "prefetch_manifest_relative": "<manifest rel path>",
+            }
+            or {} when no manifest exists or prefetch fails. Downstream
+            stages degrade honestly (probe tool runs without deps;
+            verifier does the same).
+        """
+        from pathlib import Path
+        from src.agents.prefetch.manifest_finder import find_manifest
+        from src.agents.prefetch.runner import (
+            run_prefetch,
+            run_prefetch_with_build_on_miss,
+            PrefetchError,
+        )
+
+        tree_root_str = context.get("repo_workdir")
+        if not tree_root_str:
+            return {}
+
+        tree_root = Path(tree_root_str)
+        if not tree_root.is_dir():
+            return {}
+
+        language = (
+            context.get("language")
+            or self._infer_language(
+                context.get("stack_analysis") or {},
+                context["service_name"],
+            )
+        )
+
+        manifest_ref = find_manifest(tree_root, language)
+        if manifest_ref is None:
+            logger.info(
+                f"Prefetch: no dependency manifest in "
+                f"{context['service_name']}; skipping"
+            )
+            return {}
+
+        manifest_path = tree_root / manifest_ref.path
+
+        try:
+            if settings.BUILD_ON_MISS_ENABLED:
+                result = await run_prefetch_with_build_on_miss(
+                    manifest_container_path=manifest_path,
+                    entrypoint_container_path=Path(
+                        "/app/scripts/prefetch_entrypoint.py"
+                    ),
+                    cache_container_path=Path(
+                        settings.VERIFIER_PIP_CACHE_CONTAINER_DIR
+                    ),
+                    cache_host_path=Path(
+                        settings.VERIFIER_PIP_CACHE_HOST_DIR
+                    ),
+                    mirror_container_path=Path(settings.MIRROR_CONTAINER_DIR),
+                    mirror_host_path=Path(settings.MIRROR_HOST_DIR),
+                    build_entrypoint_container_path=Path(
+                        "/app/scripts/build_entrypoint.py"
+                    ),
+                    manifest_kind=manifest_ref.kind,
+                )
+            else:
+                result = await run_prefetch(
+                    manifest_container_path=manifest_path,
+                    entrypoint_container_path=Path(
+                        "/app/scripts/prefetch_entrypoint.py"
+                    ),
+                    cache_container_path=Path(
+                        settings.VERIFIER_PIP_CACHE_CONTAINER_DIR
+                    ),
+                    cache_host_path=Path(
+                        settings.VERIFIER_PIP_CACHE_HOST_DIR
+                    ),
+                    manifest_kind=manifest_ref.kind,
+                )
+
+            logger.info(
+                f"Prefetch: cache ready for "
+                f"{context['service_name']} at {result.cache_host_path}"
+            )
+            return {
+                "prefetch_cache_host_path": str(result.cache_host_path),
+                "prefetch_manifest_relative": manifest_ref.path.as_posix(),
+            }
+        except PrefetchError as e:
+            logger.warning(
+                f"Prefetch: failed for {context['service_name']}: "
+                f"{e.reason}: {e.detail}"
+            )
+            return {"prefetch_error": f"{e.reason}: {e.detail}"}
 
     # ------------------------------------------------------------------
     # Stage 3 — Investigator (Reason)
@@ -770,6 +1006,23 @@ class IncidentService:
         }
         
         if settings.INVESTIGATOR_MODE == "agent":
+            # Pull the scan candidate's symbol and Pyright message
+            # out of the pipeline context, if present. In incident
+            # mode these are absent (empty defaults). In scan mode
+            # the pipeline sets context["scan_candidate"] with the
+            # candidate dict, and the top-level context carries the
+            # chain.
+            scan_candidate = context.get("scan_candidate") or {}
+            symbol = scan_candidate.get("symbol") or ""
+            pyright_message = ""
+            # The PatternMatch metadata lives on the ScanCandidate
+            # the scanner produced. For Pyright findings this carries
+            # the analyzer message. Fetch it defensively — older
+            # candidates may not have metadata.
+            scan_meta = scan_candidate.get("metadata") or {}
+            if isinstance(scan_meta, dict):
+                pyright_message = scan_meta.get("pyright_message") or ""
+
             investigation = await self._run_investigator_agent(
                 context=context,
                 service_name=service_name,
@@ -784,6 +1037,8 @@ class IncidentService:
                 blast_radius=blast_radius,
                 mode=context.get("mode", "incident"),
                 chain=context.get("chain"),
+                symbol=symbol,
+                pyright_message=pyright_message,
             )
 
             result["investigation"] = investigation.to_dict()
@@ -805,6 +1060,21 @@ class IncidentService:
                     f"(fix_location={investigation.fix_location}, "
                     f"confirmation={investigation.confirmation}, "
                     f"confidence {investigation.confidence:.2f})"
+                )
+            elif investigation.status == "unverified":
+                # The Investigator looked, couldn't decide, and
+                # isn't claiming the finding is false positive.
+                # Route it to the unverified bucket so the CLI and
+                # dashboard show it under "Needs Review" — not
+                # alongside the confident false positives.
+                result["unverified_finding"] = investigation.to_dict()
+                result["auto_fix_skipped_reason"] = (
+                    "investigator_unverified"
+                )
+                logger.info(
+                    f"🔬 Investigator returned unverified "
+                    f"(reason={investigation.reason!r}); "
+                    f"no auto-fix, needs human review"
                 )
             else:
                 result["auto_fix_skipped_reason"] = investigation.status
@@ -832,6 +1102,8 @@ class IncidentService:
         blast_radius: dict,
         mode: str = "incident",
         chain: list[dict] | None = None,
+        symbol: str = "",
+        pyright_message: str = "",
     ):
         """
         Build an InvestigatorContext, run the agent, return the
@@ -873,10 +1145,14 @@ class IncidentService:
                 fix_outcomes=fix_outcomes,
                 blast_radius=blast_radius,
                 chain=chain,
+                symbol=symbol,
+                pyright_message=pyright_message,
             )
             agent = InvestigatorAgent(
                 llm_service=self.llm,
                 repo_root=repo_workdir or "",
+                cache_host_path=context.get("prefetch_cache_host_path"),
+                manifest_relative_path=context.get("prefetch_manifest_relative"),
             )
             return await agent.investigate(
                 ctx,
@@ -983,9 +1259,14 @@ class IncidentService:
         Render the Investigator's diagnosis as a prompt fragment for
         the Fixer.
 
-        Today the only diagnosis kind is a null source. When the
-        agent learns others, add a branch here — the Fixer's prompt
-        template does not change, and AutoFixService does not change.
+        Two diagnosis kinds, matching the two pipeline modes:
+
+          - incident mode: `null_source` is set. The block describes
+            the null-dereference expression the diff must address.
+          - scan mode: `failure_mode` is set (and often
+            `fix_location`). The block describes the failure mode
+            the diff must resolve, without naming a specific symbol
+            unless the failure mode itself names one.
 
         Returns an empty string when there is no diagnosis (stage
         mode, or the agent refused). An empty block leaves the
@@ -998,24 +1279,115 @@ class IncidentService:
         part is done.
         """
         null_source = context.get("null_source")
-        if not null_source:
-            return ""
+        failure_mode = context.get("failure_mode")
 
-        return (
-            f"\nThe exception is a null dereference. The Investigator "
-            f"has identified the null source as:\n\n"
-            f"    {null_source}\n\n"
-            f"Your diff MUST address this exact expression. Either "
-            f"guard its use, add a null check where it's assigned, or "
-            f"replace it with a safe alternative. Do NOT modify any "
-            f"other line in the file — a diff that touches unrelated "
-            f"code will fail verification.\n\n"
-            f"Note: the stack trace's line number may be stale. The "
-            f"line that failed when the alert fired may not be the "
-            f"line that contains the null source now. Fix the code "
-            f"where {null_source} is assigned or used, not where the "
-            f"stack trace points."
-        )
+        if null_source:
+            return (
+                f"\nThe exception is a null dereference. The Investigator "
+                f"has identified the null source as:\n\n"
+                f"    {null_source}\n\n"
+                f"Your diff MUST address this exact expression. Either "
+                f"guard its use, add a null check where it's assigned, or "
+                f"replace it with a safe alternative. Do NOT modify any "
+                f"other line in the file — a diff that touches unrelated "
+                f"code will fail verification.\n\n"
+                f"Note: the stack trace's line number may be stale. The "
+                f"line that failed when the alert fired may not be the "
+                f"line that contains the null source now. Fix the code "
+                f"where {null_source} is assigned or used, not where the "
+                f"stack trace points.\n\n"
+                f"## Making the fix COMPLETE and APPLICABLE\n\n"
+                f"Two rules for a diff that will be accepted:\n\n"
+                f"  1. COMPLETENESS. If the value {null_source} can be "
+                f"None, check every use of it within the same function. "
+                f"A diff that guards only the line the stack trace names "
+                f"will pass the immediate check and FAIL the verifier's "
+                f"re-run if the same value is used elsewhere. Guard every "
+                f"unguarded use in one diff.\n\n"
+                f"  2. APPLICABILITY. The '-' lines and ' ' (context) "
+                f"lines in your diff MUST be copied byte-for-byte from "
+                f"the 'Current Code' block. Do not retype from memory. "
+                f"Do not re-indent. Do not strip trailing whitespace. "
+                f"Copy the exact characters, then prefix each copied "
+                f"line with '-' (for removed) or ' ' (for context). If "
+                f"your hunk's context does not match the file, git apply "
+                f"will reject the entire patch and the fix will fail "
+                f"with reason=diff_does_not_apply — no tests will run, "
+                f"the pipeline will mark it as unverifiable, and a "
+                f"human has to fix it. This is the single most common "
+                f"reason LLM-generated diffs fail.\n\n"
+                f"   For each hunk in your diff:\n"
+                f"     - Copy 2-3 lines of context before the change "
+                f"       from the Current Code block, verbatim.\n"
+                f"     - Copy the line being changed, verbatim, prefix "
+                f"       with '-'.\n"
+                f"     - Write the new line, prefix with '+'.\n"
+                f"     - Copy 2-3 lines of context after the change, "
+                f"       verbatim.\n"
+                f"     - Use the correct hunk header: "
+                f"@@ -<old_start>,<old_count> +<new_start>,<new_count> @@\n"
+                f"       with the actual line numbers from the Current "
+                f"Code block (the file has line numbers on the left)."
+            )
+
+        if failure_mode:
+            return (
+                f"\nThe Investigator has confirmed the following "
+                f"failure mode:\n\n"
+                f"    {failure_mode}\n\n"
+                f"Your diff MUST fix this exact failure mode. "
+                f"Identify the specific line in the code below that "
+                f"produces it, and patch only that line. Do NOT add "
+                f"defensive checks to unrelated lines — a nearby "
+                f"`if X:` or `if not X.startswith(...)` pattern is "
+                f"NOT the bug unless the failure mode above names it. "
+                f"The code window shows ±30 lines around the crash "
+                f"site; only one line in that window is the actual "
+                f"defect. Choose it from the failure mode, not from "
+                f"what looks like it needs a guard.\n\n"
+                f"If the failure mode names a specific symbol (e.g. "
+                f"`__doc__`), the fix MUST target the line that uses "
+                f"or assigns that symbol — not a line that merely "
+                f"appears in the same window.\n\n"
+                f"## Making the fix COMPLETE, not just local\n\n"
+                f"After you identify the crash line, check whether "
+                f"the SAME value is used without a guard on any other "
+                f"line within the same function. If the failure mode "
+                f"is 'attribute access on a possibly-None value X', "
+                f"and X is dereferenced at line 470 AND at line 480, "
+                f"you must guard BOTH uses. A diff that fixes only the "
+                f"line the probe crashed on will pass the immediate "
+                f"check and FAIL the verifier's re-run — because the "
+                f"second use still crashes. The verifier re-runs the "
+                f"same probe that reproduced the bug; if that probe "
+                f"exercises any unguarded use of X, it will fail "
+                f"after your fix and the fix is rejected.\n\n"
+                f"Two rules for COMPLETE fixes:\n\n"
+                f"  1. If the failure mode names a specific symbol X "
+                f"and the crash is `X.attr`, look for every other "
+                f"`X.attr` or `X[i]` or `X()` or `X + ...` in the "
+                f"same function body. Guard all of them. A common "
+                f"case: `result['domain'].startswith('.')` crashes "
+                f"and `result['domain'].lower()` two lines down "
+                f"crashes next. Fix both in one diff.\n\n"
+                f"  2. If the function accepts a parameter that can be "
+                f"None (per the failure mode), the fix can be a guard "
+                f"at the top of the function that early-returns or "
+                f"substitutes a default. That is often the smallest "
+                f"correct diff. Example:\n\n"
+                f"       def create_cookie(..., domain=None, ...):\n"
+                f"           if domain is None:\n"
+                f"               domain = ''\n"
+                f"           ...\n\n"
+                f"   A guard at function entry is a COMPLETE fix. "
+                f"Guarding one crash site is not.\n\n"
+                f"Your diff will be re-run against the probe. If the "
+                f"probe exercises any unguarded use of the value that "
+                f"your failure mode identifies, the fix will be "
+                f"rejected. Make the fix complete the first time."
+            )
+
+        return ""
 
     # ------------------------------------------------------------------
     # Stage 3 — Fixer (Act)
@@ -1067,26 +1439,59 @@ class IncidentService:
         if inv_status == "confirmed" and inv_confirmation not in (
             "probe_reproduced", "probe_reproduced_realigned",
         ):
-            logger.info(
-                f"⏭️  Skipping auto-fix for {incident_id}: "
-                f"investigator confirmed but unverified "
-                f"(confirmation={inv_confirmation!r})"
+            # NEW: reasoned_only findings that document an interpreter-flag
+            # or external-state dependency are allowed through the Fixer.
+            # Rationale: the pipeline's whole point is that the Verifier is
+            # the trust anchor — a diff that doesn't fix the bug fails the
+            # Verifier. Blocking reasoned_only findings from the Fixer
+            # prevents the pipeline from ever producing a fix for a class
+            # of findings that are inherently un-probe-able (interpreter-
+            # flag-dependent, network-dependent, time-dependent). Those
+            # findings are not "unverified"; they're "un-probe-able but
+            # still real."
+            evidence = (investigation.get("evidence") or "").lower()
+            # Match _validate_scan_confirmation's marker list in
+            # investigator.py. The validator already decided this evidence
+            # is a valid reason to skip the probe; the Fixer should trust
+            # that verdict. The Verifier is the actual trust anchor — a
+            # wrong diff fails the tests regardless of the evidence.
+            #
+            # Keep this tuple in sync with the one in investigator.py.
+            un_probeable_markers = (
+                "probe", "sandbox", "network", "external",
+                "cannot construct", "cannot reproduce",
+                "environment", "time-dependent",
             )
-            return {
-                "auto_fix_skipped_reason": "investigator_unverified",
-                "unverified_finding": {
-                    "status": inv_status,
-                    "confirmation": inv_confirmation,
-                    "failure_mode": investigation.get("failure_mode"),
-                    "fix_location": investigation.get("fix_location"),
-                    "confidence": investigation.get("confidence"),
-                    "reason": (
-                        "Investigator confirmed this pattern but could "
-                        "not reproduce it with a probe. No fix was "
-                        "generated. Recommend human review."
-                    ),
-                },
-            }
+            if inv_confirmation == "reasoned_only" and any(
+                marker in evidence for marker in un_probeable_markers
+            ):
+                logger.info(
+                    f"⚙️  Fixer: proceeding with reasoned_only finding "
+                    f"{incident_id} — evidence documents an un-probe-able "
+                    f"external factor; Verifier will be the trust anchor"
+                )
+                # fall through to the fix generation below
+            else:
+                logger.info(
+                    f"⏭️  Skipping auto-fix for {incident_id}: "
+                    f"investigator confirmed but unverified "
+                    f"(confirmation={inv_confirmation!r})"
+                )
+                return {
+                    "auto_fix_skipped_reason": "investigator_unverified",
+                    "unverified_finding": {
+                        "status": inv_status,
+                        "confirmation": inv_confirmation,
+                        "failure_mode": investigation.get("failure_mode"),
+                        "fix_location": investigation.get("fix_location"),
+                        "confidence": investigation.get("confidence"),
+                        "reason": (
+                            "Investigator confirmed this pattern but could "
+                            "not reproduce it with a probe. No fix was "
+                            "generated. Recommend human review."
+                        ),
+                    },
+                }
 
         if inv_status == "confirmed" and inv_confirmation is None:
             # Defensive: this shouldn't happen. If it does, it's a bug
@@ -1323,6 +1728,28 @@ class IncidentService:
                 "verifier": "unknown",
             }}
 
+        # When verification passes via probe, persist the fix to the
+        # working tree so the next scan can recognize it as
+        # already-fixed. This writes <repo_workdir>/.aegis/fixes.json
+        # and git-excludes the .aegis/ directory so subsequent
+        # git reset/clean don't touch it.
+        if result.passed and result.reason == "probe_passed":
+            try:
+                await self._persist_fix_to_tree(
+                    context=context,
+                    diff=diff,
+                    verification=result,
+                )
+            except Exception as e:
+                # Persisting the fix is a best-effort operation. If
+                # it fails, the verification still stands — the
+                # incident is still recorded as verified. Just log
+                # and move on.
+                logger.error(
+                    f"Verifier: failed to persist fix to tree for "
+                    f"{context.get('incident_id')}: {e}"
+                )
+
         return {"verification": {
             "passed": result.passed,
             "reason": result.reason,
@@ -1337,6 +1764,170 @@ class IncidentService:
                 "hunks_flagged": result.realignment.hunks_flagged,
             },
         }}
+        
+    async def _persist_fix_to_tree(
+        self,
+        *,
+        context: dict,
+        diff: str,
+        verification,
+    ) -> None:
+        """Persist a verified fix to <repo_workdir>/.aegis/fixes.json.
+
+        This is what makes subsequent scans report the bug as
+        "already_fixed by AEGIS PRO" rather than silently omitting
+        the line. The file records what was fixed, when, at what
+        commit, and with what probe. It's git-excluded so reset/clean
+        don't remove it, but survives tree resets because the fix
+        itself stays applied in the working tree.
+
+        Failure is not fatal — the caller catches and logs.
+        """
+        from pathlib import Path
+
+        repo_workdir = context.get("repo_workdir")
+        if not repo_workdir:
+            logger.debug(
+                "Verifier: no repo_workdir; skipping fix persistence"
+            )
+            return
+
+        tree_root = Path(repo_workdir)
+        if not tree_root.is_dir():
+            logger.warning(
+                f"Verifier: repo_workdir {tree_root} is not a directory; "
+                f"skipping fix persistence"
+            )
+            return
+
+        # Read the investigation to extract the successful probe.
+        investigation = context.get("investigation") or {}
+        probe_code = ""
+        probe_flags: list[str] = []
+        for h in (investigation.get("history") or []):
+            if h.get("tool") == "probe" and (h.get("metadata") or {}).get("reproduced") is True:
+                probe_code = (h.get("args") or {}).get("code") or ""
+                probe_flags = (h.get("args") or {}).get("interpreter_flags") or []
+                break
+
+        stack = context.get("stack_analysis") or {}
+        chain = context.get("chain") or []
+        root_link = chain[0] if chain else {}
+        scan_candidate = context.get("scan_candidate") or {}
+
+        # Compute the fix's file/line/pattern. In scan mode these
+        # come from the ScanCandidate (the synthetic stack trace is
+        # built from them). In incident mode they come from the
+        # stack trace.
+        file_rel = (
+            scan_candidate.get("root_file")
+            or stack.get("file_path")
+            or root_link.get("file")
+            or ""
+        )
+        line = (
+            scan_candidate.get("root_line")
+            or stack.get("line_number")
+            or root_link.get("line")
+            or 0
+        )
+        pattern = (
+            scan_candidate.get("pattern")
+            or "incident"
+        )
+        symbol = (
+            scan_candidate.get("symbol")
+            or context.get("null_source")
+            or ""
+        )
+
+        if not (file_rel and line):
+            logger.warning(
+                f"Verifier: cannot determine fix target for "
+                f"persistence (file={file_rel!r}, line={line!r}); "
+                f"skipping"
+            )
+            return
+
+        aegis_dir = tree_root / ".aegis"
+        aegis_dir.mkdir(exist_ok=True)
+
+        # Git-exclude .aegis/ so reset --hard and clean -fd don't
+        # touch it. This is essential: the fix provenance must
+        # survive the Verifier's own tree reset.
+        exclude = tree_root / ".git" / "info" / "exclude"
+        if exclude.is_file():
+            try:
+                content = exclude.read_text()
+                if ".aegis/" not in content:
+                    exclude.write_text(
+                        content.rstrip() + "\n# AEGIS PRO state\n.aegis/\n"
+                    )
+            except OSError as e:
+                logger.warning(
+                    f"Verifier: could not update .git/info/exclude: {e}"
+                )
+
+        fixes_path = aegis_dir / "fixes.json"
+        data = {"version": 1, "fixes": []}
+        if fixes_path.is_file():
+            try:
+                data = json.loads(fixes_path.read_text())
+                if not isinstance(data, dict):
+                    data = {"version": 1, "fixes": []}
+                data.setdefault("fixes", [])
+            except (OSError, json.JSONDecodeError) as e:
+                logger.warning(
+                    f"Verifier: could not read {fixes_path}: {e}; "
+                    f"starting fresh"
+                )
+                data = {"version": 1, "fixes": []}
+
+        new_entry = {
+            "incident_id": context.get("incident_id") or "",
+            "file": file_rel,
+            "line": line,
+            "pattern": pattern,
+            "symbol": symbol,
+            "fix_diff": diff,
+            "base_commit": context.get("commit_sha") or "HEAD",
+            "verified_at": datetime.utcnow().isoformat() + "Z",
+            "verification_reason": verification.reason,
+            "probe_code": probe_code,
+            "probe_flags": probe_flags,
+        }
+
+        # Idempotency: replace any existing entry for the same
+        # (file, line, pattern).
+        data["fixes"] = [
+            f for f in data["fixes"]
+            if not (
+                f.get("file") == file_rel
+                and f.get("line") == line
+                and f.get("pattern") == pattern
+            )
+        ]
+        data["fixes"].append(new_entry)
+
+        # Atomic write
+        tmp = fixes_path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(data, indent=2))
+            tmp.replace(fixes_path)
+            logger.info(
+                f"✅ Verifier: persisted fix for {file_rel}:{line} "
+                f"({pattern}) to {fixes_path} "
+                f"({len(data['fixes'])} total fixes tracked)"
+            )
+        except OSError as e:
+            logger.error(
+                f"Verifier: could not write {fixes_path}: {e}"
+            )
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     def _infer_language(self, stack_analysis: dict, repo_name: str) -> str:
         """

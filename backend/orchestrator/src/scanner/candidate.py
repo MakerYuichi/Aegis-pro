@@ -15,6 +15,10 @@ CHAIN_UNTRACEABLE = "untraceable"
 CHAIN_UNSUPPORTED_LANGUAGE = "unsupported_language"
 CHAIN_NO_SYMBOL = "no_symbol"
 
+DEST_REPORT = "report"
+DEST_INVESTIGATOR = "investigator"
+DEST_ALREADY_FIXED = "already_fixed"
+
 ALL_CHAIN_STATUSES = (
     CHAIN_TRACED,
     CHAIN_UNTRACEABLE,

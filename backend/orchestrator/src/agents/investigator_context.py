@@ -40,6 +40,8 @@ def build_investigator_context(
     fix_outcomes: str,
     blast_radius: dict[str, Any] | None,
     chain: list[dict[str, Any]] | None = None,
+    symbol: str = "",
+    pyright_message: str = "",
 ) -> InvestigatorContext:
     """
     Build an InvestigatorContext from the pipeline's pieces.
@@ -67,6 +69,8 @@ def build_investigator_context(
         file_path=stack_analysis.get("file_path"),
         line_number=_coerce_int(stack_analysis.get("line_number")),
         chain=list(chain or []),
+        symbol=symbol or "",
+        pyright_message=pyright_message or "",
     )
 
 

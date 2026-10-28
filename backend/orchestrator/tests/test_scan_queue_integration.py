@@ -55,7 +55,11 @@ async def test_scan_repo_processes_report_and_queue(monkeypatch):
     fake_scan_result = SimpleNamespace(
         report=report,
         investigator_queue=queue,
+        already_fixed=[],
+        dropped={},
         files_scanned=5,
+        duration_ms=0,
+        repo="owner/repo",
         to_dict=lambda: {"counts": {"report": 2, "investigator": 3}},
     )
 
@@ -113,7 +117,11 @@ async def test_scan_repo_budget_caps_total_processing(monkeypatch):
     fake_scan_result = SimpleNamespace(
         report=report,
         investigator_queue=queue,
+        already_fixed=[],
+        dropped={},
         files_scanned=7,
+        duration_ms=0,
+        repo="owner/repo",
         to_dict=lambda: {"counts": {"report": 2, "investigator": 5}},
     )
 
