@@ -207,9 +207,17 @@ async def test_groq_provider_iterates_models_on_failure(monkeypatch):
             side_effect=[Exception("model A down"), mock_resp]
         )
         p = gp.GroqProvider()
+        p._models = ["model-a", "model-b"]
         resp = await p.complete("hi")
         assert resp.content == "groq-ok"
         assert instance.chat.completions.create.await_count == 2
+
+
+def test_groq_fallback_models_support_tool_choice_none():
+    """Fallback models must honor prompts that disable tool calls."""
+    from src.llm.groq_provider import GroqProvider
+
+    assert GroqProvider.DEFAULT_MODELS == ["qwen/qwen3.8-27b"]
 
 
 @pytest.mark.asyncio
