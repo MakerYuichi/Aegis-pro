@@ -57,6 +57,132 @@ from src.agents.prefetch.runner import (
 )
 from src.agents.pytest_parser import parse_failed_tests, new_failures
 
+
+# ---------------------------------------------------------------------------
+# Design C — fix-progress classification
+#
+# After the initial fix runs and the probe still crashes, we need to
+# decide: is the initial fix "partial progress" (keep it, repair on
+# top), or a "no-op" (reset to pristine, repair from scratch)?
+#
+# Two signals, both structural, both measurable from data the
+# pipeline already has:
+#
+#   1. Did the crash move?  — different line number OR different
+#                             exception message between before/after
+#                             tracebacks.
+#   2. Did the fix change any lines?  — the initial diff has at
+#                                       least one +/- line.
+#
+# If both signals say "yes, progress" → PARTIAL: keep fix1, apply
+# repair on top of it.
+# Otherwise → NOOP: reset to pristine, repair from scratch.
+#
+# "Harmful" collapses into NOOP. If fix1 broke something new, the
+# conservative reset removes the harm. If fix1 was a no-op, reset
+# is redundant but harmless. Same next step, simpler decision.
+# ---------------------------------------------------------------------------
+
+_TRACEBACK_FRAME_RE = re.compile(r'File "([^"]+)", line (\d+)')
+_EXCEPTION_LINE_RE = re.compile(
+    r'^(\w+(?:Error|Exception)):\s*(.*)$',
+    re.MULTILINE,
+)
+
+
+def _extract_last_traceback(
+    output: str,
+) -> tuple[str | None, str | None]:
+    """Return (frame "file:line", exception "Type: message")
+    for the LAST traceback in the probe output.
+
+    Both return values are ``None`` when the output doesn't contain
+    a recognizable traceback. That's the honest answer for probe
+    output like ``"timed out after 60s"``.
+    """
+    if not output:
+        return None, None
+    frames = _TRACEBACK_FRAME_RE.findall(output)
+    exceptions = _EXCEPTION_LINE_RE.findall(output)
+    last_frame = (
+        f"{frames[-1][0]}:{frames[-1][1]}" if frames else None
+    )
+    last_exception = (
+        f"{exceptions[-1][0]}: {exceptions[-1][1]}"
+        if exceptions
+        else None
+    )
+    return last_frame, last_exception
+
+
+def _crash_moved(before_output: str, after_output: str) -> bool:
+    """True if the crash changed location or message.
+
+    Signal 1 of Design C. Frame OR message differing counts as
+    progress. Frame moving from ``cookies.py:470`` to
+    ``cookielib.py:785`` is progress — the fix addressed the first
+    crash, exposed a second. Message changing from
+    ``'startswith'`` to ``'lower'`` is progress for the same
+    reason.
+
+    If both are identical (or either is absent so the comparison
+    can't be made), the crash hasn't moved. That's the no-op case.
+    """
+    before_frame, before_exc = _extract_last_traceback(before_output)
+    after_frame, after_exc = _extract_last_traceback(after_output)
+    if before_frame is None or after_frame is None:
+        # No traceback in one of them — treat as "not moved" so
+        # the caller falls back to the safe reset path. Better
+        # than guessing.
+        return False
+    if before_frame != after_frame:
+        return True
+    if before_exc != after_exc:
+        return True
+    return False
+
+
+def _diff_has_changes(diff: str) -> bool:
+    """True if the diff has at least one added or removed line.
+
+    Signal 2 of Design C. Header lines (``---``, ``+++``) are
+    ignored. A diff that only has headers and context has no
+    changes.
+    """
+    for line in (diff or "").split("\n"):
+        if line.startswith("---") or line.startswith("+++"):
+            continue
+        if line.startswith("+") or line.startswith("-"):
+            return True
+    return False
+
+
+def _classify_fix_progress(
+    before_output: str,
+    after_output: str,
+    original_diff: str,
+) -> str:
+    """Classify the initial fix as "partial" or "noop".
+
+    Design C decision function. Returns:
+
+        "partial" — the fix made progress but is incomplete.
+                    Caller keeps fix1 applied and repairs on top.
+        "noop"    — the fix didn't change anything, or was empty,
+                    or we can't tell. Caller resets to pristine
+                    before repairing.
+
+    Any uncertainty defaults to "noop" — reset-and-repair is
+    always safe. The "partial" path is an optimization, not a
+    correctness requirement.
+    """
+    if not _diff_has_changes(original_diff):
+        return "noop"
+    if not _crash_moved(before_output, after_output):
+        return "noop"
+    return "partial"
+
+
 @dataclass
 class RealignmentReport:
     """
@@ -251,6 +377,7 @@ class HostedVerifier(Verifier):
                     f"(tree_root={tree_root})"
                 )
 
+
         if not reuse:
             workdir = self._new_workdir()
             clone_ok, clone_err = await self._clone(repo_name, commit_sha, workdir)
@@ -401,38 +528,67 @@ class HostedVerifier(Verifier):
 
 
         finally:
-            # Conditional reset. The rule:
+            # Tree preservation is a per-SCAN decision, not a
+            # per-incident decision.
             #
-            #   - probe_passed  → DO NOT reset. The fix is the
-            #                     product. The next scan must see it
-            #                     and report it as already_fixed.
-            #                     .aegis/fixes.json was written by
-            #                     _persist_fix_to_tree; the fix must
-            #                     still be applied for that record to
-            #                     be verifiable on the next run.
+            # The rule:
             #
-            #   - anything else → reset. A failed or ambiguous
-            #                     verification's diff is worthless;
-            #                     leaving it in the tree corrupts the
-            #                     next run's realignment and makes
-            #                     the next scan find a fake "fix".
+            #   - Once ANY incident in the current scan has produced
+            #     probe_passed, the tree MUST stay preserved for the
+            #     rest of the scan (and after it ends). The fix is
+            #     the product; .aegis/fixes.json recorded it; the
+            #     next scan must find it applied.
             #
-            # The signal is tc_result.reason, which is set by
-            # _attempt_with_toolchain (either from _verify_with_probe
-            # or from the normal test path).
-            preserve_tree = (
+            #   - Only if NO incident in the scan has yet produced
+            #     probe_passed should a non-probe_passed incident
+            #     reset the tree. This cleans up failed/ambiguous
+            #     diffs that would otherwise corrupt the next
+            #     verification's realignment.
+            #
+            # The bug this fixes (observed 2026-10-27, scan at 14:40):
+            # INC-...-12D2B6 at status_codes.py:116 passed probe_passed
+            # as incident #1. Its fix was written to the tree and to
+            # .aegis/fixes.json. Then INC-...-D365F9 (incident #2) had
+            # reason="refused" → this finally block reset the tree,
+            # wiping the status_codes.py:116 fix. By the end of the
+            # scan, the fix was gone even though the log said
+            # "preserving tree" for incident #1.
+            #
+            # The per-scan gate is stored on the context so it
+            # survives across incidents. Once set, it never unsets
+            # during the scan.
+            scan_ctx = (context or {})
+            already_preserved = bool(
+                scan_ctx.get("scan_tree_has_verified_fix")
+            )
+
+            current_passed = (
                 "tc_result" in locals()
                 and tc_result is not None
                 and tc_result.reason == "probe_passed"
-                and reuse
-                and tree_root is not None
             )
 
+            if current_passed:
+                # Mark the scan as having a preserved fix. This
+                # propagates to every subsequent incident in the
+                # same scan via the context dict (mutable, shared).
+                scan_ctx["scan_tree_has_verified_fix"] = True
+
+            preserve_tree = (
+                current_passed
+                or already_preserved
+            ) and reuse and tree_root is not None
+
             if preserve_tree:
+                reason_logged = (
+                    "this incident probe_passed"
+                    if current_passed
+                    else "an earlier incident in this scan probe_passed"
+                )
                 logger.info(
                     f"Verifier: preserving tree at {tree_root} "
-                    f"(probe_passed — fix stays applied; next scan "
-                    f"will report it as already_fixed)"
+                    f"({reason_logged} — fix stays applied; next "
+                    f"scan will report it as already_fixed)"
                 )
             elif reuse and tree_root is not None:
                 try:
@@ -452,6 +608,7 @@ class HostedVerifier(Verifier):
                         f"verify(): {e}"
                     )
 
+
             # Only remove clones we created. The Provisioner's clone
             # is cleaned up by the coordinator's finally block.
             if not reuse:
@@ -462,6 +619,35 @@ class HostedVerifier(Verifier):
                     logger.warning(
                         f"Verifier: failed to remove {workdir}: {e}"
                 )
+    async def _compute_combined_diff(
+        self, tree_root: Path,
+    ) -> str | None:
+        """Return the net diff between HEAD and the current tree.
+
+        Design C uses this after a "partial" repair succeeds: the
+        tree currently has ``fix1 + repair`` applied on top of
+        pristine. The stored artifact must be the combined diff so
+        that applying it to a fresh clone reproduces the passing
+        tree state.
+
+        Returns ``None`` if the diff can't be computed. The caller
+        falls back to storing the repair-only diff in that case —
+        honest degradation, not a silent lie.
+        """
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(tree_root), "diff", "HEAD",
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        out, _ = await proc.communicate()
+        if proc.returncode != 0:
+            logger.warning(
+                f"Verifier: could not compute combined diff: "
+                f"{out.decode(errors='replace')[:300]!r}"
+            )
+            return None
+        diff = out.decode("utf-8", errors="replace")
+        return diff or None
+    
                     
     def _new_workdir(self) -> Path:
         """
@@ -667,6 +853,7 @@ class HostedVerifier(Verifier):
                 cache_host_path=cache_host_path,
                 manifest_relative_path=manifest_relative_path,
                 image=image,
+                context=context or {},
             )
 
         # Normal test run.
@@ -819,6 +1006,7 @@ class HostedVerifier(Verifier):
         cache_host_path: Path | None,
         manifest_relative_path: str | None,
         image: str,
+        context: dict | None = None,
     ) -> VerificationResult:
         """
         Verify a fix by re-running the Investigator's probe against
@@ -835,7 +1023,8 @@ class HostedVerifier(Verifier):
           tests_could_not_run — no probe in history
         """
         import shlex
-
+        
+        context = context or {}
         history = investigation.get("history") or []
 
         # Prefer a probe that touches the tree over one that
@@ -926,11 +1115,33 @@ class HostedVerifier(Verifier):
             )
 
             if has_cache:
+                # pip install must succeed. The previous version
+                # appended `|| true`, which silently swallowed every
+                # pip failure — including the case where the cache
+                # manifest itself is missing (/cache/requirements.lock
+                # not found), leaving the probe to run in an empty
+                # venv and crash on ModuleNotFoundError. That crash
+                # was then classified as "the bug reproduced" by
+                # _output_signals_bug, producing false
+                # probe_passed / probe_failed / no_verification_surface
+                # results. See INC-20261028-3F38D0.
+                #
+                # Now pip failures are visible: if the install fails,
+                # the whole command fails, and the caller gets a
+                # specific error message ("pip install failed:
+                # ...") instead of a misleading crash.
+                #
+                # The `&&` chain preserves the same semantics (venv
+                # → pip install → probe) but aborts if any step
+                # fails. Combined with `set -e` at the top of the
+                # command, this guarantees the probe only runs when
+                # its dependencies are actually installed.
                 command = (
+                    f"set -e; "
                     f"cd {workdir_inside} && "
                     "python -m venv /tmp/venv && "
                     "/tmp/venv/bin/pip install --no-index --find-links /cache "
-                    "--quiet -r /cache/requirements.lock || true; "
+                    "--quiet -r /cache/requirements.lock && "
                     f"PATH=/tmp/venv/bin:$PATH "
                     f"PYTHONPATH={workdir_inside} "
                     f"python {flag_str} -c {quoted_code}"
@@ -1042,11 +1253,224 @@ class HostedVerifier(Verifier):
                 verifier="hosted",
             )
 
+        # Probe failed both before and after. But the failure may be
+        # DIFFERENT after the fix (crash moved). If so, the Fixer
+        # produced an incomplete fix — it patched one site but the
+        # value still flows to another crash site downstream.
+        #
+        # Attempt one repair: feed the "after" traceback back to the
+        # Fixer and let it produce a corrected diff. The probe re-runs
+        # against the corrected diff. This closes the loop:
+        #
+        #   Fixer produces diff → Verifier rejects it with the exact
+        #   failure → Fixer produces a corrected diff → Verifier
+        #   re-runs.
+        #
+        # If the repair succeeds and the new probe passes, return
+        # probe_passed. If it fails, or if the traceback is identical
+        # (the fix didn't change anything), return probe_failed.
+        # Attempt repair — one shot.
+        # ── Design C — classify fix progress, attempt one repair ──
+        #
+        # Two signals decide the path:
+        #   1. Did the crash move?   (frame or exception message)
+        #   2. Did the fix touch any lines?
+        #
+        # "partial" — the fix made progress. Keep fix1 applied,
+        #             ask the repair LLM to correct it on top.
+        # "noop"    — no progress, empty fix, or unknown. Reset
+        #             to pristine, ask the repair LLM for a
+        #             complete fix from scratch.
+        #
+        # Anything uncertain defaults to "noop". Reset-and-repair
+        # is always safe; "partial" is an optimization.
+
+        progress_kind = _classify_fix_progress(
+            before_output, after_output, diff,
+        )
+        logger.info(
+            f"Verifier: probe_failed reached. "
+            f"before_len={len(before_output or '')} "
+            f"after_len={len(after_output or '')} "
+            f"before_passed={before_passed} "
+            f"after_passed={after_passed} "
+            f"outputs_differ={before_output != after_output} "
+            f"progress_kind={progress_kind} "
+            f"repair_will_fire="
+            f"{bool(before_output and after_output and before_output != after_output)}"
+        )
+
+        if before_output and after_output and before_output != after_output:
+            try:
+                repaired_diff = await _attempt_probe_repair(
+                    context=context or {},
+                    original_diff=diff,
+                    before_output=before_output,
+                    after_output=after_output,
+                    progress_kind=progress_kind,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Verifier: probe repair failed with exception: {e}"
+                )
+                repaired_diff = None
+
+            if repaired_diff:
+                # Duplicate check — do not re-run the same fix.
+                def _strip_diff_headers(d: str) -> str:
+                    return "\n".join(
+                        ln for ln in (d or "").split("\n")
+                        if not ln.startswith("---")
+                        and not ln.startswith("+++")
+                    )
+
+                if (
+                    _strip_diff_headers(repaired_diff)
+                    == _strip_diff_headers(diff)
+                ):
+                    logger.warning(
+                        "Verifier: repair produced the same diff as "
+                        "the initial fix; skipping re-run"
+                    )
+                    return VerificationResult(
+                        passed=False,
+                        reason="probe_failed",
+                        output=(
+                            f"Probe failed both before and after "
+                            f"the initial fix, and the repair "
+                            f"attempt produced an identical diff. "
+                            f"No further repair attempted.\n"
+                            f"Before: {before_output}\n\n"
+                            f"After: {after_output}"
+                        ),
+                        verifier="hosted",
+                    )
+
+                # Read the file's current state for realignment.
+                #
+                #   - "partial" path: do NOT reset. The tree has
+                #     fix1 applied. The repair diff's '-' lines
+                #     must match "pristine + fix1".
+                #   - "noop" path: reset to pristine. The repair
+                #     diff's '-' lines must match pristine.
+                stack = context.get("stack_analysis") or {}
+                target_path = stack.get("file_path")
+                file_lines_for_repair: list[str] = []
+                repo_relative_for_repair: str | None = None
+
+                if progress_kind == "noop":
+                    reset_proc = await asyncio.create_subprocess_exec(
+                        "git", "-C", str(tree_root), "reset", "--hard",
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                    )
+                    await reset_proc.communicate()
+                    clean_proc = await asyncio.create_subprocess_exec(
+                        "git", "-C", str(tree_root), "clean", "-fd",
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                    )
+                    await clean_proc.communicate()
+
+                if target_path:
+                    full = _resolve_repo_path(tree_root, target_path)
+                    if full is not None:
+                        try:
+                            file_lines_for_repair = full.read_text(
+                                encoding="utf-8", errors="replace"
+                            ).splitlines()
+                            try:
+                                repo_relative_for_repair = (
+                                    full.relative_to(tree_root).as_posix()
+                                )
+                            except ValueError:
+                                repo_relative_for_repair = None
+                        except OSError:
+                            pass
+
+                if file_lines_for_repair:
+                    repaired_diff, _ = _realign_diff(
+                        repaired_diff,
+                        file_lines_for_repair,
+                        repo_relative_for_repair,
+                    )
+                    logger.info(
+                        f"Verifier: realigned repaired diff "
+                        f"(path={progress_kind})"
+                    )
+
+                apply_ok, apply_err = await self._apply_diff(
+                    tree_root,
+                    repaired_diff,
+                    reset=(progress_kind == "noop"),
+                )
+                if not apply_ok:
+                    logger.warning(
+                        f"Verifier: repaired diff did not apply "
+                        f"(path={progress_kind}): "
+                        f"{apply_err[:300]!r}"
+                    )
+                else:
+                    (
+                        after_repaired_passed,
+                        after_repaired_output,
+                    ) = await _run_probe()
+                    logger.info(
+                        f"Verifier: repaired probe result "
+                        f"(path={progress_kind}): "
+                        f"passed={after_repaired_passed}"
+                    )
+                    if not before_passed and after_repaired_passed:
+                        # Stored artifact must reproduce the
+                        # passing tree state.
+                        #   - "noop" path: repaired_diff already
+                        #     applies to pristine, so it's the
+                        #     correct artifact.
+                        #   - "partial" path: tree is
+                        #     "pristine + fix1 + repair".
+                        #     Compute the net diff so applying
+                        #     it to pristine gives the same
+                        #     final state.
+                        stored_diff = repaired_diff
+                        if progress_kind == "partial":
+                            combined = await self._compute_combined_diff(
+                                tree_root,
+                            )
+                            if combined:
+                                stored_diff = combined
+                                logger.info(
+                                    f"Verifier: stored combined "
+                                    f"diff ({len(combined)} chars) "
+                                    f"for partial-progress repair"
+                                )
+                            else:
+                                logger.warning(
+                                    "Verifier: could not compute "
+                                    "combined diff; storing "
+                                    "repair-only diff"
+                                )
+
+                        return VerificationResult(
+                            passed=True,
+                            reason="probe_passed",
+                            output=(
+                                f"Probe failed before fix:\n"
+                                f"{before_output}\n\n"
+                                f"Probe failed after initial fix:\n"
+                                f"{after_output}\n\n"
+                                f"Probe passed after repaired fix "
+                                f"(path={progress_kind}):\n"
+                                f"{after_repaired_output}"
+                            ),
+                            verifier="hosted",
+                        )
+
         return VerificationResult(
             passed=False,
             reason="probe_failed",
             output=(
-                f"Probe failed BOTH before and after fix; the fix did not work.\n"
+                f"Probe failed BOTH before and after fix; the fix "
+                f"did not work.\n"
                 f"Before: {before_output}\n\n"
                 f"After: {after_output}"
             ),
@@ -1614,6 +2038,215 @@ async def _run_in_docker(
     # FAILED summary is at the end of the output, past the
     # 8000-byte point where truncation used to occur.
     return exit_code, out.decode("utf-8", errors="replace")
+
+
+async def _attempt_probe_repair(
+    *,
+    context: dict,
+    original_diff: str,
+    before_output: str,
+    after_output: str,
+    progress_kind: str = "noop",
+) -> str | None:
+    """Repair a fix whose probe failed before AND after.
+
+    Called from _verify_with_probe when the probe crashed both times
+    but with DIFFERENT tracebacks. That pattern means the Fixer
+    produced an incomplete fix — the crash moved, it didn't
+    disappear.
+
+    The repair prompt asks the Fixer to:
+      1. Read the new traceback.
+      2. Identify where the value that's causing the crash enters
+         the function (usually a parameter merged into a dict, or
+         a kwargs.get).
+      3. Normalize the value at entry — not at individual use sites.
+      4. Ensure the probe (which is still the original probe) will
+         not encounter the None value anywhere.
+
+    Returns the repaired diff, or None if the repair failed.
+    """
+    from src.services.llm_service import LLMService
+
+    llm = LLMService()
+    if not llm.chain:
+        return None
+
+    analysis = context.get("analysis") or {}
+    stack = context.get("stack_analysis") or {}
+    investigation = context.get("investigation") or {}
+
+    # Read the current file context so the repair LLM has the
+    # ACTUAL code to work against — not a hallucinated version
+    # of it. The original Fixer got this via code_context. The
+    # repair prompt currently doesn't, which is why its diffs
+    # hallucinate context lines that don't exist in the file.
+    code_context_str = ""
+    target_path = stack.get("file_path") if stack else None
+    if target_path:
+        # context may carry a pre-fetched code window
+        code_ctx = (context or {}).get("code_context") or {}
+        raw = code_ctx.get("code_snippet") or code_ctx.get("raw_snippet")
+        if raw:
+            code_context_str = raw
+
+    code_context_block = ""
+    if code_context_str:
+        code_context_block = (
+            f"## Current code (around the crash site, copied verbatim from the file)\n\n"
+            f"{code_context_str}\n\n"
+        )
+
+    if progress_kind == "partial":
+        state_block = (
+            f"## Tree state — IMPORTANT\n\n"
+            f"The tree currently has the PREVIOUS FIX APPLIED. "
+            f"Your diff will run WITHOUT a reset, on top of the "
+            f"current state. Your '-' (removed) lines must match "
+            f"the COMBINED state (pristine code + the previous "
+            f"diff's changes) — not pristine code alone.\n\n"
+            f"The previous diff (already applied to the tree):\n"
+            f"{original_diff}\n\n"
+        )
+        instruction = (
+            f"## What to do\n\n"
+            f"The previous fix was PARTIAL progress. It changed "
+            f"something (the crash moved), but the fix is "
+            f"incomplete. Correct it ON TOP of the current state:\n\n"
+            f"  1. Read the Current Code block above — it shows "
+            f"the file AS IT EXISTS NOW (with the previous fix "
+            f"applied).\n"
+            f"  2. Your diff should CORRECT the previous fix. "
+            f"Add the missing guard at the entry point where the "
+            f"value enters the function, and simplify or remove "
+            f"the ineffective part of the previous fix if it's "
+            f"now redundant.\n"
+            f"  3. The tree will NOT be reset. Your diff applies "
+            f"to the current state, and the final tree is "
+            f"pristine + previous diff + your diff. The pipeline "
+            f"captures the net diff for storage.\n\n"
+        )
+    else:  # "noop"
+        state_block = (
+            f"## Tree state — IMPORTANT\n\n"
+            f"The tree is PRISTINE. The previous fix has been "
+            f"REVERTED. Before your diff runs, the tree is reset "
+            f"to HEAD. Your '-' lines must match the PRISTINE "
+            f"code shown in the Current Code block — not the "
+            f"previous fix's changes.\n\n"
+            f"The previous diff (for reference — already reverted):\n"
+            f"{original_diff}\n\n"
+        )
+        instruction = (
+            f"## What to do\n\n"
+            f"The previous fix was a NO-OP or WORSE. It either "
+            f"didn't change the crash at all, or made it worse. "
+            f"The tree is now pristine. Produce a COMPLETE fix "
+            f"from scratch:\n\n"
+            f"  1. Find the point where the offending value "
+            f"ENTERS the function. In the Current Code block "
+            f"above, look for the dict literal "
+            f"(`result = {{...}}`), the kwargs merge "
+            f"(`result.update(kwargs)` or "
+            f"`kwargs['domain'] = ...`), or the parameter "
+            f"declaration (`def create_cookie(..., **kwargs)`).\n"
+            f"  2. Insert a normalization guard AT ENTRY, before "
+            f"the value can be used anywhere else. Right after "
+            f"the kwargs merge or at the top of the function.\n"
+            f"  3. Do NOT patch individual use sites. The "
+            f"previous fix did that and it didn't work.\n"
+            f"  4. Do NOT reference the previous diff's changes "
+            f"in your '-' lines — those changes are gone.\n\n"
+        )
+
+    prompt = (
+        f"A previous fix was applied to the repo and the probe "
+        f"still crashes. Your job is to produce a corrected "
+        f"diff.\n\n"
+        f"Original failure (before any fix):\n"
+        f"{before_output}\n\n"
+        f"Failure after the initial fix was applied:\n"
+        f"{after_output}\n\n"
+        f"Diagnosis from the Investigator: "
+        f"{(investigation.get('failure_mode') or 'N/A')[:300]}\n"
+        f"Fix location: "
+        f"{stack.get('file_path', 'unknown')}:"
+        f"{stack.get('line_number', '?')}\n\n"
+        f"{code_context_block}"
+        f"{state_block}"
+        f"{instruction}"
+        f"## CRITICAL — diff applicability\n\n"
+        f"The context lines (the ones starting with a space, "
+        f"and the '-' removed lines) in your diff MUST be "
+        f"copied byte-for-byte from the Current Code block "
+        f"above. Do not retype from memory. Do not imagine "
+        f"what the function looks like — READ the actual code "
+        f"block and copy those lines exactly. If you write "
+        f"context lines that don't exist in the file, git "
+        f"apply will reject the entire patch.\n\n"
+        f"For each hunk:\n"
+        f"  - Copy 2-3 lines before your change from the code "
+        f"    block, verbatim, prefix with space.\n"
+        f"  - Copy the line you're changing, verbatim, prefix "
+        f"    with '-'.\n"
+        f"  - Write your new line, prefix with '+'.\n"
+        f"  - Copy 2-3 lines after your change, verbatim, "
+        f"    prefix with space.\n"
+        f"  - Use actual line numbers from the code block "
+        f"    (they're on the left side).\n\n"
+        f"Produce ONLY a corrected unified diff in "
+        f"git-apply-compatible format. No prose, no Markdown "
+        f"fences."
+    )
+
+
+    resp = await llm.complete_raw_detailed(
+        prompt=prompt,
+        system=(
+            "You are an expert software engineer fixing an incomplete "
+            "bug fix. The previous fix guarded the wrong line. Produce "
+            "a fix that normalizes the offending value at function "
+            "entry, not at individual use sites. Return ONLY a unified "
+            "diff in git-apply-compatible format. No prose, no "
+            "Markdown fences."
+        ),
+        temperature=0.2,
+        max_tokens=1500,
+    )
+
+    if not resp.content:
+        return None
+
+    if resp.finish_reason in ("length", "MAX_TOKENS", "max_tokens"):
+        logger.warning(
+            f"Probe repair response truncated at {len(resp.content)} chars"
+        )
+        return None
+
+    from src.services.autofix_service import AutoFixService
+    extracted = AutoFixService._extract_diff(resp.content)
+    if not extracted:
+        logger.warning(
+            f"Probe repair: _extract_diff returned empty. "
+            f"Head: {resp.content[:200]!r}"
+        )
+        return None
+
+    trimmed = AutoFixService._trim_trailing_noise(extracted)
+    if not trimmed:
+        return None
+
+    if not AutoFixService._diff_looks_valid(trimmed):
+        logger.warning(
+            f"Probe repair: _diff_looks_valid rejected. "
+            f"Head: {trimmed[:200]!r}"
+        )
+        return None
+
+    logger.info(
+        f"Probe repair: produced {len(trimmed)} chars, re-running probe"
+    )
+    return trimmed
 
 
 async def _attempt_repair(
