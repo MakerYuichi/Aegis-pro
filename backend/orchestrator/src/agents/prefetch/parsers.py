@@ -85,20 +85,41 @@ def _parse_requirements(text: str) -> list[str]:
     Continuation lines (`\\`) are unsupported — we don't see them
     in practice, and the sanitizer in the prefetcher will reject
     them explicitly if they appear.
+
+    Directives (lines starting with `-`, e.g. `--extra-index-url`,
+    `-i`, `-f`, `--trusted-host`) are passed through unchanged.
+    The parser's job is line extraction, not policy: the sanitizer
+    in prefetch_entrypoint.py has its own _STRIPPED_DIRECTIVES and
+    _REJECTED_DIRECTIVES lists, and it decides what to do with each
+    directive. If the parser rejected here, the sanitizer's policy
+    would never run, and the two would disagree — which is exactly
+    the failure this fixes. See
+    tests/prefetch/test_sanitize.py::test_container_sanitizer_agrees_on_directives
+    and ::test_extra_index_url_stripped_not_rejected.
     """
     out: list[str] = []
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        # Reject continuation and options lines. The prefetcher's
-        # own sanitize() will double-check this — defense in depth.
-        if line.startswith(("\\", "-")):
+        # Continuation lines are genuinely unsupported: pip splits
+        # them across physical lines and this parser does not. The
+        # sanitizer would also reject them, but we reject earlier
+        # with a clearer reason so the caller sees
+        # "unsupported_continuation" rather than
+        # "unsupported_continuation at line N" from deeper in the
+        # call stack.
+        if line.startswith("\\"):
             raise ManifestParseError(
                 "requirements",
-                "unsupported_directive",
+                "unsupported_continuation",
                 f"line: {raw!r}",
             )
+        # Directives pass through. The sanitizer's
+        # _STRIPPED_DIRECTIVES and _REJECTED_DIRECTIVES classify
+        # them: --extra-index-url, -i, -f, --trusted-host, --pre,
+        # --prefer-binary are stripped; -e / --editable are
+        # rejected; anything else is rejected as unknown.
         out.append(line)
     return out
 
