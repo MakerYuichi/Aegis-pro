@@ -426,6 +426,7 @@ class HostedVerifier(Verifier):
                 "stack_analysis", {}
             ).get("file_path")
             file_lines: list[str] = []
+            repo_relative_path: str | None = None
             if target_path:
                 full = _resolve_repo_path(tree_root, target_path)
                 if full is not None:
