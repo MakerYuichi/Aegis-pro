@@ -212,7 +212,18 @@ async def probe(
             cache_host_path=(
                 Path(cache_host_path) if cache_host_path else None
             ),
+            # _run_in_docker only mounts the cache at /cache when
+            # BOTH cache_host_path and manifest_relative_path are
+            # set. The probe's pip install references
+            # /cache/requirements.lock, so the mount must happen.
+            # Previously this call passed cache_host_path but not
+            # manifest_relative_path, so the mount was skipped and
+            # the probe hit `No such file or directory:
+            # '/cache/requirements.lock'` on every run. See
+            # INC-20261028-F434AE (and every earlier probe run).
+            manifest_relative_path=manifest_relative_path,
         )
+
 
         reproduced = (exit_code != 0) or _output_signals_bug(output)
 
@@ -273,6 +284,32 @@ def _new_probe_workdir() -> Path:
     target.mkdir(parents=True, exist_ok=False)
     return target
 
+# Import errors and cache-missing errors inside a probe almost
+# always mean the probe's environment is broken — dependencies
+# not installed, sys.path wrong, cache volume not mounted — not
+# that the bug under test reproduced. Classifying these as bug
+# signals caused the pipeline to report false probe_passed on
+# findings whose probe never reached the code under test. See
+# INC-20261028-3F38D0: probe output was
+# "ModuleNotFoundError: No module named 'urllib3'",
+# classified as reproduced=True, propagated to the Verifier as
+# a signal that the bug had fired.
+#
+# These patterns take precedence: when any is present in the
+# output, _output_signals_bug returns False regardless of what
+# else the output contains. The rationale is that if the probe
+# couldn't run at all, whatever exception it printed is not the
+# bug under test.
+_ENVIRONMENT_FAILURE_PATTERNS = (
+    "ERROR: Could not open requirements file",
+    "No such file or directory: '/cache/",
+    "Cannot connect to the Docker daemon",
+    "verification timed out",
+    "pip install failed",
+    "command not found",
+)
+
+
 def _output_signals_bug(output: str) -> bool:
     """
     Return True if the probe's output contains a Python exception
@@ -311,8 +348,22 @@ def _output_signals_bug(output: str) -> bool:
     Also matches the runtime-error prefix "ERROR:" that pip and
     other tools emit, and the string "ModuleNotFoundError" without
     a colon (the most common form for missing-deps failures).
+
+    Environment failures take precedence. When the output contains
+    a signature of a broken probe environment (missing dependencies,
+    missing cache, sandbox failure), the function returns False even
+    if the output also contains an exception signature. Rationale:
+    if the probe couldn't run, whatever exception it produced is
+    the environment failure, not the bug under test. See
+    _ENVIRONMENT_FAILURE_PATTERNS above.
     """
     if not output:
+        return False
+
+    # Environment failures take precedence over bug signals: if
+    # the probe couldn't import its deps or couldn't reach the
+    # cache volume, its output is not evidence about the bug.
+    if any(p in output for p in _ENVIRONMENT_FAILURE_PATTERNS):
         return False
 
     # Form 1: `TypeError: ...` (traceback style, with colon)
@@ -323,8 +374,6 @@ def _output_signals_bug(output: str) -> bool:
         "ValueError:",
         "RuntimeError:",
         "AssertionError:",
-        "ImportError:",
-        "ModuleNotFoundError:",
         "SyntaxError:",
         "IndexError:",
         "FileNotFoundError:",
@@ -345,8 +394,6 @@ def _output_signals_bug(output: str) -> bool:
         "ValueError ",
         "RuntimeError ",
         "AssertionError ",
-        "ImportError ",
-        "ModuleNotFoundError ",
         "SyntaxError ",
         "IndexError ",
         "FileNotFoundError ",
@@ -356,9 +403,6 @@ def _output_signals_bug(output: str) -> bool:
         "NotImplementedError ",
     )
 
-    # Verifier-friendly: `_output_signals_bug` is also used in
-    # verifier.py to classify probes. Include the string forms
-    # that appear regardless of whether a colon is present.
     return (
         any(p in output for p in COLONED)
         or any(p in output for p in SPACED_CLASSES)
