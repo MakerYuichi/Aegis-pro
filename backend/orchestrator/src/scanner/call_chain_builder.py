@@ -432,18 +432,67 @@ def _find_origins(
             )
 
     # Pass 3: parameter
+    #
+    # Three improvements over the previous version:
+    #
+    #   1. Walk both `posonlyargs`, `args`, and `kwonlyargs` — not
+    #      just `args`. Positional-only and keyword-only parameters
+    #      were previously invisible.
+    #
+    #   2. If the parameter has an annotation, use it. The
+    #      annotation is the most specific answer available and
+    #      should not be discarded in favor of "Unknown".
+    #
+    #   3. If the parameter has no annotation, resolve it by
+    #      inspecting its call sites. A parameter receives its
+    #      value from callers; if all callers pass a Concrete
+    #      argument, the parameter is Concrete. If any caller
+    #      passes Optional or None, the parameter is Optional.
+    #      If no callers are found (or argument shapes are
+    #      unclassifiable), Unknown is the honest fallback.
+    #
+    # The caller-resolution is structural: an AST walk over the
+    # repo's .py files, looking for `ast.Call` nodes whose callee
+    # name matches. No name list. No hardcoded type inference. The
+    # call-site arguments are classified by the same structural
+    # classifier (`_classify_single_location_symbol`) that the
+    # rest of the chain builder uses.
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for arg in node.args.args:
-                if arg.arg == bare_symbol:
-                    return [ChainLink(
-                        file=file_path,
-                        line=node.lineno,
-                        symbol=bare_symbol,
-                        reason="parameter",
-                        snippet=_snippet(lines, node.lineno),
-                        terminal_kind="Unknown",
-                    )]
+            all_params = (
+                node.args.posonlyargs
+                + node.args.args
+                + node.args.kwonlyargs
+            )
+            for arg in all_params:
+                if arg.arg != bare_symbol:
+                    continue
+                # 2. Annotated parameter — use the annotation.
+                if arg.annotation is not None:
+                    ann = _annotation_name(arg.annotation)
+                    if ann:
+                        return [ChainLink(
+                            file=file_path,
+                            line=node.lineno,
+                            symbol=bare_symbol,
+                            reason="parameter",
+                            snippet=_snippet(lines, node.lineno),
+                            terminal_kind=_classify_terminal(ann),
+                        )]
+                # 3. Unannotated — try caller resolution.
+                kind = _resolve_parameter_from_callers(
+                    repo_path=repo_path,
+                    func_name=node.name,
+                    param_name=arg.arg,
+                )
+                return [ChainLink(
+                    file=file_path,
+                    line=node.lineno,
+                    symbol=bare_symbol,
+                    reason="parameter",
+                    snippet=_snippet(lines, node.lineno),
+                    terminal_kind=kind or "Unknown",
+                )]
 
     return []
 
@@ -559,7 +608,209 @@ def _definition_origins(
         terminal_kind=annotation_kind,
     )]
 
+def _resolve_parameter_from_callers(
+    *,
+    repo_path: Path,
+    func_name: str,
+    param_name: str,
+) -> str | None:
+    """Resolve an unannotated parameter's terminal_kind from its callers.
 
+    Returns "Concrete", "Optional", or None (unknown / no callers).
+
+    Three outcomes, each honest:
+
+      - Found ≥1 call site, all arguments classify as Concrete →
+        "Concrete". The parameter receives concrete values from
+        every caller we can see.
+
+      - Found ≥1 call site, any argument classifies as Optional →
+        "Optional". At least one caller passes a possibly-None
+        value. Worst case wins for classification.
+
+      - No call sites found in the repo, OR all arguments are
+        unclassifiable → None. Honest unknown. A public function
+        called from outside the repo can receive anything.
+
+    Structural. Walks the repo's .py files, finds ast.Call nodes
+    whose callee name matches func_name, pairs arguments with the
+    parameter by position or keyword, and classifies each argument.
+    No name list. No hardcoded shapes.
+
+    Skips call sites with *args or **kwargs expansion — argument-
+    to-parameter mapping is not statically determinable.
+    """
+    excludes = {
+        ".git", "node_modules", "venv", ".venv", "dist", "build",
+        "__pycache__", ".tox", ".eggs", "site-packages",
+    }
+
+    param_index: int | None = None
+    found_any_call = False
+    kinds: set[str] = set()
+
+    for py_file in repo_path.rglob("*.py"):
+        if any(part in excludes for part in py_file.parts):
+            continue
+        if not py_file.is_file():
+            continue
+        try:
+            text = py_file.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(text)
+        except (OSError, SyntaxError):
+            continue
+
+        # ── Find the def in this file (if it's here) to get the
+        # parameter's positional index.
+        if param_index is None:
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if node.name != func_name:
+                    continue
+                all_params = (
+                    node.args.posonlyargs
+                    + node.args.args
+                    + node.args.kwonlyargs
+                )
+                for i, p in enumerate(all_params):
+                    if p.arg == param_name:
+                        param_index = i
+                        break
+                break
+
+        # ── Find calls to func_name in this file.
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            callee = node.func
+            callee_name: str | None = None
+            if isinstance(callee, ast.Name):
+                callee_name = callee.id
+            elif isinstance(callee, ast.Attribute):
+                callee_name = callee.attr
+            if callee_name != func_name:
+                continue
+
+            # Skip *args / **kwargs — cannot map args to params.
+            if any(isinstance(a, ast.Starred) for a in node.args):
+                continue
+            if any(kw.arg is None for kw in node.keywords):
+                continue
+
+            arg_expr: ast.AST | None = None
+
+            # Keyword match takes precedence.
+            for kw in node.keywords:
+                if kw.arg == param_name:
+                    arg_expr = kw.value
+                    break
+
+            # Positional match if no keyword match and index known.
+            if arg_expr is None and param_index is not None:
+                if param_index < len(node.args):
+                    arg_expr = node.args[param_index]
+
+            if arg_expr is None:
+                continue
+
+            found_any_call = True
+            try:
+                rel = py_file.relative_to(repo_path).as_posix()
+            except ValueError:
+                continue
+
+            kind = _classify_call_argument(
+                repo_path=repo_path,
+                file_path=rel,
+                arg_expr=arg_expr,
+            )
+            if kind is not None:
+                kinds.add(kind)
+
+    if not found_any_call:
+        return None
+    if "Optional" in kinds:
+        return "Optional"
+    if "Concrete" in kinds:
+        return "Concrete"
+    return None
+
+
+def _classify_call_argument(
+    *,
+    repo_path: Path,
+    file_path: str,
+    arg_expr: ast.AST,
+) -> str | None:
+    """Classify an argument expression at a call site.
+
+    Handles the structural cases:
+      - Literal str/int/float/bool/bytes → Concrete
+      - Literal None → Optional
+      - Bare name → classify via _classify_single_location_symbol
+      - Attribute access → classify the dotted expression (root)
+      - Function call → look up the callee's return annotation
+      - Everything else → None
+
+    Returns None (unknown) rather than guessing. A list
+    comprehension, conditional expression, or unsupported shape
+    is honestly unknown.
+    """
+    if isinstance(arg_expr, ast.Constant):
+        if arg_expr.value is None:
+            return "Optional"
+        if isinstance(arg_expr.value, (str, int, float, bool, bytes)):
+            return "Concrete"
+        return None
+
+    if isinstance(arg_expr, ast.Name):
+        return _classify_single_location_symbol(
+            repo_path=repo_path,
+            file_path=file_path,
+            symbol=arg_expr.id,
+        )
+
+    if isinstance(arg_expr, ast.Attribute):
+        try:
+            full = ast.unparse(arg_expr)
+        except Exception:
+            return None
+        return _classify_single_location_symbol(
+            repo_path=repo_path,
+            file_path=file_path,
+            symbol=full,
+        )
+
+    if isinstance(arg_expr, ast.Call):
+        # Argument is a function call. If the callee is a bare
+        # name we can resolve, use its return annotation.
+        callee = arg_expr.func
+        if isinstance(callee, ast.Name):
+            def_site = _find_definition(repo_path, callee.id)
+            if def_site is None:
+                return None
+            def_file, _ = def_site
+            try:
+                text = (repo_path / def_file).read_text(
+                    encoding="utf-8", errors="replace",
+                )
+                tree = ast.parse(text)
+            except (OSError, SyntaxError):
+                return None
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == callee.id
+                ):
+                    if node.returns is not None:
+                        ann = _annotation_name(node.returns)
+                        if ann:
+                            return _classify_terminal(ann)
+                    break
+        return None
+
+    return None
 
 def _next_trace_target(
     *, repo_path: Path, origin: ChainLink
