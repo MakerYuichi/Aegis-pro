@@ -81,11 +81,19 @@ async def test_invalid_flags_rejected_before_docker(repo):
 
 
 @pytest.mark.asyncio
-async def test_flag_list_in_args_for_audit(repo):
+async def test_flag_list_in_args_for_audit(repo, tmp_path):
     """Every call's flags are recorded in the observation args."""
     # Patch _run_in_docker so this test doesn't actually spawn
     # containers; we're only asserting that flags reach the args.
+    #
+    # Patch VERIFIER_CONTAINER_WORKDIR to tmp_path so probe()'s
+    # _new_probe_workdir() creates its scratch directory somewhere
+    # writable. In CI, /work doesn't exist and the process runs as
+    # an unprivileged user; without this patch, probe() fails on
+    # PermissionError before reaching the mocked _run_in_docker.
     with patch(
+        "src.config.settings.VERIFIER_CONTAINER_WORKDIR", str(tmp_path),
+    ), patch(
         "src.agents.verifier._run_in_docker",
         new=AsyncMock(return_value=(0, "")),
     ), patch(
@@ -143,7 +151,7 @@ def test_no_hint_when_flags_already_supplied():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_probe_passes_flags_to_docker(repo):
+async def test_probe_passes_flags_to_docker(repo, tmp_path):
     """Flags reach _run_in_docker as part of the command string."""
     captured = {}
 
@@ -152,6 +160,8 @@ async def test_probe_passes_flags_to_docker(repo):
         return 1, "TypeError: unsupported operand"
 
     with patch(
+        "src.config.settings.VERIFIER_CONTAINER_WORKDIR", str(tmp_path),
+    ), patch(
         "src.agents.verifier._run_in_docker", new=fake_run_in_docker,
     ), patch(
         "src.agents.verifier._image_for_language",
@@ -172,7 +182,7 @@ async def test_probe_passes_flags_to_docker(repo):
 
 
 @pytest.mark.asyncio
-async def test_probe_no_flags_plain_python(repo):
+async def test_probe_no_flags_plain_python(repo, tmp_path):
     """When no flags are supplied, the command is plain `python`."""
     captured = {}
 
@@ -181,6 +191,8 @@ async def test_probe_no_flags_plain_python(repo):
         return 0, ""
 
     with patch(
+        "src.config.settings.VERIFIER_CONTAINER_WORKDIR", str(tmp_path),
+    ), patch(
         "src.agents.verifier._run_in_docker", new=fake_run_in_docker,
     ), patch(
         "src.agents.verifier._image_for_language",
@@ -196,12 +208,14 @@ async def test_probe_no_flags_plain_python(repo):
 
 
 @pytest.mark.asyncio
-async def test_probe_emits_hint_when_not_reproduced(repo):
+async def test_probe_emits_hint_when_not_reproduced(repo, tmp_path):
     """When reproduced=False and no flags, the hint is attached."""
     async def fake_run_in_docker(*, command, **kwargs):
         return 0, ""  # exit 0, no repro
 
     with patch(
+        "src.config.settings.VERIFIER_CONTAINER_WORKDIR", str(tmp_path),
+    ), patch(
         "src.agents.verifier._run_in_docker", new=fake_run_in_docker,
     ), patch(
         "src.agents.verifier._image_for_language",
@@ -221,12 +235,14 @@ async def test_probe_emits_hint_when_not_reproduced(repo):
 
 
 @pytest.mark.asyncio
-async def test_probe_no_hint_when_reproduced(repo):
+async def test_probe_no_hint_when_reproduced(repo, tmp_path):
     """A successful reproduction carries no hint — nothing to act on."""
     async def fake_run_in_docker(*, command, **kwargs):
         return 1, "crashed"
 
     with patch(
+        "src.config.settings.VERIFIER_CONTAINER_WORKDIR", str(tmp_path),
+    ), patch(
         "src.agents.verifier._run_in_docker", new=fake_run_in_docker,
     ), patch(
         "src.agents.verifier._image_for_language",
