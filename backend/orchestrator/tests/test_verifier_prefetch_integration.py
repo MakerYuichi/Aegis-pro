@@ -107,119 +107,54 @@ async def test_no_manifest_skips_prefetch(fake_repo, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_manifest_triggers_prefetch(
-    fake_repo, tmp_path, mock_prefetch_result,
-):
-    """A repo with requirements.txt calls the prefetcher."""
-    with patch(
-        "src.agents.verifier.find_manifest",
-    ) as mock_find, patch(
-        "src.agents.verifier.run_prefetch_with_build_on_miss",
-        new=AsyncMock(return_value=mock_prefetch_result),
-    ) as mock_prefetch, patch.object(
+async def test_prefetch_error_in_context_verifies_without_cache(fake_repo, tmp_path):
+    """When _stage_prefetch failed upstream, context carries prefetch_error.
+
+    verify() does not read prefetch_error — it looks for
+    prefetch_cache_host_path in the context and finds none. Tests
+    run without the cache mount or install prefix. A
+    VerificationResult is produced; no exception is raised.
+
+    This documents the honest degradation: a prefetch failure is
+    not a verification failure. Verification still happens, just
+    without the repo's installed dependencies. The repo's tests may
+    fail on import errors, and that failure is reported as
+    tests_failed / tests_could_not_run, not as a prefetch error.
+
+    Replaces the removed test_prefetch_failure_is_verification_failure,
+    which asserted a reason="prefetch_failed_*" outcome that no
+    longer exists. The prefetcher itself is tested separately in
+    test_prefetch_*.py; verify()'s job is to consume whatever cache
+    context provides, or run without one.
+    """
+    with patch.object(
         HostedVerifier, "_apply_diff",
         new=AsyncMock(return_value=(True, "")),
     ), patch(
         "src.agents.verifier._run_in_docker",
         new=AsyncMock(return_value=(0, "1 passed")),
     ) as mock_docker:
-        # Return a real ManifestRef.
-        from src.agents.prefetch.manifest_finder import ManifestRef
-        mock_find.return_value = ManifestRef(
-            path=Path("requirements.txt"), kind="requirements",
-        )
-
-        v = HostedVerifier()
-        await v.verify(
-            repo_name="owner/repo",
-            commit_sha="HEAD",
-            diff="",
-            language="Python",
-            context={"repo_workdir": str(tmp_path)},
-        )
-
-        mock_prefetch.assert_awaited_once()
-        # The cache mount reaches the docker call.
-        call_kwargs = mock_docker.await_args.kwargs
-        assert call_kwargs["cache_host_path"] is not None
-        assert call_kwargs["manifest_relative_path"] == "requirements.txt"
-
-
-@pytest.mark.asyncio
-async def test_prefetch_failure_is_verification_failure(fake_repo, tmp_path):
-    """A prefetch failure produces VerificationResult with
-    prefetch_failed_* reason, not an exception."""
-    with patch(
-        "src.agents.verifier.find_manifest",
-    ) as mock_find, patch(
-        "src.agents.verifier.run_prefetch_with_build_on_miss",
-        new=AsyncMock(side_effect=PrefetchError(
-            "sdist_only",
-            "package=sentence-transformers version=2.2.2",
-        )),
-    ), patch(
-        "src.agents.verifier._run_in_docker",
-        new=AsyncMock(return_value=(0, "should not run")),
-    ) as mock_docker:
-        from src.agents.prefetch.manifest_finder import ManifestRef
-        mock_find.return_value = ManifestRef(
-            path=Path("requirements.txt"), kind="requirements",
-        )
-
         v = HostedVerifier()
         result = await v.verify(
             repo_name="owner/repo",
             commit_sha="HEAD",
             diff="",
             language="Python",
-            context={"repo_workdir": str(tmp_path)},
+            context={
+                "repo_workdir": str(tmp_path),
+                "prefetch_error": "sdist_only: package=sentence-transformers",
+            },
         )
 
-        assert result.passed is False
-        assert result.reason == "prefetch_failed_sdist_only"
-        assert "sentence-transformers" in result.output
-        # The docker call never ran.
-        mock_docker.assert_not_called()
+    # Verification ran; it didn't raise or short-circuit.
+    assert result.passed is True
+    assert result.reason == "tests_passed"
 
-
-@pytest.mark.asyncio
-async def test_build_on_miss_disabled_uses_run_prefetch(
-    fake_repo, tmp_path, mock_prefetch_result, monkeypatch,
-):
-    """When BUILD_ON_MISS_ENABLED is false, the verifier calls
-    run_prefetch instead of the with-build version."""
-    monkeypatch.setattr(
-        "src.agents.verifier.settings.BUILD_ON_MISS_ENABLED", False,
-    )
-
-    with patch(
-        "src.agents.verifier.find_manifest",
-    ) as mock_find, patch(
-        "src.agents.verifier.run_prefetch",
-        new=AsyncMock(return_value=mock_prefetch_result),
-    ) as mock_prefetch, patch(
-        "src.agents.verifier.run_prefetch_with_build_on_miss",
-        new=AsyncMock(),
-    ) as mock_with_build, patch(
-        "src.agents.verifier._run_in_docker",
-        new=AsyncMock(return_value=(0, "1 passed")),
-    ):
-        from src.agents.prefetch.manifest_finder import ManifestRef
-        mock_find.return_value = ManifestRef(
-            path=Path("requirements.txt"), kind="requirements",
-        )
-
-        v = HostedVerifier()
-        await v.verify(
-            repo_name="owner/repo",
-            commit_sha="HEAD",
-            diff="",
-            language="Python",
-            context={"repo_workdir": str(tmp_path)},
-        )
-
-        mock_prefetch.assert_awaited_once()
-        mock_with_build.assert_not_called()
+    # Two docker calls (baseline + with-diff), both without cache.
+    assert mock_docker.await_count == 2
+    for call in mock_docker.await_args_list:
+        assert call.kwargs["cache_host_path"] is None
+        assert call.kwargs["manifest_relative_path"] is None
 
 
 # ── _run_in_docker's cache mount ──────────────────────────────
@@ -261,7 +196,15 @@ async def test_run_in_docker_prepends_install_when_cache_provided(tmp_path):
     effective = argv[sh_c_idx + 2]
     assert "pip install --no-index" in effective
     assert "--find-links /cache" in effective
-    assert "-r requirements.txt" in effective
+    # The install reads from the lock file in the cache, not from
+    # the repo's manifest. The prefetcher writes the resolved lock
+    # to <cache>/requirements.lock; the container installs from
+    # that lock. The old assertion (`-r requirements.txt`) predates
+    # the lock-file split and would only pass if the install read
+    # the repo's manifest directly — which is exactly the thing
+    # the prefetch design avoids (the manifest may be unpinned,
+    # and pip install with network is what we're preventing).
+    assert "-r /cache/requirements.lock" in effective
     assert effective.endswith("python -m pytest -q")
 
 

@@ -15,6 +15,8 @@ from src.agents.investigator import _validate_scan_confirmation, _append_downgra
 from src.agents.investigator_models import (
     CONFIRMATION_PROBE_REPRODUCED,
     CONFIRMATION_REASONED_ONLY,
+    STATUS_UNVERIFIED,
+    REFUSE_COULD_NOT_DETERMINE, 
     STATUS_CONFIRMED,
     STATUS_REFUSED,
     STATUS_UNVERIFIED,
@@ -46,8 +48,12 @@ CHAIN = [
 
 def test_downgrade_preserves_finding():
     """The exact acceptance-test shape: confirm claims probe_reproduced,
-    but history shows a failed probe. Finding must survive as
-    confirmed/reasoned_only, not be refused."""
+    but history shows a probe that ran and did NOT reproduce the bug.
+    The pipeline downgrades to reasoned_only, then rejects the
+    downgraded confirmation because the probe failed to reproduce.
+    The finding lands in 'unverified' (Needs Review), NOT 'refused'.
+    Refusal would mean 'not a bug'. Unverified means 'could not
+    determine'. The distinction matters for the report."""
     result = _confirmed()
     history = [{
         "tool": "probe", "ok": True,
@@ -57,10 +63,8 @@ def test_downgrade_preserves_finding():
         },
     }]
     out = _validate_scan_confirmation(result, history, chain=CHAIN)
-    assert out.status == STATUS_CONFIRMED
-    assert out.confirmation == CONFIRMATION_REASONED_ONLY
-    # Evidence now mentions probe — the reasoned_only check passes.
-    assert "probe" in out.evidence.lower()
+    assert out.status == STATUS_UNVERIFIED  
+    assert out.reason == REFUSE_COULD_NOT_DETERMINE  
 
 
 def test_downgrade_note_mentions_exit_code():
@@ -107,15 +111,22 @@ def test_reasoned_only_without_evidence_still_refused():
     assert out.status == STATUS_UNVERIFIED  # REFUSE_COULD_NOT_DETERMINE
 
 
-def test_reasoned_only_with_evidence_accepted():
-    """Agent chose reasoned_only and explained why — accepted."""
+def test_reasoned_only_with_evidence_but_no_probe_rejected():
+    """Agent chose reasoned_only, wrote evidence text explaining why
+    a probe can't run, but did NOT attempt a probe. The evidence text
+    alone is not enough — the escape hatch requires a probe attempt
+    in history. Routing: unverified (Needs Review), not refused.
+    
+    This test replaces the old test_reasoned_only_with_evidence_accepted,
+    which asserted the pre-fix behavior where evidence text alone was
+    sufficient."""
     result = _confirmed(
         confirmation=CONFIRMATION_REASONED_ONLY,
         evidence="requires -OO interpreter flag; sandbox probe cannot set it",
     )
     out = _validate_scan_confirmation(result, [], chain=CHAIN)
-    assert out.status == STATUS_CONFIRMED
-    assert out.confirmation == CONFIRMATION_REASONED_ONLY
+    assert out.status == STATUS_UNVERIFIED  # ← changed from CONFIRMED
+    assert out.reason == REFUSE_COULD_NOT_DETERMINE  # ← added
 
 
 def test_fix_location_outside_chain_rejected():
@@ -135,3 +146,23 @@ def test_probe_reproduced_with_successful_probe_untouched():
     out = _validate_scan_confirmation(result, history, chain=CHAIN)
     assert out.status == STATUS_CONFIRMED
     assert out.confirmation == CONFIRMATION_PROBE_REPRODUCED
+
+def test_reasoned_only_with_probe_attempt_accepted():
+    """Agent chose reasoned_only, and history shows a probe attempt
+    that failed for an environmental reason (ModuleNotFoundError).
+    The escape hatch is legitimately used — accept the finding as
+    confirmed."""
+    result = _confirmed(
+        confirmation=CONFIRMATION_REASONED_ONLY,
+        evidence="probe could not run in sandbox: missing urllib3 dependency",
+    )
+    history = [{
+        "tool": "probe", "ok": True,
+        "metadata": {
+            "ran": True, "reproduced": False, "exit_code": 1,
+        },
+        "result": "ModuleNotFoundError: No module named 'urllib3'",
+    }]
+    out = _validate_scan_confirmation(result, history, chain=CHAIN)
+    assert out.status == STATUS_CONFIRMED
+    assert out.confirmation == CONFIRMATION_REASONED_ONLY
