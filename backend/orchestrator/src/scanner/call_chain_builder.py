@@ -142,6 +142,36 @@ def build_chain(
     # for imports and annotations, and consults the CPython module
     # builtin table. No hardcoded name list.
     if len(chain) <= 1:
+        # The classifier is only meaningful when the crash file
+        # actually exists. Without it, the symbol has no crash
+        # site to classify from — the classifier's cross-file
+        # pass would happily return Concrete for a bare name that
+        # happens to be imported somewhere else in the repo, even
+        # though the crash site is a non-existent file. That's
+        # the wrong answer: with no file at the crash path, there
+        # is no location to trace from.
+        #
+        # Check the file directly before calling the classifier.
+        # _find_origins already returned [] for the missing file
+        # (which is why chain is length 1 or 0), so we can trust
+        # that path.
+        crash_full_path = (repo_path / file_path).resolve()
+        try:
+            crash_full_path.relative_to(repo_path)
+        except ValueError:
+            crash_file_ok = False
+        else:
+            crash_file_ok = crash_full_path.is_file()
+
+        if not crash_file_ok:
+            return ChainResult(
+                status=CHAIN_UNTRACEABLE,
+                reason=(
+                    f"crash file does not exist: "
+                    f"{file_path!r} in {repo_path}"
+                ),
+            )
+
         terminal_kind = _classify_single_location_symbol(
             repo_path=repo_path,
             file_path=file_path,
