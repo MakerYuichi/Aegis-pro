@@ -156,7 +156,13 @@ async def test_scan_repo_local_path_defaults_service_to_dirname(tmp_path):
     # row is never created in the DB, and _stage_watcher's get_service
     # returns None for every candidate. That was the bug this test was
     # originally guarding against; the guard flipped when the fix landed.
-    mock_resolve.assert_called_once_with("awesome-project")
+    #
+    # Fix A added a repo_name kwarg: scan_repo reads .git/config to
+    # learn the GitHub origin and passes it through. For a bare
+    # directory with no .git/, repo_name is None (nothing to
+    # enrich against), which is exactly what this tmp_path fixture
+    # produces.
+    mock_resolve.assert_called_once_with("awesome-project", repo_name=None)
     assert captured["service_name"] == "awesome-project"
 
 
