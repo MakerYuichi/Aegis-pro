@@ -294,10 +294,24 @@ async def test_declare_incident_parses_stack_trace_into_fields(service_with_db):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_declare_incident_fetches_github_context_when_repo_set(service_with_db):
+async def test_declare_incident_does_not_fetch_github_context(service_with_db):
     """
     Situation: Service has repo_name and stack trace.
-    Expected: Fetches GitHub context (PRs, blame, code content).
+    Expected: declare_incident does NOT touch GitHub.
+
+    Post Fix B (enrichment-at-report-time): enrichment moved out of
+    the pipeline. declare_incident must complete without any GitHub
+    call — even on a service with a valid repo_name — because the
+    CLI report surface is the only place enrichment runs.
+
+    Three invariants pinned here:
+      1. No github.get_* calls during the pipeline.
+      2. No record_github_context / record_related_prs writes
+         during the pipeline (those are the report surface's job).
+      3. The pipeline still runs to completion — alerts fired,
+         curator stored the embedding — so removing enrichment
+         didn't break the rest of the pipeline.
+
     Function: src.services.incident_service.IncidentService.declare_incident
     """
     fake_github = MagicMock()
@@ -315,7 +329,15 @@ async def test_declare_incident_fetches_github_context_when_repo_set(service_wit
          patch("src.services.incident_service.OnCallService") as OnCall, \
          patch("src.services.incident_service.AlertService") as Alert, \
          patch("src.services.incident_service.KubernetesService") as K8s, \
-         patch("src.services.incident_service.manager") as ws:
+         patch("src.services.incident_service.manager") as ws, \
+         patch.object(
+             service_with_db, "record_github_context",
+             new_callable=AsyncMock,
+         ) as mock_record_github, \
+         patch.object(
+             service_with_db, "record_related_prs",
+             new_callable=AsyncMock,
+         ) as mock_record_prs:
         OnCall.return_value.get_on_call = AsyncMock(return_value={"primary": None, "secondary": None, "tertiary": None})
         OnCall.return_value.get_escalation_policy = AsyncMock(return_value=[])
         Alert.return_value.send_alerts = AsyncMock()
@@ -326,15 +348,23 @@ async def test_declare_incident_fetches_github_context_when_repo_set(service_wit
             "payment-api", "DB down", stack_trace=STACK_TRACE
         )
 
-    fake_github.get_recent_prs.assert_awaited_once_with("payment-service")
-    fake_github.get_blame_with_pr.assert_awaited_once()
-    # GitHub context now lands via record_github_context, not the
-    # initial persist call. Assert on the enrichment call.
-    service_with_db.record_github_context.assert_awaited_once()
-    call_args = service_with_db.record_github_context.await_args
-    _incident_id, github_context = call_args.args
-    assert github_context["blame"]["author"] == "eng@acme.com"
+    # Invariant 1: no GitHub API calls.
+    fake_github.get_recent_prs.assert_not_awaited()
+    fake_github.get_blame_with_pr.assert_not_awaited()
+    fake_github.get_related_prs.assert_not_awaited()
+    fake_github.get_file_content.assert_not_awaited()
 
+    # Invariant 2: no enrichment writes. Enrichment is the
+    # report surface's job (enrich_finding_for_report).
+    mock_record_github.assert_not_awaited()
+    mock_record_prs.assert_not_awaited()
+
+    # Invariant 3: the pipeline still ran to completion. Alerts
+    # fired, WebSocket broadcast happened, curator stored the
+    # embedding — none of which the enrichment removal should
+    # have affected.
+    Alert.return_value.send_alerts.assert_awaited_once()
+    ws.broadcast.assert_awaited_once()
 
 @pytest.mark.asyncio
 async def test_declare_incident_github_error_does_not_break(service_with_db):

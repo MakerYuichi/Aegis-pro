@@ -94,6 +94,31 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"  dropped:       {counts['dropped_total']:3d}")
     print()
 
+    # Enrich at report time — only findings a human will read.
+    # Refused and already-fixed findings are skipped by
+    # service._should_enrich(). This is the Fix B design: the
+    # pipeline never calls GitHub; the report surface does, and
+    # only for findings in the acted-on states (Verified,
+    # Verification Failed, Needs Review).
+    repo_origin = result.get("repo_origin")
+    if repo_origin:
+        for iid in result.get("incident_ids", []):
+            incident = await service.get_incident(iid)
+            if not incident:
+                continue
+            if service._should_enrich(incident):
+                try:
+                    await service.enrich_finding_for_report(
+                        incident, repo_origin,
+                    )
+                except Exception as e:
+                    # Enrichment is best-effort. A failure must not
+                    # block the report.
+                    print(
+                        f"warning: enrichment failed for {iid}: {e}",
+                        file=sys.stderr,
+                    )
+
     verified = []
     verification_failed = []
     unverified = []
@@ -103,6 +128,7 @@ async def _run(args: argparse.Namespace) -> int:
         incident = await service.get_incident(iid)
         if not incident:
             continue
+        
         meta = incident.get("extra_metadata") or {}
         if isinstance(meta, str):
             import json as _json
@@ -159,6 +185,7 @@ async def _run(args: argparse.Namespace) -> int:
                 print(f"           Fix from {original}, verified "
                       f"{verified_at} ({reason}).")
                 print(f"           Still applied to the working tree.")
+                _print_enrichment(incident)
             print()
 
         if verified:
@@ -174,6 +201,7 @@ async def _run(args: argparse.Namespace) -> int:
                     print(f"           Fix verified — no new test failures.")
                 else:
                     print(f"           Fix generated and verified (tests passed).")
+                _print_enrichment(incident)
             print()
 
         if verification_failed:
@@ -183,6 +211,7 @@ async def _run(args: argparse.Namespace) -> int:
                       f"{incident.get('line_number')}  "
                       f"{incident.get('title')}")
                 print(f"           reason={verification.get('reason', 'unknown')}")
+                _print_enrichment(incident)
             print()
 
         if unverified:
@@ -217,6 +246,7 @@ async def _run(args: argparse.Namespace) -> int:
                     print(f"           Investigator could not determine "
                           f"({reason or 'unknown'})")
                     print(f"           No fix generated. Recommend human review.")
+                _print_enrichment(incident)
             print()
 
     if refused:
@@ -243,6 +273,50 @@ async def _run(args: argparse.Namespace) -> int:
             print(f"  {iid}")
 
     return 0
+
+
+def _print_enrichment(incident: dict) -> None:
+    """
+    Render the enrichment fields for a finding, if present.
+
+    Reads extra_metadata.github (populated at report time by
+    enrich_finding_for_report). Renders blame and related PRs
+    when available. Silent when absent — most refused findings
+    don't reach this, and local scans without .git/config have
+    no enrichment at all.
+    """
+    meta = incident.get("extra_metadata") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+    github = meta.get("github") or {}
+
+    blame = github.get("blame") or {}
+    if blame:
+        author = blame.get("author") or "unknown"
+        msg = (blame.get("message") or "")[:60]
+        pr_num = blame.get("pr_number")
+        pr_url = blame.get("pr_url") or ""
+        line = f"           Blame: {author}"
+        if msg:
+            line += f" — {msg}"
+        if pr_num:
+            line += f" (PR #{pr_num})"
+        print(line)
+
+    related = github.get("related_prs") or []
+    if related:
+        print(f"           Related PRs ({len(related)}):")
+        for pr in related[:3]:
+            num = pr.get("number")
+            title = (pr.get("title") or "")[:60]
+            score = pr.get("relevance_score")
+            score_str = f" [{score:.2f}]" if isinstance(score, (int, float)) else ""
+            print(f"             #{num}{score_str} {title}")
+        if len(related) > 3:
+            print(f"             ... and {len(related) - 3} more")
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,6 +1,7 @@
 from sqlalchemy import text
 from datetime import datetime
 from pathlib import Path
+import re
 import uuid
 import json
 from loguru import logger
@@ -15,6 +16,62 @@ from src.services.factory import get_github_service
 from src.services.alert_service import AlertService
 from src.config import settings
 from src.websocket import manager
+
+
+def _read_git_origin(local_path: str) -> str | None:
+    """
+    Read `git config --get remote.origin.url` from a local checkout
+    and normalize it to "owner/repo".
+
+    Returns None when:
+      - the path has no .git directory
+      - git config fails (no remote configured, git not installed)
+      - the URL is not a GitHub URL (self-hosted git, etc.)
+
+    Used by the Provisioner to learn the GitHub identity of a
+    local-path scan. The directory name ("requests-buggy") is not
+    the GitHub identity — the .git/config tells the truth.
+    """
+    import subprocess
+
+    p = Path(local_path)
+    if not (p / ".git").exists():
+        return None
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(p), "config", "--get", "remote.origin.url"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    url = result.stdout.strip()
+    if not url:
+        return None
+
+    # Normalize the four common shapes:
+    #   https://github.com/psf/requests.git
+    #   https://github.com/psf/requests
+    #   git@github.com:psf/requests.git
+    #   ssh://git@github.com/psf/requests.git
+    url = re.sub(r"^git@github\.com:", "https://github.com/", url)
+    url = re.sub(r"^ssh://git@github\.com/", "https://github.com/", url)
+    url = re.sub(r"^https?://github\.com/", "", url)
+    url = re.sub(r"^github\.com/", "", url)
+    url = re.sub(r"\.git$", "", url)
+
+    parts = url.split("/")
+    if len(parts) < 2:
+        return None
+    owner, repo = parts[0], parts[1]
+    if not owner or not repo:
+        return None
+    return f"{owner}/{repo}"
+
 
 
 def merge_incident_metadata(existing_json, key: str, value) -> str:
@@ -143,20 +200,14 @@ class IncidentService:
 
         # --- Writes owned by the coordinator, sourced from each stage ---
 
-        if context.get("github_context"):
-            await self.record_github_context(
-                context["incident_id"], context["github_context"]
-            )
-
-        if context.get("related_prs"):
-            await self.record_related_prs(
-                context["incident_id"], context["related_prs"]
-            )
-
         if context.get("investigation"):
             await self.record_investigation(
                 context["incident_id"], context["investigation"]
             )
+
+        # GitHub enrichment writes (github_context, related_prs) are
+        # NOT here. They run at report time, gated on finding
+        # status — see enrich_finding_for_report() below.
 
         # From here on, the pipeline may hold a cloned checkout in
         # context["repo_workdir"] (populated by the Investigator agent
@@ -199,7 +250,16 @@ class IncidentService:
             return self._build_response(context)
         finally:
             from src.agents.provisioner import cleanup_repo
-            cleanup_repo(context.get("repo_workdir"))
+            # Skip cleanup for local-path scans. The caller handed us
+            # a directory (context["scan_repo_path"] is set), we didn't
+            # clone it, and we don't own it. cleanup_repo correctly
+            # refuses to delete a non-sentinel path, but the refusal
+            # logs a WARNING per incident. Skipping the call entirely
+            # avoids the warning without hiding anything — the path
+            # was never ours to clean up.
+            if not context.get("scan_repo_path"):
+                cleanup_repo(context.get("repo_workdir"))
+
     # ------------------------------------------------------------------
     # Scanner entry point — v1.0 Phase 2
     # ------------------------------------------------------------------
@@ -303,19 +363,33 @@ class IncidentService:
         if local_candidate.is_dir():
             scan_workdir = str(local_candidate)
             needs_cleanup = False
+            # Read .git/config to learn the true GitHub origin.
+            # The directory basename ("requests-buggy") is not a
+            # GitHub identifier; .git/config says "psf/requests".
+            local_origin = _read_git_origin(scan_workdir)
             if service_name is None:
                 effective_service = local_candidate.name
-                await self.resolve_scan_service(effective_service)
+                await self.resolve_scan_service(
+                    effective_service,
+                    repo_name=local_origin,
+                )
             else:
                 effective_service = service_name
-            logger.info(
-                f"scan_repo: scanning local path {scan_workdir} "
-                f"(service={effective_service})"
-            )
+            if local_origin:
+                logger.info(
+                    f"scan_repo: scanning local path {scan_workdir} "
+                    f"(service={effective_service}, origin={local_origin})"
+                )
+            else:
+                logger.info(
+                    f"scan_repo: scanning local path {scan_workdir} "
+                    f"(service={effective_service}, no GitHub origin)"
+                )
         else:
             if service_name is None:
                 effective_service = await self.resolve_scan_service(
-                    owner_repo
+                    owner_repo,
+                    repo_name=owner_repo,
                 )
             else:
                 effective_service = service_name
@@ -440,6 +514,14 @@ class IncidentService:
         # declare_incident with a flag that routes through
         # _stage_scanner. The scanner stage records the original
         # candidate in the context, and _build_response surfaces it.
+        # The Provisioner sets repo_origin when it runs. Seed it here
+        # so a hand-driven single-incident run (bypassing the
+        # Provisioner) still gets enrichment. scan_repo passes the
+        # same value it passes to resolve_scan_service.
+        from pathlib import Path as _Path
+        _local = _Path(repo_path).resolve()
+        _seeded_origin = _read_git_origin(str(_local)) if _local.is_dir() else None
+
         context = {
             "mode": "scan",
             "service_name": service_name,
@@ -451,6 +533,7 @@ class IncidentService:
             "reported_by": None,
             "scan_candidate": candidate.to_dict(),
             "scan_repo_path": repo_path,
+            "repo_origin": _seeded_origin,
             "scan_outcome": {
                 "destination": outcome.destination,
                 "score": outcome.score,
@@ -458,6 +541,7 @@ class IncidentService:
             },
             "chain": _chain_links_to_dicts(getattr(outcome, "chain", None)),
         }
+
 
         # Route through _stage_scanner, then the full pipeline.
         #
@@ -737,21 +821,42 @@ class IncidentService:
         from pathlib import Path
 
         # Local-path scan: reuse the working tree the caller
-        # already handed us.
+        # already handed us. Read .git/config to learn the GitHub
+        # origin so downstream enrichment can target the right
+        # repo — the directory basename ("requests-buggy") is not
+        # a GitHub identity.
         scan_path = context.get("scan_repo_path")
         if scan_path:
             resolved = Path(scan_path)
             if resolved.is_dir():
-                logger.info(
-                    f"📦 Provisioner: using local scan path "
-                    f"{resolved} (no clone)"
-                )
-                return {"repo_workdir": str(resolved)}
+                origin = _read_git_origin(str(resolved))
+                if origin:
+                    logger.info(
+                        f"📦 Provisioner: using local scan path "
+                        f"{resolved} (no clone; origin={origin})"
+                    )
+                else:
+                    logger.info(
+                        f"📦 Provisioner: using local scan path "
+                        f"{resolved} (no clone; no GitHub origin in .git/config)"
+                    )
+                return {
+                    "repo_workdir": str(resolved),
+                    "repo_origin": origin,
+                }
 
-        # Remote repo: clone as before.
+        # Remote repo: clone as before. The clone succeeding IS the
+        # verification that the repo exists — if it doesn't, we get
+        # here with no workdir and downstream stages degrade
+        # honestly. repo_origin is the owner/repo we cloned.
         from src.agents.provisioner import provision_clone
 
-        return await provision_clone(context)
+        result = await provision_clone(context)
+        if result.get("repo_workdir"):
+            service = context.get("service") or {}
+            origin = service.get("repo_name")
+            result["repo_origin"] = origin
+        return result
     
     # ------------------------------------------------------------------
     # Stage 2.5 — Prefetch (dependencies for probe + verifier)
@@ -946,63 +1051,16 @@ class IncidentService:
             "affected_services": json.dumps(blast_radius.get("affected", [])),
         }
 
-        github_context = None
-        related_prs = None
-
-        if service.get("repo_name"):
-            try:
-                github = get_github_service()
-
-                github_context = {
-                    "recent_prs": await github.get_recent_prs(service["repo_name"])
-                }
-
-                if stack_analysis and stack_analysis.get("file_path"):
-                    logger.info(
-                        f"🔍 Getting blame for: {stack_analysis['file_path']}:"
-                        f"{stack_analysis.get('line_number', 'unknown')}"
-                    )
-                    blame_info = await github.get_blame_with_pr(
-                        service["repo_name"],
-                        stack_analysis["file_path"],
-                        stack_analysis.get("line_number", 1),
-                    )
-                    if blame_info:
-                        github_context["blame"] = blame_info
-                        logger.info(
-                            f"✅ Blame found: {blame_info.get('author')} - "
-                            f"{blame_info.get('message')[:50]}"
-                        )
-                    else:
-                        logger.warning("⚠️ No blame info found for this file/line")
-            except Exception as e:
-                logger.error(f"GitHub integration error: {e}")
-
-        if stack_analysis and stack_analysis.get("file_path") and service.get("repo_name"):
-            try:
-                github = get_github_service()
-                related_prs = await github.get_related_prs(
-                    repo_name=service["repo_name"],
-                    file_path=stack_analysis["file_path"],
-                    line_number=stack_analysis.get("line_number", 1),
-                    limit=5,
-                )
-                if related_prs:
-                    logger.info(
-                        f"🔗 Found {len(related_prs)} related PRs for "
-                        f"{stack_analysis['file_path']}"
-                    )
-                else:
-                    related_prs = None
-            except Exception as e:
-                logger.error(f"Related PRs error: {e}")
-
+        # GitHub enrichment (blame, recent PRs, related PRs) has
+        # moved to Fix B — it runs at report time, only for
+        # findings a human will actually read (Verified,
+        # Verification Failed, Needs Review). Refused and
+        # already-fixed findings don't pay the cost. See
+        # enrich_finding_for_report() below.
         result: dict = {
             "analysis": analysis,
             "rag_used": rag_used,
             "incident_data": incident_data,
-            "github_context": github_context,
-            "related_prs": related_prs,
         }
         
         if settings.INVESTIGATOR_MODE == "agent":
@@ -1030,8 +1088,8 @@ class IncidentService:
                 repo=service.get("repo_name") or service_name,
                 stack_trace=context.get("stack_trace"),
                 stack_analysis=stack_analysis,
-                github_context=github_context,
-                related_prs=related_prs,
+                github_context=None,
+                related_prs=None,
                 rag_context=rag_context,
                 fix_outcomes=fix_outcomes_context,
                 blast_radius=blast_radius,
@@ -1608,11 +1666,12 @@ class IncidentService:
                     f"{code_context.get('line_number')}"
                 )
 
-        if code_context is None and service.get("repo_name"):
+        repo_origin = context.get("repo_origin")
+        if code_context is None and repo_origin:
             try:
                 github = get_github_service()
                 code_context = await github.get_file_content(
-                    repo_name=service["repo_name"],
+                    repo_name=repo_origin,
                     file_path=stack_analysis["file_path"],
                     line_number=target_line,
                     context_lines=30,
@@ -1713,13 +1772,25 @@ class IncidentService:
                 f"diff bytes={len(diff)}"
             )
                         
+            # Prefer repo_origin (correct GitHub identity) over
+            # service["repo_name"] (which is a directory basename
+            # for local-path scans). When the Verifier has a
+            # context["repo_workdir"] it reuses the clone regardless
+            # of repo_name; the fallback clone path needs a real
+            # owner/repo.
+            verify_repo = (
+                context.get("repo_origin")
+                or service.get("repo_name")
+                or context["service_name"]
+            )
             result = await verifier.verify(
-                repo_name=service.get("repo_name") or context["service_name"],
+                repo_name=verify_repo,
                 commit_sha=context.get("commit_sha", "HEAD"),
                 diff=diff,
                 language=language,
                 context=context,
             )
+
         except Exception as e:
             logger.error(f"Verifier error: {e}")
             return {"verification": {
@@ -2115,7 +2186,174 @@ class IncidentService:
             response["unverified_finding"] = unverified
 
         return response
+    
+    
+    async def enrich_finding_for_report(
+        self,
+        incident: dict,
+        repo_origin: str | None,
+    ) -> dict:
+        """
+        Fetch GitHub enrichment (blame, recent PRs, related PRs)
+        for a finding, and persist it to the incident's
+        extra_metadata.github.
 
+        Called at report time — after the pipeline completes —
+        not during the pipeline. Refused findings and
+        already-fixed findings don't call this. The caller
+        decides which findings to enrich based on status:
+
+          - status='active' with verification.reason='probe_passed'
+            → Verified → enrich
+          - status='active' with verification.reason='probe_failed'
+            → Verification Failed → enrich
+          - status='active' with unverified_finding present
+            → Needs Review → enrich
+          - status='active' with no verification and no
+            unverified_finding → Refused → skip
+          - status='already_fixed' → skip (provenance is
+            the trust anchor; no external data needed)
+
+        Returns the enrichment dict (may be empty), also written
+        to the incident row. Safe to call multiple times —
+        record_github_context merges.
+
+        If repo_origin is None (local path with no .git/config,
+        or a non-GitHub origin), returns {} without calling
+        GitHub. That's the honest degradation.
+        """
+        if not repo_origin:
+            logger.debug(
+                f"enrich_finding_for_report: no repo_origin for "
+                f"{incident.get('incident_id')}; skipping"
+            )
+            return {}
+
+        file_path = incident.get("file_path")
+        line_number = incident.get("line_number") or 1
+        incident_id = incident.get("incident_id")
+        if not incident_id:
+            return {}
+
+        try:
+            github = get_github_service()
+        except Exception as e:
+            logger.warning(f"enrich_finding_for_report: GitHub unavailable: {e}")
+            return {}
+
+        enrichment: dict = {}
+
+        try:
+            enrichment["recent_prs"] = await github.get_recent_prs(repo_origin)
+        except Exception as e:
+            logger.warning(f"enrich_finding_for_report: get_recent_prs failed: {e}")
+
+        if file_path:
+            try:
+                logger.info(
+                    f"🔍 Enriching {incident_id}: blame for "
+                    f"{file_path}:{line_number} (repo={repo_origin})"
+                )
+                blame = await github.get_blame_with_pr(
+                    repo_origin, file_path, line_number,
+                )
+                if blame:
+                    enrichment["blame"] = blame
+                    logger.info(
+                        f"✅ Blame found for {incident_id}: "
+                        f"{blame.get('author')} - "
+                        f"{(blame.get('message') or '')[:50]}"
+                    )
+            except Exception as e:
+                logger.warning(f"enrich_finding_for_report: get_blame_with_pr failed: {e}")
+
+            try:
+                related = await github.get_related_prs(
+                    repo_name=repo_origin,
+                    file_path=file_path,
+                    line_number=line_number,
+                    limit=5,
+                )
+                if related:
+                    enrichment["related_prs"] = related
+                    logger.info(
+                        f"🔗 Enriching {incident_id}: found "
+                        f"{len(related)} related PRs"
+                    )
+            except Exception as e:
+                logger.warning(f"enrich_finding_for_report: get_related_prs failed: {e}")
+
+        if enrichment:
+            try:
+                if enrichment.get("recent_prs"):
+                    await self.record_github_context(
+                        incident_id, {"recent_prs": enrichment["recent_prs"]}
+                    )
+                if enrichment.get("blame"):
+                    await self.record_github_context(
+                        incident_id, {"blame": enrichment["blame"]}
+                    )
+                if enrichment.get("related_prs"):
+                    await self.record_related_prs(
+                        incident_id, enrichment["related_prs"]
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"enrich_finding_for_report: persist failed for "
+                    f"{incident_id}: {e}"
+                )
+
+        return enrichment
+
+    def _should_enrich(self, incident: dict) -> bool:
+        """
+        True when a finding is in one of the states that warrants
+        GitHub enrichment at report time. All four report buckets
+        qualify:
+
+          Verified            — verified.passed && reason=='probe_passed'
+          Verification Failed — verified.reason=='probe_failed'
+          Needs Review        — unverified_finding present
+          Already Fixed       — status=='already_fixed'
+
+        Already Fixed is enriched because a reviewer looking at a
+        prior fix wants the same context as one looking at a new
+        fix: who authored the line, what PR touched it, what's
+        nearby. The provenance record shows what AEGIS did; the
+        enrichment shows what humans did. Both are useful.
+
+        Refused findings are the only bucket that gets no
+        enrichment — a reviewer reads the Investigator's reasoning,
+        not git history.
+
+        IMPORTANT: verification and unverified_finding live under
+        extra_metadata, not at the top level of the incident dict.
+        get_incident returns the raw row; the CLI report and this
+        helper both read from extra_metadata. Reading from the
+        top level silently returns None and every finding looks
+        refused.
+        """
+        if incident.get("status") == "already_fixed":
+            return True
+
+        meta = incident.get("extra_metadata") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except (TypeError, json.JSONDecodeError):
+                meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+
+        verification = meta.get("verification") or {}
+        if verification.get("passed") and verification.get("reason") == "probe_passed":
+            return True
+        if verification.get("reason") == "probe_failed":
+            return True
+        if meta.get("unverified_finding"):
+            return True
+
+        return False
 
     # ------------------------------------------------------------------
     # Persistence: INSERT once, then UPDATE per stage
@@ -2588,58 +2826,83 @@ class IncidentService:
             return {"status": "created", "name": service["name"]}
     
     
-    async def resolve_scan_service(self, owner_repo: str) -> str:
+    async def resolve_scan_service(
+        self,
+        owner_repo: str,
+        *,
+        repo_name: str | None = None,
+    ) -> str:
         """Return the service name to use for a scan of `owner_repo`.
 
-        Resolution order:
+        Args:
+            owner_repo: service identifier. Used as the service
+                        `name`. For local-path scans this is the
+                        directory basename (e.g. "requests-buggy").
+            repo_name:  the GitHub identity, when known. Used as
+                        `services.repo_name`. For local-path scans
+                        with a .git/config, this is "psf/requests"
+                        (the true origin). For remote scans it's the
+                        same as owner_repo. When None (local path
+                        with no .git/config), repo_name stays NULL
+                        so downstream enrichment knows there's
+                        nothing to enrich against.
 
-          1. If one or more services already have this repo_name,
-             reuse an existing service name. Never create a new
-             service for a repo that already has one. When more than
-             one service shares the repo (a monorepo or an alias),
-             pick the lexicographically smallest name — deterministic,
-             stable across runs and query plans, and overridable by
-             passing service_name explicitly to scan_repo.
+        Previously, this method set repo_name = owner_repo
+        unconditionally. For local-path scans that stored
+        "requests-buggy" as the repo_name, which is a directory
+        basename, not a GitHub identifier. The enrichment path
+        then tried to look up "requests-buggy" on GitHub and
+        got 404 every time.
 
-          2. Otherwise, insert a service named `owner_repo`, tagged
-             source='scan'. The INSERT uses ON CONFLICT (name) DO
-             NOTHING — never DO UPDATE — so an existing manual
-             service with that name keeps its on-call, dependencies,
-             and configuration.
+        The fix: accept repo_name separately. Callers that know
+        the true GitHub origin (via .git/config or the clone URL)
+        pass it; callers that don't pass None, and enrichment
+        is skipped honestly.
 
-        The service name doubles as the repo identifier: services.name
-        is UNIQUE, and repo_name is set to the same value. That's
-        what makes this safe for the Provisioner (which requires
-        owner/repo, not a bare basename) and for the Curator (which
-        scopes few-shot retrieval by service_name — owner/repo keeps
-        tenants separate).
-
-        Returns the service name to use.
+        Resolution:
+          1. If a service already maps to this repo_name, reuse it.
+          2. Otherwise, insert with the provided repo_name.
         """
+        effective_repo_name = repo_name if repo_name else None
+
         async with get_db_session() as session:
-            result = await session.execute(
-                text("""
-                    SELECT name FROM services
-                    WHERE repo_name = :repo
-                    ORDER BY name ASC
-                """),
-                {"repo": owner_repo},
-            )
+            # Look up by repo_name when we have one. When we don't,
+            # look up by name (so re-scanning the same local path
+            # reuses the same service).
+            if effective_repo_name:
+                result = await session.execute(
+                    text("""
+                        SELECT name FROM services
+                        WHERE repo_name = :repo
+                        ORDER BY name ASC
+                    """),
+                    {"repo": effective_repo_name},
+                )
+            else:
+                result = await session.execute(
+                    text("""
+                        SELECT name FROM services
+                        WHERE name = :name
+                        ORDER BY name ASC
+                    """),
+                    {"name": owner_repo},
+                )
+
             rows = result.fetchall()
             if rows:
-                # At least one service already maps to this repo.
-                # Reuse it — do not create a duplicate identity.
                 return rows[0][0]
 
             # No service maps to this repo. Create one scoped to
             # scans, so future scans of the same repo reuse it.
+            # ON CONFLICT DO NOTHING keeps an existing manual service
+            # with the same name unchanged.
             await session.execute(
                 text("""
                     INSERT INTO services (name, repo_name, source)
                     VALUES (:name, :repo, 'scan')
                     ON CONFLICT (name) DO NOTHING
                 """),
-                {"name": owner_repo, "repo": owner_repo},
+                {"name": owner_repo, "repo": effective_repo_name},
             )
             await session.commit()
             return owner_repo
