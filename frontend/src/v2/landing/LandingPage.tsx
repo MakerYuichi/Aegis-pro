@@ -1,6 +1,8 @@
 import { useRef } from 'react';
 import { Hero } from './Hero';
+import { WhatItIs } from './WhatItIs';
 import { Cta } from './Cta';
+import { EverythingElse } from './EverythingElse';
 import { V2DemoSection } from '../demo/V2DemoSection';
 import { usePlayback } from '../demo/usePlayback';
 import type { V2Event } from '../types';
@@ -42,7 +44,13 @@ export default function LandingPage() {
       className="bg-slate-950 text-slate-100"
       style={{ scrollBehavior: 'smooth' }}
     >
+      {/* Section 1 — Hero */}
       <Hero onWatchClick={handleWatchClick} />
+
+      {/* Section 2 — What It Is */}
+      <WhatItIs />
+
+      {/* Section 3 — The Demo */}
       <V2DemoSection
         ref={demoRef}
         currentIndex={currentIndex}
@@ -56,6 +64,11 @@ export default function LandingPage() {
         onApproveFix={approveFix}
         onRejectFix={rejectFix}
       />
+
+      {/* Section 4 — Everything Else */}
+      <EverythingElse />
+
+      {/* Section 5 — CTA */}
       <Cta onWatchAgain={handleWatchAgain} />
     </div>
   );

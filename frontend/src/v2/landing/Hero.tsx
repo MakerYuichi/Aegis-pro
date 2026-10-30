@@ -4,41 +4,44 @@ interface HeroProps {
 
 export function Hero({ onWatchClick }: HeroProps) {
   return (
-    <section
-      className="min-h-screen bg-slate-950 flex flex-col items-center justify-center px-4 text-center"
-      style={{ minHeight: '100vh' }}
-    >
+    <section className="min-h-screen bg-slate-950 flex flex-col items-center justify-center px-4">
       {/* Wordmark */}
-      <p className="text-sm tracking-widest text-slate-500 uppercase mb-8">
+      <p className="text-sm tracking-[0.3em] uppercase text-slate-500 text-center">
         AEGIS PRO
       </p>
 
-      <h1
-        className="font-bold tracking-tight text-white"
-        style={{ fontSize: 'clamp(3rem, 8vw, 6rem)', lineHeight: 1.05 }}
-      >
+      {/* Divider */}
+      <div className="w-12 h-px bg-slate-700 mx-auto mt-4 mb-16" />
+
+      {/* Headline */}
+      <h1 className="text-7xl md:text-8xl font-bold tracking-tight text-slate-100 text-center">
         Watch the bug get found.
       </h1>
 
-      <p className="text-xl md:text-2xl text-slate-400 mt-6 max-w-3xl leading-relaxed">
-        An AI that investigates your code, live. Every arrow, every callout, every fix — visible.
+      {/* Body paragraph */}
+      <p className="text-xl text-slate-400 max-w-2xl text-center leading-relaxed mx-auto mt-8">
+        An AI that reads your code alongside you. When it finds a bug, you watch it work — files
+        open, arrows point, code changes, tests run. You see every move. You approve the ones that
+        matter.
       </p>
 
+      {/* Category statement */}
+      <p className="text-xl text-slate-300 font-medium text-center mt-6">
+        It&rsquo;s not a chatbot. It&rsquo;s a colleague.
+      </p>
+
+      {/* Primary button */}
       <button
         onClick={onWatchClick}
-        className="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-8 py-4 rounded-lg text-lg mt-10 cursor-pointer transition-colors duration-200 shadow-xl shadow-blue-500/20"
+        className="mt-12 bg-blue-600 hover:bg-blue-500 text-white font-semibold px-10 py-5 rounded-xl text-lg shadow-2xl shadow-blue-500/20 cursor-pointer transition-colors duration-200"
       >
         ▶ Watch it work
       </button>
 
-      <p className="text-sm text-slate-500 mt-4">
-        v2.0 — The Ambient Agent. 14 seconds.
+      {/* Version caption */}
+      <p className="text-sm text-slate-500 text-center mt-6">
+        v2.0 · The Ambient Agent · 14 seconds
       </p>
-
-      {/* Scroll hint */}
-      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 text-slate-600 text-sm animate-bounce select-none">
-        ↓
-      </div>
     </section>
   );
 }
