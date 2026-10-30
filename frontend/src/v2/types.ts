@@ -5,6 +5,8 @@ export type ChainLink = {
   reason: string;
 };
 
+export type PlaybackState = 'idle' | 'playing' | 'awaiting-approval' | 'applying' | 'verified' | 'rejected' | 'paused';
+
 export type V2Event =
   | { kind: "investigation.started"; symbol: string; file: string; line: number }
   | { kind: "file.opened"; file: string; line: number }

@@ -1,7 +1,10 @@
+import type { PlaybackState } from '../types';
+
 interface PlaybackControlsProps {
   isPlaying: boolean;
   currentIndex: number;
   total: number;
+  playbackState: PlaybackState;
   onPlay: () => void;
   onPause: () => void;
   onRestart: () => void;
@@ -13,6 +16,7 @@ export function PlaybackControls({
   isPlaying,
   currentIndex,
   total,
+  playbackState,
   onPlay,
   onPause,
   onRestart,
@@ -21,6 +25,9 @@ export function PlaybackControls({
 }: PlaybackControlsProps) {
   const progress = total > 0 ? ((currentIndex + 1) / total) * 100 : 0;
   const eventLabel = currentIndex === -1 ? '—' : `${currentIndex + 1} of ${total}`;
+
+  const stepsDisabled =
+    playbackState === 'awaiting-approval' || playbackState === 'applying';
 
   return (
     <div className="bg-slate-800 rounded-lg px-4 py-2 flex items-center gap-3 flex-shrink-0">
@@ -37,8 +44,8 @@ export function PlaybackControls({
       <button
         onClick={onStepBackward}
         title="Step Back [←]"
-        className="hover:bg-slate-700 rounded p-2 text-slate-300 transition-colors text-sm"
-        disabled={currentIndex <= -1}
+        className="hover:bg-slate-700 rounded p-2 text-slate-300 transition-colors text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+        disabled={currentIndex <= -1 || stepsDisabled}
       >
         ◀ Back
       </button>
@@ -56,8 +63,8 @@ export function PlaybackControls({
       <button
         onClick={onStepForward}
         title="Step Forward [→]"
-        className="hover:bg-slate-700 rounded p-2 text-slate-300 transition-colors text-sm"
-        disabled={currentIndex >= total - 1}
+        className="hover:bg-slate-700 rounded p-2 text-slate-300 transition-colors text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+        disabled={currentIndex >= total - 1 || stepsDisabled}
       >
         Forward ▶
       </button>
@@ -69,6 +76,13 @@ export function PlaybackControls({
       <span className="text-slate-400 text-xs font-mono whitespace-nowrap">
         Event {eventLabel}
       </span>
+
+      {/* Awaiting approval badge */}
+      {playbackState === 'awaiting-approval' && (
+        <span className="px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/50 text-amber-300 text-xs font-medium whitespace-nowrap">
+          Waiting for approval...
+        </span>
+      )}
 
       {/* Progress bar */}
       <div className="flex-1 bg-slate-700 rounded-full h-1.5 overflow-hidden">

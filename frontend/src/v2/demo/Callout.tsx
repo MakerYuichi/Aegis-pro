@@ -1,8 +1,11 @@
-import type { V2Event } from '../types';
+import type { V2Event, PlaybackState } from '../types';
 
 interface CalloutProps {
   events: V2Event[];
   currentIndex: number;
+  onApproveFix?: () => void;
+  onRejectFix?: () => void;
+  playbackState?: PlaybackState;
 }
 
 interface CalloutConfig {
@@ -66,7 +69,7 @@ function getCalloutConfig(event: V2Event): CalloutConfig | null {
   }
 }
 
-export function Callout({ events, currentIndex }: CalloutProps) {
+export function Callout({ events, currentIndex, onApproveFix, onRejectFix, playbackState }: CalloutProps) {
   const calloutKinds = new Set([
     'hypothesis.formed',
     'symbol.located',
@@ -89,25 +92,53 @@ export function Callout({ events, currentIndex }: CalloutProps) {
       {visibleCalloutEvents.map((event, idx) => {
         const config = getCalloutConfig(event);
         if (!config) return null;
+
+        const isLast = idx === visibleCalloutEvents.length - 1;
+        const dimmed = !isLast;
+
         return (
           <div
             key={`${event.kind}-${idx}`}
-            className={`rounded-md p-3 text-xs pointer-events-auto ${config.colorClass} ${config.borderClass}`}
+            className={`rounded-md p-3 text-xs pointer-events-auto ${config.colorClass} ${config.borderClass} transition-opacity duration-300`}
             style={{
               animation: 'aegis-callout-in 0.3s ease-out both',
+              opacity: dimmed ? 0.4 : 1,
             }}
           >
             <p className={`font-semibold mb-1 ${config.textClass}`}>{config.title}</p>
             <p className="text-slate-300 leading-relaxed whitespace-pre-wrap break-words">
               {config.body}
             </p>
-            {config.showApplyFix && (
-              <button
-                disabled
-                className="mt-2 px-3 py-1 bg-green-600 text-white rounded text-xs opacity-50 pointer-events-none cursor-not-allowed"
-              >
-                Apply fix
-              </button>
+
+            {/* Interactive buttons for fix.proposed */}
+            {config.showApplyFix && isLast && (
+              <div className="mt-2">
+                {playbackState === 'applying' && (
+                  <span className="text-slate-400 text-xs italic">Applying...</span>
+                )}
+                {(playbackState === 'verified' || playbackState === 'playing') && (
+                  <span className="text-green-400 text-xs font-semibold">✓ Applied. Verified.</span>
+                )}
+                {playbackState === 'rejected' && (
+                  <span className="text-slate-400 text-xs">Dismissed.</span>
+                )}
+                {playbackState === 'awaiting-approval' && (
+                  <div className="flex gap-2 mt-1">
+                    <button
+                      onClick={onApproveFix}
+                      className="px-3 py-1 bg-green-600 hover:bg-green-500 text-white rounded text-xs font-semibold transition-colors cursor-pointer"
+                    >
+                      Apply fix
+                    </button>
+                    <button
+                      onClick={onRejectFix}
+                      className="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-xs transition-colors cursor-pointer"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         );

@@ -1,5 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { editor } from 'monaco-editor';
+import type { PlaybackState, V2Event } from '../types';
 
 // Configure Monaco workers via CDN to avoid Vite bundling issues
 declare global {
@@ -24,7 +25,6 @@ if (typeof window !== 'undefined') {
 
 // Realistic approximation of requests/status_codes.py around line 116.
 // The bug line (__doc__ concatenation) is at line 116.
-// Backticks in the docstring are escaped so they don't terminate the template literal.
 const PYTHON_SOURCE = [
   '# requests/status_codes.py',
   '# -*- coding: utf-8 -*-',
@@ -124,9 +124,16 @@ const PYTHON_SOURCE = [
   'codes = _build_lookup_dict()',
 ].join('\n');
 
+const FIXED_LINE = "    __doc__ = ((__doc__ or '') + '\\n' + _codes_str)  # line 116 — fixed";
+
 interface EditorCanvasProps {
   showGutterArrow: boolean;
   highlightLine: number;
+  events: V2Event[];
+  currentIndex: number;
+  playbackState: PlaybackState;
+  onApproveFix: () => void;
+  onRejectFix: () => void;
 }
 
 // CSS for gutter arrow + line highlight decorations
@@ -143,20 +150,70 @@ function ensureDecorationStyle(): void {
       font-size: 12px;
       line-height: 1;
     }
+    .aegis-gutter-arrow-green::before {
+      content: '\\2713';
+      color: #22c55e;
+      font-size: 12px;
+      font-weight: bold;
+      line-height: 1;
+    }
     .aegis-line-highlight {
       background: rgba(251, 191, 36, 0.12);
       outline: 1px solid rgba(251, 191, 36, 0.5);
+    }
+    .aegis-line-highlight-blue {
+      background: rgba(59, 130, 246, 0.15);
+      outline: 1px solid rgba(59, 130, 246, 0.5);
+    }
+    .aegis-line-flash-yellow {
+      background: rgba(251, 191, 36, 0.35);
+      outline: 1px solid rgba(251, 191, 36, 0.8);
+    }
+    @keyframes aegis-editor-fadein {
+      from { opacity: 0; }
+      to   { opacity: 1; }
+    }
+    @keyframes aegis-progress-indeterminate {
+      0%   { left: -40%; width: 40%; }
+      100% { left: 100%; width: 40%; }
+    }
+    @keyframes aegis-diff-fadein {
+      from { opacity: 0; transform: translateY(-4px); }
+      to   { opacity: 1; transform: translateY(0); }
     }
   `;
   document.head.appendChild(style);
 }
 
-export function EditorCanvas({ showGutterArrow, highlightLine }: EditorCanvasProps) {
+export function EditorCanvas({
+  showGutterArrow,
+  highlightLine,
+  events,
+  currentIndex,
+  playbackState,
+  onApproveFix: _onApproveFix,
+  onRejectFix: _onRejectFix,
+}: EditorCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const editorRef = useRef<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const decorationsRef = useRef<string[]>([]);
+
+  // Animation state
+  const [editorVisible, setEditorVisible] = useState(false);
+  const [showProgressBar, setShowProgressBar] = useState(false);
+  const [progressBarRed, setProgressBarRed] = useState(false);
+  const [showDiffOverlay, setShowDiffOverlay] = useState(false);
+  const [showVerifiedTitle, setShowVerifiedTitle] = useState(false);
+  const [revealedFixChars, setRevealedFixChars] = useState(0);
+  const [gutterState, setGutterState] = useState<'none' | 'amber' | 'green'>('none');
+  const [lineHighlightState, setLineHighlightState] = useState<'none' | 'flash' | 'amber' | 'blue' | 'green'>('none');
+
+  // Derive which events have fired
+  const firedKinds = new Set(
+    events.slice(0, currentIndex + 1).map((e) => e.kind),
+  );
 
   // Create the editor on mount
   useEffect(() => {
@@ -185,10 +242,9 @@ export function EditorCanvas({ showGutterArrow, highlightLine }: EditorCanvasPro
         },
       });
 
-      // Scroll to the bug line
+      // Scroll to the bug line initially
       editorRef.current.revealLineInCenter(highlightLine);
 
-      // Apply permanent highlight on the bug line
       const initialDecorations: editor.IModelDeltaDecoration[] = [
         {
           range: new monaco.Range(highlightLine, 1, highlightLine, 1),
@@ -198,10 +254,7 @@ export function EditorCanvas({ showGutterArrow, highlightLine }: EditorCanvasPro
           },
         },
       ];
-      decorationsRef.current = editorRef.current.deltaDecorations(
-        [],
-        initialDecorations,
-      );
+      decorationsRef.current = editorRef.current.deltaDecorations([], initialDecorations);
     });
 
     return () => {
@@ -209,45 +262,230 @@ export function EditorCanvas({ showGutterArrow, highlightLine }: EditorCanvasPro
       editorRef.current?.dispose();
       editorRef.current = null;
     };
-  }, [highlightLine]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Update gutter arrow decoration when showGutterArrow changes
+  // Per-event visual activity
+  useEffect(() => {
+    if (currentIndex < 0) {
+      // Reset all animation state on restart
+      setEditorVisible(false);
+      setShowProgressBar(false);
+      setProgressBarRed(false);
+      setShowDiffOverlay(false);
+      setShowVerifiedTitle(false);
+      setRevealedFixChars(0);
+      setGutterState('none');
+      setLineHighlightState('none');
+      return;
+    }
+
+    const event = events[currentIndex];
+    if (!event) return;
+
+    if (event.kind === 'investigation.started') {
+      setEditorVisible(true);
+    }
+
+    if (event.kind === 'file.opened') {
+      // Scroll to line 116 and flash yellow then settle to blue
+      if (editorRef.current) {
+        editorRef.current.revealLineInCenter(highlightLine);
+      }
+      setLineHighlightState('flash');
+      const t = setTimeout(() => setLineHighlightState('blue'), 600);
+      return () => clearTimeout(t);
+    }
+
+    if (event.kind === 'symbol.located') {
+      setGutterState('amber');
+      setLineHighlightState('amber');
+    }
+
+    if (event.kind === 'probe.running') {
+      setShowProgressBar(true);
+      setProgressBarRed(false);
+    }
+
+    if (event.kind === 'probe.reproduced') {
+      setProgressBarRed(true);
+      const t = setTimeout(() => setShowProgressBar(false), 800);
+      return () => clearTimeout(t);
+    }
+
+    if (event.kind === 'bug.confirmed') {
+      setGutterState('amber');
+    }
+
+    if (event.kind === 'fix.proposed') {
+      setShowDiffOverlay(true);
+    }
+
+    if (event.kind === 'fix.verified') {
+      setShowDiffOverlay(false);
+      setGutterState('green');
+      setLineHighlightState('green');
+    }
+
+    if (event.kind === 'investigation.complete') {
+      setShowVerifiedTitle(true);
+    }
+  // We intentionally depend on currentIndex to re-run per step
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIndex, events, highlightLine]);
+
+  // Character-by-character reveal when applying
+  useEffect(() => {
+    if (playbackState !== 'applying') {
+      if (playbackState === 'idle') setRevealedFixChars(0);
+      return;
+    }
+    setRevealedFixChars(0);
+    const totalChars = FIXED_LINE.length;
+    const interval = 1500 / totalChars;
+    let count = 0;
+    const id = setInterval(() => {
+      count += 1;
+      setRevealedFixChars(count);
+      if (count >= totalChars) clearInterval(id);
+    }, interval);
+    return () => clearInterval(id);
+  }, [playbackState]);
+
+  // Update Monaco decorations based on gutter/highlight state
   useEffect(() => {
     if (!editorRef.current) return;
 
     import('monaco-editor').then((monaco) => {
       if (!editorRef.current) return;
 
-      const newDecorations: editor.IModelDeltaDecoration[] = [
-        {
-          range: new monaco.Range(highlightLine, 1, highlightLine, 1),
-          options: {
-            isWholeLine: true,
-            className: 'aegis-line-highlight',
-          },
-        },
-      ];
+      const decorations: editor.IModelDeltaDecoration[] = [];
 
-      if (showGutterArrow) {
-        newDecorations.push({
+      // Line highlight
+      let lineClass = '';
+      if (lineHighlightState === 'flash' || lineHighlightState === 'amber') {
+        lineClass = 'aegis-line-highlight';
+      } else if (lineHighlightState === 'blue') {
+        lineClass = 'aegis-line-highlight-blue';
+      } else if (lineHighlightState === 'green') {
+        lineClass = 'aegis-line-highlight-blue';
+      }
+
+      if (lineClass) {
+        decorations.push({
           range: new monaco.Range(highlightLine, 1, highlightLine, 1),
-          options: {
-            isWholeLine: false,
-            glyphMarginClassName: 'aegis-gutter-arrow',
-          },
+          options: { isWholeLine: true, className: lineClass },
+        });
+      }
+
+      // Gutter arrow
+      if (gutterState === 'amber' && showGutterArrow) {
+        decorations.push({
+          range: new monaco.Range(highlightLine, 1, highlightLine, 1),
+          options: { isWholeLine: false, glyphMarginClassName: 'aegis-gutter-arrow' },
+        });
+      } else if (gutterState === 'green') {
+        decorations.push({
+          range: new monaco.Range(highlightLine, 1, highlightLine, 1),
+          options: { isWholeLine: false, glyphMarginClassName: 'aegis-gutter-arrow-green' },
+        });
+      } else if (showGutterArrow) {
+        decorations.push({
+          range: new monaco.Range(highlightLine, 1, highlightLine, 1),
+          options: { isWholeLine: false, glyphMarginClassName: 'aegis-gutter-arrow' },
         });
       }
 
       decorationsRef.current = editorRef.current.deltaDecorations(
         decorationsRef.current,
-        newDecorations,
+        decorations,
       );
     });
-  }, [showGutterArrow, highlightLine]);
+  }, [showGutterArrow, highlightLine, gutterState, lineHighlightState]);
+
+  const showProbeBar = showProgressBar && firedKinds.has('probe.running');
 
   return (
-    <div className="relative w-full h-full" style={{ minHeight: 0 }}>
-      <div ref={containerRef} className="w-full h-full" />
+    <div
+      className="relative w-full h-full flex flex-col"
+      style={{ minHeight: 0 }}
+    >
+      {/* Editor title bar */}
+      <div className="flex items-center justify-between bg-slate-800 border-b border-slate-700 px-3 py-1.5 text-xs text-slate-400 flex-shrink-0">
+        <span className="font-mono">requests/status_codes.py</span>
+        {showVerifiedTitle && (
+          <span className="text-green-400 font-semibold flex items-center gap-1">
+            <span>✓</span> Verified
+          </span>
+        )}
+      </div>
+
+      {/* Thin progress bar at top of editor */}
+      {showProbeBar && (
+        <div className="relative h-0.5 w-full overflow-hidden flex-shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }}>
+          <div
+            className="absolute h-full"
+            style={{
+              background: progressBarRed ? '#ef4444' : '#3b82f6',
+              animation: progressBarRed ? 'none' : 'aegis-progress-indeterminate 1s linear infinite',
+              width: progressBarRed ? '100%' : '40%',
+              transition: progressBarRed ? 'background 0.2s' : undefined,
+            }}
+          />
+        </div>
+      )}
+
+      {/* Monaco editor wrapper with fade-in */}
+      <div
+        className="relative flex-1"
+        style={{
+          minHeight: 0,
+          opacity: editorVisible ? 1 : 0,
+          transition: 'opacity 400ms ease-out',
+        }}
+      >
+        <div ref={containerRef} className="w-full h-full" />
+
+        {/* Diff overlay — shown when fix.proposed is current and applying/awaiting */}
+        {showDiffOverlay && (
+          <div
+            className="absolute left-0 right-0 pointer-events-none"
+            style={{
+              top: '60%',
+              zIndex: 20,
+              animation: 'aegis-diff-fadein 0.3s ease-out both',
+            }}
+          >
+            <div className="mx-4 rounded border border-slate-600 bg-slate-950/95 font-mono text-xs overflow-hidden">
+              <div className="px-3 py-1 text-slate-500 text-xs border-b border-slate-700 bg-slate-900/80">
+                Proposed diff · line 116
+              </div>
+              {/* Removed line */}
+              <div className="px-3 py-1.5 bg-red-950/60 text-red-300 flex items-start gap-2">
+                <span className="select-none text-red-500 w-3">-</span>
+                <span className="whitespace-pre-wrap break-all">
+                  {"__doc__ = (__doc__ + '\\n' + _codes_str)"}
+                </span>
+              </div>
+              {/* Added line — with char-by-char reveal during applying */}
+              <div className="px-3 py-1.5 bg-green-950/60 text-green-300 flex items-start gap-2">
+                <span className="select-none text-green-500 w-3">+</span>
+                <span className="whitespace-pre-wrap break-all">
+                  {playbackState === 'applying'
+                    ? FIXED_LINE.slice(0, revealedFixChars)
+                    : playbackState === 'awaiting-approval'
+                    ? ''
+                    : FIXED_LINE}
+                </span>
+                {playbackState === 'applying' && revealedFixChars < FIXED_LINE.length && (
+                  <span className="inline-block w-0.5 h-3.5 bg-green-400 animate-pulse ml-0.5" />
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
     </div>
   );
 }
