@@ -19,6 +19,7 @@ import { SessionReplayPage } from './pages/SessionReplayPage';
 import { AdminUsersPage } from './pages/AdminUsersPage';
 import { AdminAuditLogPage } from './pages/AdminAuditLogPage';
 import { OnboardingPage } from './pages/OnboardingPage';
+import LandingPage from './v2/landing/LandingPage';
 import { AdminLayout } from './components/AdminLayout';
 import { useIsAdmin } from './hooks/useIsAdmin';
 import type { ReactNode } from 'react';
@@ -136,6 +137,8 @@ function App() {
           <Route path="/admin/demo-sessions/:id"  element={<RequireAdmin isAuthenticated={isAuthenticated} error={error}><SessionReplayPage /></RequireAdmin>} />
           <Route path="/admin/users"              element={<RequireAdmin isAuthenticated={isAuthenticated} error={error}><AdminUsersPage /></RequireAdmin>} />
           <Route path="/admin/audit-log"          element={<RequireAdmin isAuthenticated={isAuthenticated} error={error}><AdminAuditLogPage /></RequireAdmin>} />
+
+          <Route path="/v2" element={<LandingPage />} />
 
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
