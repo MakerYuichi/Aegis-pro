@@ -1,4 +1,4 @@
-import type { V2Event } from '../types';
+import type { V2Event, ChainLink } from '../types';
 
 interface ChainPanelProps {
   currentIndex: number;
@@ -6,95 +6,59 @@ interface ChainPanelProps {
 }
 
 interface ChainBoxProps {
-  file: string;
-  lineNum: number;
-  symbol: string;
-  label?: string;
-  active: boolean;
-  isReal: boolean;
+  link: ChainLink;
 }
 
-function ChainBox({ file, lineNum, symbol, label, active, isReal }: ChainBoxProps) {
+function ChainBox({ link }: ChainBoxProps) {
   return (
-    <div
-      className={`rounded-md border p-3 text-xs transition-all duration-500 ${
-        active && isReal
-          ? 'border-amber-500 bg-amber-500/10 animate-pulse'
-          : 'border-slate-700 bg-slate-800/50 opacity-40'
-      }`}
-    >
+    <div className="rounded-md border border-aegis-amber bg-aegis-amber/10 p-3 text-xs motion-safe:animate-pulse">
       <div className="font-mono text-slate-200 font-semibold truncate">
-        {file}:{lineNum}
+        {link.file}:{link.line}
       </div>
       <div className="text-slate-400 mt-0.5">
-        symbol: <span className="text-amber-400">{symbol}</span>
+        symbol: <span className="text-aegis-amber">{link.symbol}</span>
       </div>
-      {label && (
-        <div className="text-slate-500 mt-0.5 italic">{label}</div>
+      {link.reason && (
+        <div className="text-slate-500 mt-0.5">{link.reason}</div>
       )}
     </div>
   );
 }
 
 export function ChainPanel({ currentIndex, events }: ChainPanelProps) {
-  const chainResolvedIndex = events.findIndex(e => e.kind === 'chain.resolved');
-  const chainActive = chainResolvedIndex >= 0 && currentIndex >= chainResolvedIndex;
+  const chainResolvedIndex = events.findIndex((e) => e.kind === 'chain.resolved');
+  const chainFired = chainResolvedIndex >= 0 && currentIndex >= chainResolvedIndex;
+
+  // Extract the chain from the resolved event
+  let chain: ChainLink[] = [];
+  if (chainFired) {
+    const resolvedEvent = events[chainResolvedIndex];
+    if (resolvedEvent.kind === 'chain.resolved') {
+      chain = resolvedEvent.chain;
+    }
+  }
 
   return (
-    <div
-      className="bg-slate-900 border-l border-slate-800 p-4 flex flex-col h-full overflow-y-auto"
-    >
+    <div className="bg-aegis-surface border-l border-aegis-line p-4 flex flex-col h-full overflow-y-auto">
       {/* Header */}
       <div className="mb-4">
-        <h3 className="text-slate-200 font-semibold text-sm">Invocation Chain</h3>
-        <span className="inline-block mt-1 px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs">
-          Single-file finding
-        </span>
+        <h3 className="text-slate-200 font-semibold text-sm">
+          Invocation chain · single-file finding
+        </h3>
       </div>
 
-      {/* Chain boxes */}
-      <div className="flex flex-col gap-1">
-        <ChainBox
-          file="requests/status_codes.py"
-          lineNum={116}
-          symbol="__doc__"
-          label="crash site"
-          active={chainActive}
-          isReal={true}
-        />
-
-        {/* Connector line */}
-        <div className="border-l-2 border-slate-700 h-4 ml-4" />
-
-        <ChainBox
-          file="requests/models.py"
-          lineNum={128}
-          symbol="PreparedRequest"
-          label="(example)"
-          active={false}
-          isReal={false}
-        />
-
-        {/* Connector line */}
-        <div className="border-l-2 border-slate-700 h-4 ml-4" />
-
-        <ChainBox
-          file="requests/status_codes.py"
-          lineNum={116}
-          symbol="__doc__"
-          label="(example)"
-          active={false}
-          isReal={false}
-        />
-      </div>
-
-      {/* Legend */}
-      <div className="mt-auto pt-4 border-t border-slate-800">
-        <p className="text-slate-600 text-xs leading-relaxed">
-          Boxes 2 and 3 are synthetic examples showing what a multi-file chain would look like.
-          This finding has one real link.
-        </p>
-      </div>
+      {/* Chain content */}
+      {chainFired ? (
+        <div className="flex flex-col gap-2">
+          {chain.map((link, idx) => (
+            <ChainBox key={`${link.file}-${link.line}-${idx}`} link={link} />
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-md border border-dashed border-slate-700 p-3 text-xs text-slate-600 italic">
+          Resolving chain…
+        </div>
+      )}
     </div>
   );
 }

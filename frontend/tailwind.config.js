@@ -8,6 +8,15 @@ export default {
   theme: {
     extend: {
       colors: {
+        // AEGIS PRO v2 semantic tokens
+        aegis: {
+          bg:      '#0A0F1A',
+          surface: '#111827',
+          line:    '#1F2937',
+          amber:   '#D97706',
+          red:     '#DC2626',
+          green:   '#16A34A',
+        },
         // Light mode colors
         light: {
           bg: '#FFFFFF',
@@ -43,7 +52,15 @@ export default {
           low: '#059669',
         },
       },
+      fontFamily: {
+        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+      },
       animation: {
+        'aegis-callout-in':   'aegis-callout-in 0.3s ease-out both',
+        'aegis-narration-in': 'aegis-narration-in 0.3s ease-out forwards',
+        'aegis-diff-fadein':  'aegis-diff-fadein 0.3s ease-out both',
+        'aegis-progress':     'aegis-progress-indeterminate 1s linear infinite',
         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
         'glow': 'glow 2s ease-in-out infinite alternate',
         'slide-in': 'slideIn 0.3s ease-out',

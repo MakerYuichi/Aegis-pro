@@ -1,8 +1,9 @@
-import { useRef } from 'react';
-import { Hero } from './Hero';
-import { WhatItIs } from './WhatItIs';
+import { useEffect, useMemo, useRef } from 'react';
+import { NavBar } from './NavBar';
+import { HeroColumn } from './HeroColumn';
+import { VerifierFlow } from './VerifierFlow';
+import { AboutDemo } from './AboutDemo';
 import { Cta } from './Cta';
-import { EverythingElse } from './EverythingElse';
 import { V2DemoSection } from '../demo/V2DemoSection';
 import { usePlayback } from '../demo/usePlayback';
 import type { V2Event } from '../types';
@@ -12,6 +13,14 @@ const events = demoEvents as V2Event[];
 
 export default function LandingPage() {
   const demoRef = useRef<HTMLElement>(null);
+
+  // Read reducedMotion once; stable across the lifetime of the component
+  const reducedMotion = useMemo(
+    () =>
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true,
+    [],
+  );
 
   const {
     currentIndex,
@@ -24,51 +33,87 @@ export default function LandingPage() {
     stepBackward,
     approveFix,
     rejectFix,
-  } = usePlayback(events);
+  } = usePlayback(events, reducedMotion);
 
-  const handleWatchClick = () => {
-    demoRef.current?.scrollIntoView({ behavior: 'smooth' });
-    // Give the scroll a moment to start, then trigger play
-    setTimeout(() => {
-      play();
-    }, 600);
+  // IntersectionObserver: auto-play when demo enters viewport.
+  // Skipped entirely when reducedMotion is true.
+  useEffect(() => {
+    if (reducedMotion) return; // Never create observer in reduced-motion mode
+    if (!('IntersectionObserver' in window)) return;
+
+    const el = demoRef.current;
+    if (!el) return;
+
+    let fired = false;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (fired) return;
+        const entry = entries[0];
+        if (entry && entry.intersectionRatio >= 0.3) {
+          fired = true;
+          observer.disconnect();
+          play();
+        }
+      },
+      { threshold: 0.3 },
+    );
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [reducedMotion, play]);
+
+  const handlePlayClick = () => {
+    play();
   };
 
   const handleWatchAgain = () => {
-    window.scrollTo({ top: 0, behavior: 'smooth' });
     restart();
+    demoRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
   return (
-    <div
-      className="bg-slate-950 text-slate-100"
-      style={{ scrollBehavior: 'smooth' }}
-    >
-      {/* Section 1 — Hero */}
-      <Hero onWatchClick={handleWatchClick} />
+    <div className="bg-aegis-bg text-slate-100 min-h-screen">
+      {/* Sticky nav */}
+      <NavBar />
 
-      {/* Section 2 — What It Is */}
-      <WhatItIs />
+      {/* Hero row: headline (35%) + demo (65%), min-h-screen */}
+      <div className="min-h-[calc(100vh-3rem)] flex items-center">
+        <div className="max-w-7xl mx-auto w-full px-4 py-8 flex flex-col lg:flex-row gap-8 lg:gap-12 items-start lg:items-center">
+          {/* HeroColumn — 35% */}
+          <HeroColumn
+            reducedMotion={reducedMotion}
+            onPlayClick={handlePlayClick}
+            className="lg:w-[35%] flex-shrink-0"
+          />
 
-      {/* Section 3 — The Demo */}
-      <V2DemoSection
-        ref={demoRef}
-        currentIndex={currentIndex}
-        isPlaying={isPlaying}
-        playbackState={playbackState}
-        onPlay={play}
-        onPause={pause}
-        onRestart={restart}
-        onStepForward={stepForward}
-        onStepBackward={stepBackward}
-        onApproveFix={approveFix}
-        onRejectFix={rejectFix}
-      />
+          {/* V2DemoSection — 65% */}
+          <div className="lg:w-[65%] w-full">
+            <V2DemoSection
+              ref={demoRef}
+              events={events}
+              currentIndex={currentIndex}
+              isPlaying={isPlaying}
+              playbackState={playbackState}
+              reducedMotion={reducedMotion}
+              onPlay={play}
+              onPause={pause}
+              onRestart={restart}
+              onStepForward={stepForward}
+              onStepBackward={stepBackward}
+              onApproveFix={approveFix}
+              onRejectFix={rejectFix}
+            />
+          </div>
+        </div>
+      </div>
 
-      {/* Section 4 — Everything Else */}
-      <EverythingElse />
+      {/* Verifier flow section */}
+      <VerifierFlow />
 
-      {/* Section 5 — CTA */}
+      {/* About this demo */}
+      <AboutDemo />
+
+      {/* CTA */}
       <Cta onWatchAgain={handleWatchAgain} />
     </div>
   );

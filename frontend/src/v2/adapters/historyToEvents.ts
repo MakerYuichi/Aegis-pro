@@ -16,10 +16,10 @@ export function historyToEvents(
       const flags = Array.isArray(e['flags']) ? e['flags'].map(String) : [];
       events.push({ kind: 'probe.running', flags });
       if (e['reproduced']) {
-        events.push({ kind: 'probe.reproduced', error: String(e['error'] ?? 'Unknown error') });
+        events.push({ kind: 'probe.reproduced', error: String(e['error'] ?? 'Unknown error'), line: incident.line_number });
       }
     } else if (e['status'] === 'confirmed') {
-      events.push({ kind: 'bug.confirmed', fix_location: incident.file_path, failure_mode: String(e['failure_mode'] ?? '') });
+      events.push({ kind: 'bug.confirmed', fix_location: incident.file_path, failure_mode: String(e['failure_mode'] ?? ''), line: incident.line_number });
       events.push({ kind: 'investigation.complete', result: 'verified' });
     }
   }

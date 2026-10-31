@@ -1,7 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { V2Event, PlaybackState } from '../types';
+import { EVENT_DURATIONS, DEFAULT_EVENT_DURATION } from '../types';
 
-export function usePlayback(events: V2Event[]): {
+export function usePlayback(
+  events: V2Event[],
+  reducedMotion: boolean,
+): {
   currentIndex: number;
   isPlaying: boolean;
   state: PlaybackState;
@@ -19,6 +23,7 @@ export function usePlayback(events: V2Event[]): {
 
   // Keep refs for use inside callbacks/effects without stale closures
   const playbackStateRef = useRef<PlaybackState>('idle');
+  // eslint-disable-next-line react-hooks/refs
   playbackStateRef.current = playbackState;
 
   const isPlaying = playbackState === 'playing';
@@ -70,10 +75,12 @@ export function usePlayback(events: V2Event[]): {
     setPlaybackState('rejected');
   }, []);
 
-  // Auto-advance timer — runs only when state === 'playing'
+  // Auto-advance timer — runs only when state === 'playing' and NOT reducedMotion
   useEffect(() => {
+    if (reducedMotion) return; // No auto-advance in reduced-motion mode
     if (playbackState !== 'playing') return;
     if (currentIndex >= events.length - 1) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setPlaybackState('paused');
       return;
     }
@@ -83,24 +90,47 @@ export function usePlayback(events: V2Event[]): {
 
     // If the next event to dispatch is fix.proposed, advance to it and stop for approval
     if (nextEvent && nextEvent.kind === 'fix.proposed') {
+      const duration = EVENT_DURATIONS['fix.proposed'] ?? DEFAULT_EVENT_DURATION;
       const id = setTimeout(() => {
         setCurrentIndex(nextIndex);
         setPlaybackState('awaiting-approval');
-      }, 1500);
+      }, duration);
       return () => clearTimeout(id);
     }
 
+    // Look up duration for the current event (the one we just displayed)
+    const currentEvent = events[currentIndex];
+    const duration = currentEvent
+      ? (EVENT_DURATIONS[currentEvent.kind] ?? DEFAULT_EVENT_DURATION)
+      : DEFAULT_EVENT_DURATION;
+
     const id = setTimeout(() => {
       setCurrentIndex((i) => i + 1);
-    }, 1500);
+    }, duration);
     return () => clearTimeout(id);
-  }, [playbackState, currentIndex, events]);
+  }, [reducedMotion, playbackState, currentIndex, events]);
+
+  // Separate effect: detect arrival at fix.proposed and set awaiting-approval.
+  // Runs regardless of reducedMotion so manual-step users always reach the buttons.
+  useEffect(() => {
+    if (currentIndex < 0) return;
+    const event = events[currentIndex];
+    if (
+      event?.kind === 'fix.proposed' &&
+      playbackState !== 'awaiting-approval' &&
+      playbackState !== 'applying'
+    ) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPlaybackState('awaiting-approval');
+    }
+  }, [currentIndex, events, playbackState]);
 
   // Detect investigation.complete → state becomes verified
   useEffect(() => {
     if (currentIndex < 0) return;
     const event = events[currentIndex];
     if (event && event.kind === 'investigation.complete') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setPlaybackState('verified');
     }
   }, [currentIndex, events]);

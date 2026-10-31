@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type React from 'react';
 import type { V2Event, PlaybackState } from '../types';
 
 interface NarrationPanelProps {
@@ -7,30 +8,55 @@ interface NarrationPanelProps {
   playbackState: PlaybackState;
 }
 
-function getNarration(event: V2Event): string | null {
+function getNarration(event: V2Event): React.ReactNode | null {
   switch (event.kind) {
     case 'investigation.started':
-      return "There's a suspicious finding at status_codes.py:116. Let me open it.";
+      return <>Reading <code className="font-mono text-sm">status_codes.py</code>…</>;
     case 'file.opened':
-      return 'Reading the surrounding code...';
+      return 'Scanning the surrounding context.';
     case 'hypothesis.formed':
-      return 'Hmm. This is a __doc__ concatenation. Under -OO, Python strips module docstrings — so __doc__ would be None here. That would crash.';
+      return (
+        <>
+          Checking whether <code className="font-mono text-sm">__doc__</code> can be None… Under{' '}
+          <code className="font-mono text-sm">-OO</code>, Python strips docstrings. That would crash here.
+        </>
+      );
     case 'symbol.located':
-      return 'Confirming: __doc__ at line 116.';
+      return (
+        <>
+          Confirmed: <code className="font-mono text-sm">__doc__</code> at line 116.
+        </>
+      );
     case 'chain.resolved':
-      return 'The chain is single-file. The crash site is the cause.';
+      return 'Single-file finding. The crash site is the cause.';
     case 'probe.running':
-      return 'Let me prove it. Running the file under -OO...';
+      return (
+        <>
+          Running the file under <code className="font-mono text-sm">python -OO</code> to see if it actually crashes.
+        </>
+      );
     case 'probe.reproduced':
-      return 'Reproduced. TypeError: NoneType + str.';
+      return (
+        <>
+          It crashes.{' '}
+          <code className="font-mono text-sm">
+            TypeError: unsupported operand type(s) for +: &apos;NoneType&apos; and &apos;str&apos;.
+          </code>
+        </>
+      );
     case 'bug.confirmed':
-      return "That's a real bug. Generating a fix...";
+      return "That's a real bug. Generating a fix.";
     case 'fix.proposed':
-      return "Here's the fix: guard the concatenation with (__doc__ or ''). Want me to apply it?";
+      return (
+        <>
+          Guard the concatenation with{' '}
+          <code className="font-mono text-sm">(__doc__ or &apos;&apos;)</code>. Does that fix it?
+        </>
+      );
     case 'fix.verified':
-      return 'Verified. The probe passes now.';
+      return 'Probe passes now. Verified.';
     case 'investigation.complete':
-      return 'Done. Bug found, fixed, verified.';
+      return 'Done.';
     default:
       return null;
   }
@@ -40,38 +66,38 @@ export function NarrationPanel({ events, currentIndex, playbackState }: Narratio
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Build lines from events
-  const eventLines: string[] = [];
+  // Build narration lines from events
+  const eventLines: React.ReactNode[] = [];
   events.slice(0, currentIndex + 1).forEach((event) => {
     const line = getNarration(event);
-    if (line) eventLines.push(line);
+    if (line !== null) eventLines.push(line);
   });
 
-  // State-driven extra lines (appended once, deduplicated)
-  const [extraLines, setExtraLines] = useState<string[]>([]);
+  // State-driven extra lines (appended once, deduplicated by string key)
+  const [extraLines, setExtraLines] = useState<{ key: string; node: React.ReactNode }[]>([]);
 
   useEffect(() => {
-    if (playbackState === 'awaiting-approval') {
+    if (playbackState === 'applying') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setExtraLines((prev) => {
-        const line = 'Take your time.';
-        return prev.includes(line) ? prev : [...prev, line];
-      });
-    } else if (playbackState === 'applying') {
-      setExtraLines((prev) => {
-        const line = 'Applying...';
-        return prev.includes(line) ? prev : [...prev, line];
+        const key = 'applying';
+        return prev.some((x) => x.key === key) ? prev : [...prev, { key, node: 'Applying…' }];
       });
     } else if (playbackState === 'rejected') {
       setExtraLines((prev) => {
-        const line = 'Dismissed.';
-        return prev.includes(line) ? prev : [...prev, line];
+        const key = 'rejected';
+        return prev.some((x) => x.key === key) ? prev : [...prev, { key, node: 'Fix dismissed.' }];
       });
     } else if (playbackState === 'idle') {
       setExtraLines([]);
     }
   }, [playbackState]);
 
-  const allLines = [...eventLines, ...extraLines];
+  const allLines: React.ReactNode[] = [
+    ...eventLines,
+    ...extraLines.map((x) => x.node),
+  ];
+
   const currentLineIndex = allLines.length - 1;
 
   useEffect(() => {
@@ -83,33 +109,29 @@ export function NarrationPanel({ events, currentIndex, playbackState }: Narratio
   return (
     <div
       ref={containerRef}
-      className="bg-slate-900 border-t border-slate-800 font-mono text-sm text-slate-300 overflow-y-auto p-3"
-      style={{ height: '140px', flexShrink: 0 }}
+      aria-live="polite"
+      aria-label="Investigation narration"
+      className="bg-aegis-surface border-t border-aegis-line text-sm text-slate-300 overflow-y-auto p-3"
+      style={{ height: '120px', flexShrink: 0 }}
     >
-      <style>{`
-        @keyframes aegis-narration-in {
-          from { opacity: 0; transform: translateY(4px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
       {allLines.length === 0 && (
-        <p className="text-slate-600 italic">Press ▶ Play to start the investigation…</p>
+        <p className="text-slate-600 italic">Waiting to start…</p>
       )}
       {allLines.map((line, idx) => {
         const isCurrent = idx === currentLineIndex;
         return (
           <p
-            key={`${idx}-${line.slice(0, 20)}`}
+            key={idx}
+            className={[
+              isCurrent ? 'font-medium' : 'opacity-60',
+              'motion-safe:animate-aegis-narration-in',
+            ].join(' ')}
             style={{
-              opacity: 0,
-              animation: 'aegis-narration-in 0.3s ease-out forwards',
-              fontWeight: isCurrent ? 700 : 400,
+              animationFillMode: 'forwards',
+              opacity: isCurrent ? undefined : undefined,
             }}
           >
-            <span className="text-slate-600 mr-2 select-none" style={{ opacity: isCurrent ? 1 : 0.6 }}>
-              {String(idx + 1).padStart(2, '0')}
-            </span>
-            <span style={{ opacity: isCurrent ? 1 : 0.6 }}>{line}</span>
+            {line}
           </p>
         );
       })}

@@ -4,37 +4,39 @@ interface CtaProps {
 
 export function Cta({ onWatchAgain }: CtaProps) {
   return (
-    <section className="min-h-screen flex items-center justify-center bg-slate-950 px-4">
-      <div className="max-w-2xl mx-auto text-center space-y-8">
-        {/* Headline */}
-        <h2 className="text-5xl md:text-6xl font-bold text-slate-100">
-          This is v2.0.
+    <section className="py-24 bg-aegis-bg px-4">
+      <div className="max-w-2xl mx-auto text-center space-y-6">
+        <h2 className="text-4xl font-bold text-slate-100">
+          Bug found. Fix proven. Yours to approve.
         </h2>
-
-        {/* Paragraph 1 */}
-        <p className="text-xl text-slate-400 leading-relaxed">
-          AEGIS PRO v1.0 shipped and is live in production. The pipeline finds bugs, generates
-          fixes, and verifies them against the repo&rsquo;s own tests.
+        <p className="text-lg text-slate-400 leading-relaxed">
+          AEGIS PRO scans your codebase, reproduces the crash, patches it, and runs your tests —
+          before you ever see a diff. You review what passed, not what might work.
         </p>
-
-        {/* Paragraph 2 */}
-        <p className="text-xl text-slate-400 leading-relaxed">
-          v2.0 is what that pipeline becomes: an ambient agent that works in your editor, in front
-          of you, at human pace.
-        </p>
-
-        {/* Closing line */}
-        <p className="text-2xl text-slate-200 font-semibold">
-          The engine is done. This is the body.
-        </p>
-
-        {/* Button */}
-        <button
-          onClick={onWatchAgain}
-          className="border border-slate-600 hover:border-slate-400 text-slate-300 hover:text-slate-100 font-semibold px-8 py-4 rounded-xl text-lg transition-colors duration-200 cursor-pointer"
-        >
-          Watch it again
-        </button>
+        <div className="flex flex-col sm:flex-row gap-4 justify-center pt-4">
+          <a
+            href="/demo"
+            className="px-6 py-3 bg-aegis-green hover:bg-green-600 text-white font-semibold rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-aegis-amber"
+          >
+            Try the live demo
+          </a>
+          <a
+            href="https://github.com/MakerYuichi/Aegis-pro"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-6 py-3 border border-aegis-line hover:border-slate-500 text-slate-300 hover:text-slate-100 font-semibold rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-aegis-amber"
+          >
+            View on GitHub
+          </a>
+        </div>
+        <div className="pt-4">
+          <button
+            onClick={onWatchAgain}
+            className="text-sm text-slate-500 hover:text-slate-300 underline underline-offset-4 transition-colors focus:outline-none focus:ring-2 focus:ring-aegis-amber rounded cursor-pointer"
+          >
+            Watch it again
+          </button>
+        </div>
       </div>
     </section>
   );

@@ -1,0 +1,41 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "findings": [
+    {
+      "id": "F01",
+      "severity": "MEDIUM",
+      "title": "CalloutLayer component tree lists scrollContainerRef and visibleCallouts[] props not in CalloutLayerProps interface",
+      "where": "design.md component tree vs tasks.md TASK 05 CalloutLayerProps interface",
+      "fix": "Update component tree to match TASK 05 interface: remove scrollContainerRef and visibleCallouts[], replace with events/currentIndex. Align design.md Validation Rules to say callouts are derived internally in CalloutLayer."
+    },
+    {
+      "id": "F02",
+      "severity": "MEDIUM",
+      "title": "DiffView placed inside overflow-hidden EditorCard — clips aegis-diff-fadein entrance animation",
+      "where": "tasks.md TASK 10 layout JSX; design.md EditorCard spec (overflow-hidden on outer div)",
+      "fix": "Move DiffView outside EditorCard as a sibling in the editor column div, OR restrict overflow-hidden to EditorCard's inner content area only and render DiffView in the outer normal flow. Update TASK 10 JSX pseudocode."
+    },
+    {
+      "id": "F03",
+      "severity": "MEDIUM",
+      "title": "TASK 03 acceptance test requires tsc --noEmit to pass, but adding reducedMotion param to usePlayback breaks LandingPage call site until TASK 12 is done",
+      "where": "tasks.md TASK 03 acceptance test; LandingPage.tsx call site usePlayback(events)",
+      "fix": "Change TASK 03 acceptance test to test hook behavior only (timer, reducedMotion guard). Move the tsc --noEmit build-clean check to TASK 12, or add the LandingPage call-site update to TASK 03's scope."
+    },
+    {
+      "id": "F04",
+      "severity": "NIT",
+      "title": "CodeView component tree shows lineHeight but not reducedMotion; TASK 04 says 'consider' adding reducedMotion to CodeViewProps — decision left open",
+      "where": "design.md component tree (CodeView props); tasks.md TASK 04",
+      "fix": "Resolve 'consider' by adding reducedMotion?: boolean to CodeViewProps (consistent with prop-drilling pattern used everywhere else) and updating component tree to show it."
+    },
+    {
+      "id": "F05",
+      "severity": "NIT",
+      "title": "TASK 10 derives isVerified via gutterState === 'green' but design.md EditorCard spec implies playbackState === 'verified' — coupling is indirect and inconsistent with source",
+      "where": "tasks.md TASK 10 steps 6-7; design.md EditorCard spec; existing V2DemoSection.tsx source",
+      "fix": "In TASK 10, derive isVerified = playbackState === 'verified' directly (matching existing source pattern). Keep gutterState derivation separate from isVerified."
+    }
+  ],
+  "reviewDoc": "/Users/sanchiagarwal/VS_Code/aegis-pro/frontend/src/v2/.agents/tasks/design-review.md"
+}

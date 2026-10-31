@@ -1,12 +1,12 @@
 [
   { "kind": "investigation.started", "symbol": "__doc__", "file": "requests/status_codes.py", "line": 116 },
   { "kind": "file.opened", "file": "requests/status_codes.py", "line": 116 },
-  { "kind": "hypothesis.formed", "text": "The crash site is a __doc__ concatenation. Under -OO, __doc__ is None, so None + '\\n' raises TypeError." },
+  { "kind": "hypothesis.formed", "text": "The crash site is a __doc__ concatenation. Under -OO, __doc__ is None, so None + '\\n' raises TypeError.", "line": 116 },
   { "kind": "symbol.located", "symbol": "__doc__", "file": "requests/status_codes.py", "line": 116 },
   { "kind": "chain.resolved", "chain": [{ "file": "requests/status_codes.py", "line": 116, "symbol": "__doc__", "reason": "crash site" }] },
   { "kind": "probe.running", "flags": ["-OO"] },
-  { "kind": "probe.reproduced", "error": "TypeError: unsupported operand type(s) for +: 'NoneType' and 'str'" },
-  { "kind": "bug.confirmed", "fix_location": "requests/status_codes.py", "failure_mode": "crashes on import under python -OO because __doc__ is None" },
+  { "kind": "probe.reproduced", "error": "TypeError: unsupported operand type(s) for +: 'NoneType' and 'str'", "line": 116 },
+  { "kind": "bug.confirmed", "fix_location": "requests/status_codes.py", "failure_mode": "crashes on import under python -OO because __doc__ is None", "line": 116 },
   { "kind": "fix.proposed", "diff": "- __doc__ = (__doc__ + '\\n' + ...)\n+ __doc__ = ((__doc__ or '') + '\\n' + ...)" },
   { "kind": "fix.verified", "passed": true, "output": "Probe failed before fix, passed after. Verified." },
   { "kind": "investigation.complete", "result": "verified" }
