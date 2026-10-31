@@ -10,90 +10,50 @@ function getCalloutColors(kind: V2Event['kind']): {
   border: string;
   bg: string;
   text: string;
-  connector: string;
+  label: string;
 } {
   switch (kind) {
     case 'hypothesis.formed':
+      return { border: 'border-amber-500', bg: 'bg-amber-500/10', text: 'text-amber-400', label: 'Hypothesis' };
     case 'symbol.located':
-      return {
-        border: 'border-aegis-amber',
-        bg: 'bg-aegis-amber/10',
-        text: 'text-aegis-amber',
-        connector: 'border-aegis-amber',
-      };
+      return { border: 'border-amber-500', bg: 'bg-amber-500/10', text: 'text-amber-400', label: 'Symbol located' };
     case 'probe.reproduced':
-      return {
-        border: 'border-aegis-red',
-        bg: 'bg-aegis-red/10',
-        text: 'text-aegis-red',
-        connector: 'border-aegis-red',
-      };
+      return { border: 'border-red-500', bg: 'bg-red-500/10', text: 'text-red-400', label: 'Reproduced' };
     case 'bug.confirmed':
-      return {
-        border: 'border-aegis-green',
-        bg: 'bg-aegis-green/10',
-        text: 'text-aegis-green',
-        connector: 'border-aegis-green',
-      };
+      return { border: 'border-green-500', bg: 'bg-green-500/10', text: 'text-green-400', label: 'Bug confirmed' };
     default:
-      return {
-        border: 'border-slate-600',
-        bg: 'bg-slate-800/80',
-        text: 'text-slate-300',
-        connector: 'border-slate-600',
-      };
+      return { border: 'border-slate-600', bg: 'bg-slate-800', text: 'text-slate-400', label: '' };
   }
 }
 
-function getCalloutContent(event: V2Event): { title: string; body: string } | null {
+function getCalloutBody(event: V2Event): string | null {
   switch (event.kind) {
-    case 'hypothesis.formed':
-      return { title: 'Hypothesis', body: event.text };
-    case 'symbol.located':
-      return { title: 'Symbol located', body: `${event.symbol} · line ${event.line} · ${event.file}` };
-    case 'probe.reproduced':
-      return { title: 'Reproduced', body: event.error };
-    case 'bug.confirmed':
-      return { title: 'Bug confirmed', body: event.failure_mode };
-    default:
-      return null;
+    case 'hypothesis.formed':  return event.text;
+    case 'symbol.located':     return `${event.symbol} · line ${event.line}`;
+    case 'probe.reproduced':   return event.error;
+    case 'bug.confirmed':      return event.failure_mode;
+    default:                   return null;
   }
 }
 
-export function CalloutCard({ event, topPx, reducedMotion }: CalloutCardProps) {
-  const content = getCalloutContent(event);
-  if (!content) return null;
+export function CalloutCard({ event, reducedMotion }: Omit<CalloutCardProps, 'topPx'> & { topPx: number }) {
+  const body = getCalloutBody(event);
+  if (!body) return null;
 
   const colors = getCalloutColors(event.kind);
-  const LINE_HEIGHT = 20;
 
   return (
-    <>
-      {/* Horizontal dashed connector from gutter right-edge to callout left-edge */}
-      <div
-        className={`absolute pointer-events-none border-t border-dashed ${colors.connector}`}
-        style={{
-          left: '3rem',   // right edge of w-12 gutter
-          right: '17rem', // w-60 (240px) + right-4 (16px) = 256px from right; 17rem ≈ 272px — gives small gap
-          top: topPx + LINE_HEIGHT / 2,
-          height: 1,
-        }}
-      />
-      {/* Callout card */}
-      <div
-        className={[
-          'absolute right-4 w-60 rounded-md border p-3 text-xs pointer-events-auto',
-          colors.border,
-          colors.bg,
-          reducedMotion ? '' : 'motion-safe:animate-aegis-callout-in',
-        ]
-          .filter(Boolean)
-          .join(' ')}
-        style={{ top: topPx }}
-      >
-        <p className={`font-semibold mb-1 ${colors.text}`}>{content.title}</p>
-        <p className="text-slate-300 leading-relaxed break-words">{content.body}</p>
-      </div>
-    </>
+    <div
+      className={[
+        'w-full rounded border-l-4 p-2.5',
+        colors.border,
+        colors.bg,
+        reducedMotion ? '' : 'motion-safe:animate-aegis-callout-in',
+      ].filter(Boolean).join(' ')}
+      style={{ marginBottom: '8px' }}
+    >
+      <p className={`text-xs font-semibold mb-0.5 ${colors.text}`}>{colors.label}</p>
+      <p className="text-xs text-slate-300 leading-relaxed break-words">{body}</p>
+    </div>
   );
 }
