@@ -1,10 +1,10 @@
 @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,200..800&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
 .ap {
-  --ink: #151b2d;
-  --ink-2: #1b2339;
-  --ink-3: #232c46;
-  --line: rgba(160, 174, 214, 0.15);
+  --ink: #0d1117;
+  --ink-2: #161b27;
+  --ink-3: #1e2535;
+  --line: rgba(160, 174, 214, 0.10);
   --text: #e8ebf5;
   --muted: #9aa4c2;
   --faint: #5d6888;
@@ -39,7 +39,7 @@
 .ap-gutter {
   position: absolute; top: 0; bottom: 0; left: 0; z-index: 1;
   width: var(--gutter); margin: 0; padding: 0; list-style: none; overflow: hidden;
-  background: rgba(0, 0, 0, 0.12); border-right: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.025); border-right: 1px solid var(--line);
   pointer-events: none; user-select: none;
 }
 .ap-ln { height: var(--grid); padding-right: 22px; text-align: right; font: 400 12px/var(--grid) var(--mono); color: var(--faint); transition: color 0.4s; }
@@ -66,7 +66,7 @@
 /* Nav */
 .ap-nav {
   position: sticky; top: 0; z-index: 20; height: 64px; padding-left: var(--gutter);
-  background: rgba(21, 27, 45, 0.84); backdrop-filter: blur(12px);
+  background: rgba(13, 17, 23, 0.88); backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--line);
 }
 .ap-nav-in { display: flex; align-items: center; gap: 32px; height: 64px; }

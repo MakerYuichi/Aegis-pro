@@ -10,12 +10,12 @@ export default {
       colors: {
         // AEGIS PRO v2 semantic tokens
         aegis: {
-          bg:      '#0A0F1A',
-          surface: '#111827',
-          line:    '#1F2937',
-          amber:   '#D97706',
-          red:     '#DC2626',
-          green:   '#16A34A',
+          bg:      '#0d1117',
+          surface: '#161b27',
+          line:    '#21293a',
+          amber:   '#f2b84b',
+          red:     '#f0716f',
+          green:   '#62d6a0',
         },
         // Light mode colors
         light: {
@@ -70,8 +70,8 @@ export default {
       },
       keyframes: {
         glow: {
-          '0%': { boxShadow: '0 0 5px rgba(59, 130, 246, 0.2)' },
-          '100%': { boxShadow: '0 0 20px rgba(59, 130, 246, 0.6)' },
+          '0%': { boxShadow: '0 0 5px rgba(242, 184, 75, 0.2)' },
+          '100%': { boxShadow: '0 0 20px rgba(242, 184, 75, 0.6)' },
         },
         slideIn: {
           '0%': { transform: 'translateY(-10px)', opacity: 0 },
