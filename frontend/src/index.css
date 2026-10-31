@@ -1,12 +1,30 @@
 @tailwind base;
+
 @tailwind components;
+
 @tailwind utilities;
 
-html {
-  scroll-behavior: smooth;
+/* ── Global ──────────────────────────────────────────────────────── */
+
+/* Smooth anchor scrolling, only for people who haven't asked for less motion */
+
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
 }
 
-/* Light mode specific styles */
+/* Remove Vite default styles */
+
+#root {
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  text-align: left;
+}
+
+/* ── Theme variables ─────────────────────────────────────────────── */
+
 .light {
   --bg-primary: #FFFFFF;
   --bg-secondary: #F8FAFC;
@@ -16,7 +34,6 @@ html {
   --card-bg: #FFFFFF;
 }
 
-/* Dark mode specific styles */
 .dark {
   --bg-primary: #0F172A;
   --bg-secondary: #1E293B;
@@ -26,88 +43,43 @@ html {
   --card-bg: #1E293B;
 }
 
-/* Custom Scrollbar - Light mode */
-.light ::-webkit-scrollbar {
-  width: 8px;
-}
-.light ::-webkit-scrollbar-track {
-  background: #F1F5F9;
-  border-radius: 4px;
-}
-.light ::-webkit-scrollbar-thumb {
-  background: #CBD5E1;
-  border-radius: 4px;
-}
-.light ::-webkit-scrollbar-thumb:hover {
-  background: #94A3B8;
-}
+/* ── Scrollbars (dashboard) ──────────────────────────────────────── */
 
-/* Custom Scrollbar - Dark mode */
-.dark ::-webkit-scrollbar {
-  width: 8px;
-}
-.dark ::-webkit-scrollbar-track {
-  background: #1E293B;
-  border-radius: 4px;
-}
-.dark ::-webkit-scrollbar-thumb {
-  background: #475569;
-  border-radius: 4px;
-}
-.dark ::-webkit-scrollbar-thumb:hover {
-  background: #64748B;
-}
+.light ::-webkit-scrollbar { width: 8px; height: 8px; }
+.light ::-webkit-scrollbar-track { background: #F1F5F9; border-radius: 4px; }
+.light ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 4px; }
+.light ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
 
-/* Custom scrollbar class */
-.custom-scrollbar::-webkit-scrollbar {
-  width: 8px;
-}
+.dark ::-webkit-scrollbar { width: 8px; height: 8px; }
+.dark ::-webkit-scrollbar-track { background: #1E293B; border-radius: 4px; }
+.dark ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #64748B; }
 
-.light .custom-scrollbar::-webkit-scrollbar-track {
-  background: #F1F5F9;
-}
+.custom-scrollbar::-webkit-scrollbar { width: 8px; }
+.light .custom-scrollbar::-webkit-scrollbar-track { background: #F1F5F9; }
+.dark .custom-scrollbar::-webkit-scrollbar-track { background: #1E293B; }
+.light .custom-scrollbar::-webkit-scrollbar-thumb { background: #CBD5E1; }
+.dark .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; }
+.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #64748B; }
 
-.dark .custom-scrollbar::-webkit-scrollbar-track {
-  background: #1E293B;
-}
+/* ── Theme-switch transitions ────────────────────────────────────── */
 
-.light .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: #CBD5E1;
-}
+/* :where() gives this zero specificity, so Tailwind's transition-* utilities
+   (and any component's own transitions) always win over it. The landing page
+   (.ap) manages its own motion and is excluded. */
 
-.dark .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: #475569;
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #64748B;
-}
-
-/* Smooth transitions */
-* {
-  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease, box-shadow 0.3s ease;
-}
-
-/* Loading animation */
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
+@media (prefers-reduced-motion: no-preference) {
+  :where(*:not(.ap):not(.ap *)) {
+    transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease, box-shadow 0.3s ease;
   }
 }
 
-/* Remove Vite default styles */
-#root {
-  max-width: 100%;
-  margin: 0;
-  padding: 0;
-  text-align: left;
+/* ── Utilities ───────────────────────────────────────────────────── */
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
-h1 {
-  font-size: inherit;
-}
-
-/* Glass Effect - Light mode */
 .light .glass-effect {
   background: rgba(255, 255, 255, 0.8);
   backdrop-filter: blur(12px);
@@ -115,7 +87,6 @@ h1 {
   border: 1px solid rgba(226, 232, 240, 0.5);
 }
 
-/* Glass Effect - Dark mode */
 .dark .glass-effect {
   background: rgba(30, 41, 59, 0.8);
   backdrop-filter: blur(12px);
@@ -123,34 +94,21 @@ h1 {
   border: 1px solid rgba(51, 65, 85, 0.5);
 }
 
-/* Glow Effects - Light mode */
 .light .neon-glow {
-  box-shadow: 0 0 20px rgba(59, 130, 246, 0.2),
-              0 0 40px rgba(59, 130, 246, 0.1);
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.2), 0 0 40px rgba(59, 130, 246, 0.1);
 }
 
-/* Glow Effects - Dark mode */
 .dark .neon-glow {
-  box-shadow: 0 0 20px rgba(59, 130, 246, 0.4),
-              0 0 40px rgba(59, 130, 246, 0.2);
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.4), 0 0 40px rgba(59, 130, 246, 0.2);
 }
 
-/* Animation for pulse effect */
 @keyframes pulse-glow {
-  0%, 100% {
-    box-shadow: 0 0 5px rgba(59, 130, 246, 0.5);
-  }
-  50% {
-    box-shadow: 0 0 20px rgba(59, 130, 246, 0.8),
-                0 0 30px rgba(59, 130, 246, 0.4);
-  }
+  0%, 100% { box-shadow: 0 0 5px rgba(59, 130, 246, 0.5); }
+  50% { box-shadow: 0 0 20px rgba(59, 130, 246, 0.8), 0 0 30px rgba(59, 130, 246, 0.4); }
 }
 
-.pulse-glow {
-  animation: pulse-glow 2s ease-in-out infinite;
-}
+.pulse-glow { animation: pulse-glow 2s ease-in-out infinite; }
 
-/* Gradient Text */
 .gradient-text {
   background: linear-gradient(135deg, #3B82F6, #8B5CF6, #EC4899);
   -webkit-background-clip: text;
@@ -158,7 +116,10 @@ h1 {
   background-clip: text;
 }
 
-/* AEGIS PRO v2 animation keyframes */
+/* ── AEGIS PRO v2: demo component keyframes ──────────────────────── */
+
+/* Used by Callout, NarrationPanel, DiffView and the progress bar. Keep these. */
+
 @keyframes aegis-callout-in {
   from { opacity: 0; transform: translateX(8px); }
   to   { opacity: 1; transform: translateX(0); }
@@ -179,3 +140,32 @@ h1 {
   100% { transform: translateX(400%); }
 }
 
+/* ── AEGIS PRO v2: landing page host (.ap) ───────────────────────── */
+
+/* The page's own styles live in src/v2/landing/landing.css. These rules cover
+   what only global CSS can: the viewport, the root background and page scrollbar. */
+
+/* Dark viewport: native dark scrollbar, no white flash on overscroll */
+
+html:has(.ap) {
+  color-scheme: dark;
+  background: #0d1117;
+  scrollbar-color: #3a4566 #0d1117;
+}
+
+html:has(.ap) body {
+  background: #0d1117;
+}
+
+/* Inner scrollbars (code blocks) must beat the .light/.dark rules above:
+   same specificity, declared later. */
+
+.ap ::-webkit-scrollbar { width: 8px; height: 8px; }
+.ap ::-webkit-scrollbar-track { background: transparent; }
+.ap ::-webkit-scrollbar-thumb { background: #3a4566; border-radius: 4px; }
+.ap ::-webkit-scrollbar-thumb:hover { background: #4b5882; }
+
+.ap ::selection {
+  background: rgba(242, 184, 75, 0.3);
+  color: #fff;
+}
